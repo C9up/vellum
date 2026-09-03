@@ -16,6 +16,7 @@ import type {
 	DocumentInfo,
 	DocumentMetadata,
 	StampOptions as NativeStampOptions,
+	TextStampOptions as NativeTextStampOptions,
 	PageDimensions,
 	PageSize,
 	RenderOptions,
@@ -246,4 +247,14 @@ export function stampNative(
 	options: NativeStampOptions,
 ): Promise<Buffer> {
 	return edit("STAMP_FAILED", (loaded) => loaded.stamp(pdf, image, options));
+}
+
+export function stampTextNative(
+	pdf: Buffer,
+	text: string,
+	options: NativeTextStampOptions,
+): Promise<Buffer> {
+	return edit("STAMP_TEXT_FAILED", (loaded) =>
+		loaded.stampText(pdf, text, options),
+	);
 }

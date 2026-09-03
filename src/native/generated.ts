@@ -78,6 +78,25 @@ export interface StampOptions {
 	opacity?: number;
 }
 
+/** Where and how a line of text is written onto a page. */
+
+export interface TextStampOptions {
+	/** Which page, counting from zero. Absent writes on every page. */
+	page?: number;
+	/** Points from the left edge. Default 0. */
+	x?: number;
+	/** Points from the TOP edge, to the text's baseline. Default 0. */
+	y?: number;
+	/** Type size in points. Default 12. */
+	size?: number;
+	/** One of the 14 standard fonts, e.g. `"Helvetica"`, `"Times-Roman"`. */
+	font?: string;
+	/** `#rgb` or `#rrggbb`. Default black. */
+	color?: string;
+	/** 0 is invisible, 1 is opaque. Default 1. */
+	opacity?: number;
+}
+
 export declare function inspect(bytes: Buffer): DocumentInfo;
 
 export declare function createBlank(pages: Array<PageSize>): Buffer;
@@ -123,4 +142,10 @@ export declare function stamp(
 	pdf: Buffer,
 	image: Buffer,
 	options?: StampOptions | undefined | null,
+): Promise<Buffer>;
+
+export declare function stampText(
+	pdf: Buffer,
+	text: string,
+	options?: TextStampOptions | undefined | null,
 ): Promise<Buffer>;

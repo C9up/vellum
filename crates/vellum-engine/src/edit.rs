@@ -30,7 +30,7 @@ fn save(mut document: Document) -> Result<Vec<u8>, String> {
 /// Without this, a page whose `MediaBox` lives on its parent comes out of a
 /// merge or a split with no size at all — which readers fall back to Letter
 /// for, quietly resizing a French A4 document.
-fn flatten_inheritance(document: &mut Document) {
+pub(crate) fn flatten_inheritance(document: &mut Document) {
     let page_ids: Vec<ObjectId> = document.get_pages().into_values().collect();
 
     for page_id in page_ids {

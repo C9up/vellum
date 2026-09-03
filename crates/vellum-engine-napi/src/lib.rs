@@ -483,3 +483,88 @@ pub fn stamp(pdf: Buffer, image: Buffer, options: Option<StampOptions>) -> Async
         options,
     })
 }
+
+/// Where and how a line of text is written onto a page.
+#[napi(object)]
+pub struct TextStampOptions {
+    /// Which page, counting from zero. Absent writes on every page.
+    pub page: Option<u32>,
+    /// Points from the left edge. Default 0.
+    pub x: Option<f64>,
+    /// Points from the TOP edge, to the text's baseline. Default 0.
+    pub y: Option<f64>,
+    /// Type size in points. Default 12.
+    pub size: Option<f64>,
+    /// One of the 14 standard fonts, e.g. `"Helvetica"`, `"Times-Roman"`.
+    pub font: Option<String>,
+    /// `#rgb` or `#rrggbb`. Default black.
+    pub color: Option<String>,
+    /// 0 is invisible, 1 is opaque. Default 1.
+    pub opacity: Option<f64>,
+}
+
+pub struct StampTextTask {
+    pdf: Vec<u8>,
+    text: String,
+    options: vellum_engine::TextStampOptions,
+}
+
+impl Task for StampTextTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("writing text onto a document", || {
+            vellum_engine::stamp_text(&self.pdf, &self.text, &self.options)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn stamp_text(
+    pdf: Buffer,
+    text: String,
+    options: Option<TextStampOptions>,
+) -> Result<AsyncTask<StampTextTask>> {
+    let defaults = vellum_engine::TextStampOptions::default();
+    let options = match options {
+        None => defaults,
+        Some(given) => {
+            let font = match given.font.as_deref() {
+                Some(name) => {
+                    vellum_engine::StandardFont::parse(name).map_err(Error::from_reason)?
+                }
+                None => defaults.font,
+            };
+            // The colour parser is the engine's, so `#rgb` means the same
+            // thing here as it does for a render background.
+            let color = match given.color.as_deref() {
+                Some(value) => {
+                    let [red, green, blue, _] =
+                        vellum_engine::parse_color(value).map_err(Error::from_reason)?;
+                    [red, green, blue]
+                }
+                None => defaults.color,
+            };
+            vellum_engine::TextStampOptions {
+                page: given.page,
+                x: given.x.map_or(defaults.x, |value| value as f32),
+                y: given.y.map_or(defaults.y, |value| value as f32),
+                size: given.size.map_or(defaults.size, |value| value as f32),
+                font,
+                color,
+                opacity: given.opacity.map_or(defaults.opacity, |value| value as f32),
+            }
+        }
+    };
+
+    Ok(AsyncTask::new(StampTextTask {
+        pdf: pdf.to_vec(),
+        text,
+        options,
+    }))
+}

@@ -26,6 +26,7 @@ import {
 	selectPagesNative,
 	splitNative,
 	stampNative,
+	stampTextNative,
 } from "./native.js";
 
 /** Image encodings a page can be rasterised to. */
@@ -43,6 +44,41 @@ export interface VellumConfig {
 	quality?: number;
 	/** Default background: `#rgb`, `#rrggbb`, `#rrggbbaa` or `"transparent"`. */
 	background?: string;
+}
+
+/**
+ * One of the 14 fonts every PDF reader is required to have.
+ *
+ * They can be referenced without being embedded, which is why writing text
+ * adds nothing to the file and needs no font to be supplied.
+ */
+export type StandardFont =
+	| "Helvetica"
+	| "Helvetica-Bold"
+	| "Helvetica-Oblique"
+	| "Times-Roman"
+	| "Times-Bold"
+	| "Times-Italic"
+	| "Courier"
+	| "Courier-Bold";
+
+/** Where and how a line of text is written onto a page. */
+export interface TextStampOptions extends PageOptions {
+	/** Points from the left edge. Default 0. */
+	x?: number;
+	/**
+	 * Points from the top edge, to the text's BASELINE — the line the letters
+	 * sit on, not the top of their bounding box.
+	 */
+	y?: number;
+	/** Type size in points. Default 12. */
+	size?: number;
+	/** Default `"Helvetica"`. */
+	font?: StandardFont;
+	/** `#rgb` or `#rrggbb`. Default black. */
+	color?: string;
+	/** 0 is invisible, 1 is opaque. */
+	opacity?: number;
 }
 
 /** Where and how an image is laid onto a page. */
@@ -256,6 +292,39 @@ export class Vellum {
 			y: options.y,
 			width: options.width,
 			height: options.height,
+			opacity: options.opacity,
+		});
+	}
+
+	/**
+	 * Write a line of text onto the document.
+	 *
+	 * ```ts
+	 * const marked = await vellum.stampText(invoice, 'PAYÉ', {
+	 *   page: 1, x: 400, y: 80, size: 24, color: '#c00', opacity: 0.6,
+	 * })
+	 * ```
+	 *
+	 * Uses the 14 standard fonts, which a PDF may reference without embedding
+	 * — so nothing is added to the file and no font has to be supplied. The
+	 * trade-off is the WinAnsi character set: Western European text is
+	 * covered, and anything outside it is refused rather than mangled.
+	 *
+	 * Naming no page writes on every page, which is what a draft marking
+	 * wants.
+	 */
+	async stampText(
+		pdf: Buffer,
+		text: string,
+		options: TextStampOptions = {},
+	): Promise<Buffer> {
+		return stampTextNative(pdf, text, {
+			page: options.page === undefined ? undefined : this.#pageIndex(options),
+			x: options.x,
+			y: options.y,
+			size: options.size,
+			font: options.font,
+			color: options.color,
 			opacity: options.opacity,
 		});
 	}

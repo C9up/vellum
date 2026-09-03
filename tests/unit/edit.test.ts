@@ -167,6 +167,38 @@ describe("Vellum — document operations", () => {
 		await expect(vellum.pageCount(stamped)).resolves.toBe(2);
 	});
 
+	it("writes text that comes back out of the extractor", async () => {
+		const marked = await vellum.stampText(createBlank([A4]), "PAYÉ", {
+			page: 1,
+			x: 400,
+			y: 80,
+			size: 24,
+			color: "#c00",
+		});
+
+		// Written, encoded and read back — the whole round trip in one check.
+		await expect(vellum.extractText(marked, { page: 1 })).resolves.toBe("PAYÉ");
+	});
+
+	it("refuses text a standard font cannot carry", async () => {
+		// Refused rather than silently stripped: losing a character from a
+		// contract is worse than failing.
+		await expect(
+			vellum.stampText(createBlank([A4]), "договор", {}),
+		).rejects.toThrow(/WinAnsi/);
+	});
+
+	it("writes on every page when no page is named", async () => {
+		const marked = await vellum.stampText(createBlank([A4, A4]), "BROUILLON", {
+			x: 40,
+			y: 100,
+		});
+
+		await expect(vellum.extractText(marked, { page: 2 })).resolves.toBe(
+			"BROUILLON",
+		);
+	});
+
 	it("refuses bytes that are not a PDF", async () => {
 		const notAPdf = Buffer.from("not a PDF");
 

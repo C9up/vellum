@@ -14,11 +14,13 @@ mod edit;
 mod metadata;
 mod render;
 mod stamp;
+mod stamp_text;
 mod text;
 
 pub use edit::{merge, rotate, select_pages, split};
 pub use metadata::{metadata, DocumentMetadata};
 pub use stamp::{stamp_image, StampOptions};
+pub use stamp_text::{stamp_text, StandardFont, TextStampOptions};
 pub use text::{extract_text, extract_text_all};
 
 pub use render::{

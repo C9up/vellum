@@ -45,6 +45,11 @@ const signed = await vellum.stamp(workOrder, signature, {
   page: 1, x: 380, y: 690, width: 140,
 })
 const draft = await vellum.stamp(pdf, watermark, { opacity: 0.15 })
+
+// Writing text onto it
+const marked = await vellum.stampText(invoice, 'PAYÉ', {
+  x: 400, y: 80, size: 24, color: '#c00', opacity: 0.6,
+})
 ```
 
 Pages are numbered from **1** — the number printed on the page, not an array
@@ -133,11 +138,23 @@ It works by re-embedding each existing page as a Form XObject and drawing over
 it, through krilla's `pdf` feature. (Krilla's README says embedding existing
 pages is out of scope; its published manifest says otherwise.)
 
+`stampText` writes a line of text. It uses the 14 standard fonts — `Helvetica`,
+`Helvetica-Bold`, `Helvetica-Oblique`, `Times-Roman`, `Times-Bold`,
+`Times-Italic`, `Courier`, `Courier-Bold` — which a PDF may reference *without
+embedding*: nothing is added to the file and no font has to be supplied. The
+trade-off is the WinAnsi character set. Western European text is covered,
+accents and typographic punctuation included; anything outside it is refused
+rather than mangled, because silently dropping a character from a contract is
+worse than failing. For `stampText`, `y` is the text's baseline.
+
+Text written onto a page is escaped, so a document title cannot inject content
+stream operators.
+
 ## Status
 
 Rendering to images, metadata, text extraction, document operations and
-stamping are complete. Authoring text content and form filling are the work
-ahead; `createBlank` is the part of those paths that exists today.
+stamping — image and text — are complete. Filling interactive forms (AcroForm)
+and embedding custom fonts are the work ahead.
 
 ## Building the native engine
 

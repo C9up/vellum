@@ -29,6 +29,8 @@ export type {
 	PageOptions,
 	RenderOptions,
 	StampOptions,
+	StandardFont,
+	TextStampOptions,
 	VellumConfig,
 } from "./Vellum.js";
 export { Vellum } from "./Vellum.js";
