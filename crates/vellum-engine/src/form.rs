@@ -216,7 +216,7 @@ fn collect_fields(
     field_id: ObjectId,
     prefix: &str,
     seen: &mut HashSet<ObjectId>,
-    out: &mut Vec<FormField>,
+    out: &mut Vec<(ObjectId, FormField)>,
 ) {
     // Guards a /Kids cycle, which a crafted document can carry.
     if !seen.insert(field_id) {
@@ -269,7 +269,9 @@ fn collect_fields(
         _ => Vec::new(),
     };
 
-    out.push(FormField {
+    out.push((
+        field_id,
+        FormField {
         name,
         kind,
         value: value_of(document, field),
@@ -281,7 +283,8 @@ fn collect_fields(
         max_length: inherited(document, field, b"MaxLen")
             .and_then(|value| value.as_i64().ok())
             .and_then(|value| u32::try_from(value).ok()),
-    });
+        },
+    ));
 }
 
 /// Every interactive field in the document, in the order the form declares
@@ -289,34 +292,45 @@ fn collect_fields(
 pub fn form_fields(bytes: &[u8]) -> Result<Vec<FormField>, String> {
     let document =
         Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
+    Ok(fields_of(&document)
+        .into_iter()
+        .map(|(_, field)| field)
+        .collect())
+}
+
+/// The same walk, keeping each field's object id.
+///
+/// Filling needs the id to write back to; resolving names a second time would
+/// be a second implementation of §12.7.3's hierarchy rules, free to drift.
+pub(crate) fn fields_of(document: &Document) -> Vec<(ObjectId, FormField)> {
 
     let Ok(catalog) = document.catalog() else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let Some(Object::Dictionary(acro_form)) = catalog
         .get(b"AcroForm")
         .ok()
-        .and_then(|form| resolve(&document, form))
+        .and_then(|form| resolve(document, form))
     else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let Some(Object::Array(roots)) = acro_form
         .get(b"Fields")
         .ok()
-        .and_then(|fields| resolve(&document, fields))
+        .and_then(|fields| resolve(document, fields))
     else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
 
     let mut fields = Vec::new();
     let mut seen = HashSet::new();
     for root in roots {
         if let Ok(id) = root.as_reference() {
-            collect_fields(&document, id, "", &mut seen, &mut fields);
+            collect_fields(document, id, "", &mut seen, &mut fields);
         }
     }
 
-    Ok(fields)
+    fields
 }
 
 #[cfg(test)]
