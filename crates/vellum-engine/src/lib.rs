@@ -12,8 +12,10 @@ use krilla::geom::Size;
 use krilla::page::PageSettings;
 mod metadata;
 mod render;
+mod text;
 
 pub use metadata::{metadata, DocumentMetadata};
+pub use text::{extract_text, extract_text_all};
 
 pub use render::{
     page_dimensions, parse_color, render_all, render_page, ImageFormat, PageDimensions,

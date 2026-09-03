@@ -110,6 +110,51 @@ describe("Vellum — rendering", () => {
 	});
 });
 
+describe("Vellum — text extraction", () => {
+	const blank = createBlank([A4, A4]);
+
+	it("returns an empty string for a page with no text layer", async () => {
+		// A scanned document without OCR is exactly this case: it has no text
+		// to give, which is not an error.
+		await expect(new Vellum().extractText(blank)).resolves.toBe("");
+	});
+
+	it("returns one entry per page", async () => {
+		await expect(new Vellum().extractTextAll(blank)).resolves.toEqual(["", ""]);
+	});
+
+	it("shares the page numbering with render", async () => {
+		const vellum = new Vellum();
+
+		// Same guard, same code: proves #pageIndex is the single place the
+		// public 1-based numbering meets the engine's 0-based index.
+		for (const call of [
+			() => vellum.extractText(blank, { page: 0 }),
+			() => vellum.render(blank, { page: 0 }),
+		]) {
+			try {
+				await call();
+				expect.unreachable("page 0 should be refused");
+			} catch (error) {
+				if (!(error instanceof VellumError)) throw error;
+				expect(error.code).toBe("E_VELLUM_INVALID_PAGE");
+			}
+		}
+	});
+
+	it("refuses a page beyond the document", async () => {
+		await expect(new Vellum().extractText(blank, { page: 3 })).rejects.toThrow(
+			/does not exist/,
+		);
+	});
+
+	it("refuses bytes that are not a PDF", async () => {
+		await expect(
+			new Vellum().extractText(Buffer.from("not a PDF")),
+		).rejects.toThrow(VellumError);
+	});
+});
+
 describe("Vellum — metadata", () => {
 	it("reports nothing for a document that carries no /Info", async () => {
 		// A PDF is valid with no /Info dictionary, and krilla writes none.

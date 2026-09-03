@@ -166,3 +166,32 @@ export function pageDimensionsNative(pdf: Buffer): PageDimensions[] {
 export function metadataNative(pdf: Buffer): DocumentMetadata {
 	return run("INVALID_PDF", (loaded) => loaded.metadata(pdf));
 }
+
+export async function extractTextNative(
+	pdf: Buffer,
+	pageIndex: number,
+): Promise<string> {
+	const loaded = engine();
+	try {
+		return await loaded.extractText(pdf, pageIndex);
+	} catch (error) {
+		throw new VellumError(
+			"EXTRACT_FAILED",
+			error instanceof Error ? error.message : String(error),
+			{ cause: error },
+		);
+	}
+}
+
+export async function extractTextAllNative(pdf: Buffer): Promise<string[]> {
+	const loaded = engine();
+	try {
+		return await loaded.extractTextAll(pdf);
+	} catch (error) {
+		throw new VellumError(
+			"EXTRACT_FAILED",
+			error instanceof Error ? error.message : String(error),
+			{ cause: error },
+		);
+	}
+}

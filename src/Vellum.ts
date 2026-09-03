@@ -14,6 +14,8 @@ import type {
 	PageDimensions,
 } from "./native.js";
 import {
+	extractTextAllNative,
+	extractTextNative,
 	inspectNative,
 	metadataNative,
 	pageDimensionsNative,
@@ -38,14 +40,17 @@ export interface VellumConfig {
 	background?: string;
 }
 
-/** Per-call rendering options. Anything omitted falls back to the config. */
-export interface RenderOptions extends VellumConfig {
+/** Options that address a single page. */
+export interface PageOptions {
 	/**
-	 * Which page to render, counting from 1 — the number printed on the page,
-	 * not an array index.
+	 * Which page, counting from 1 — the number printed on the page, not an
+	 * array index.
 	 */
 	page?: number;
 }
+
+/** Per-call rendering options. Anything omitted falls back to the config. */
+export interface RenderOptions extends VellumConfig, PageOptions {}
 
 export class Vellum {
 	readonly #config: VellumConfig;
@@ -67,17 +72,11 @@ export class Vellum {
 	 * ```
 	 */
 	async render(pdf: Buffer, options: RenderOptions = {}): Promise<Buffer> {
-		const page = options.page ?? 1;
-		if (!Number.isInteger(page) || page < 1) {
-			throw new VellumError(
-				"INVALID_PAGE",
-				`Page numbers start at 1, got ${page}.`,
-			);
-		}
-
-		// The engine addresses pages from zero; the public surface counts from
-		// one. Converted in exactly one place so the two never drift.
-		return renderPageNative(pdf, page - 1, this.#merge(options));
+		return renderPageNative(
+			pdf,
+			this.#pageIndex(options),
+			this.#merge(options),
+		);
 	}
 
 	/**
@@ -114,9 +113,46 @@ export class Vellum {
 		return metadataNative(pdf);
 	}
 
+	/**
+	 * The text of a single page.
+	 *
+	 * ```ts
+	 * const text = await vellum.extractText(pdf, { page: 1 })
+	 * ```
+	 *
+	 * Glyphs come back in the order the page draws them, with a line break
+	 * where the baseline moves. A scanned document with no text layer yields
+	 * an empty string rather than an error — it has no text to give.
+	 */
+	async extractText(pdf: Buffer, options: PageOptions = {}): Promise<string> {
+		return extractTextNative(pdf, this.#pageIndex(options));
+	}
+
+	/** The text of every page, in document order. */
+	async extractTextAll(pdf: Buffer): Promise<string[]> {
+		return extractTextAllNative(pdf);
+	}
+
 	/** How many pages the document has. */
 	async pageCount(pdf: Buffer): Promise<number> {
 		return (await this.inspect(pdf)).pageCount;
+	}
+
+	/**
+	 * Resolve a 1-based page number to the engine's 0-based index.
+	 *
+	 * Shared by every page-addressing method: converted in exactly one place
+	 * so the public numbering and the engine's can never drift apart.
+	 */
+	#pageIndex(options: PageOptions): number {
+		const page = options.page ?? 1;
+		if (!Number.isInteger(page) || page < 1) {
+			throw new VellumError(
+				"INVALID_PAGE",
+				`Page numbers start at 1, got ${page}.`,
+			);
+		}
+		return page - 1;
 	}
 
 	/**

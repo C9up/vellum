@@ -79,3 +79,10 @@ export declare function renderAll(
 export declare function pageDimensions(bytes: Buffer): Array<PageDimensions>;
 
 export declare function metadata(bytes: Buffer): DocumentMetadata;
+
+export declare function extractText(
+	bytes: Buffer,
+	pageIndex: number,
+): Promise<string>;
+
+export declare function extractTextAll(bytes: Buffer): Promise<string[]>;

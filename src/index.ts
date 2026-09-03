@@ -24,7 +24,12 @@ export type {
 	PageSize,
 } from "./native.js";
 export { isNativeAvailable, VellumNativeRequiredError } from "./native.js";
-export type { ImageFormat, RenderOptions, VellumConfig } from "./Vellum.js";
+export type {
+	ImageFormat,
+	PageOptions,
+	RenderOptions,
+	VellumConfig,
+} from "./Vellum.js";
 export { Vellum } from "./Vellum.js";
 
 import type { DocumentInfo, PageSize } from "./native.js";

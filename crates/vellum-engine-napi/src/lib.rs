@@ -255,3 +255,67 @@ pub fn metadata(bytes: Buffer) -> Result<DocumentMetadata> {
         })
     })
 }
+
+/// Extracting text walks the whole content stream, so it goes to the thread
+/// pool for the same reason rasterising does.
+pub struct ExtractTextTask {
+    bytes: Vec<u8>,
+    page_index: u32,
+}
+
+impl Task for ExtractTextTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        match catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vellum_engine::extract_text(&self.bytes, self.page_index)
+        })) {
+            Ok(Ok(text)) => Ok(text),
+            Ok(Err(message)) => Err(Error::from_reason(message)),
+            Err(_) => Err(Error::from_reason("Internal panic while extracting text")),
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+pub struct ExtractTextAllTask {
+    bytes: Vec<u8>,
+}
+
+impl Task for ExtractTextAllTask {
+    type Output = Vec<String>;
+    type JsValue = Vec<String>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        match catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vellum_engine::extract_text_all(&self.bytes)
+        })) {
+            Ok(Ok(pages)) => Ok(pages),
+            Ok(Err(message)) => Err(Error::from_reason(message)),
+            Err(_) => Err(Error::from_reason("Internal panic while extracting text")),
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+#[napi(ts_return_type = "Promise<string>")]
+pub fn extract_text(bytes: Buffer, page_index: u32) -> AsyncTask<ExtractTextTask> {
+    AsyncTask::new(ExtractTextTask {
+        bytes: bytes.to_vec(),
+        page_index,
+    })
+}
+
+#[napi(ts_return_type = "Promise<string[]>")]
+pub fn extract_text_all(bytes: Buffer) -> AsyncTask<ExtractTextAllTask> {
+    AsyncTask::new(ExtractTextAllTask {
+        bytes: bytes.to_vec(),
+    })
+}

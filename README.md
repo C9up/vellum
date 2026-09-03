@@ -27,7 +27,12 @@ const pages = await vellum.renderAll(pdf, { format: 'jpeg', quality: 82 })
 
 // What is in the document
 const { pageCount, version, encrypted } = await vellum.inspect(pdf)
+const { title, author, createdAt } = await vellum.metadata(pdf)
 const sizes = await vellum.dimensions(pdf)
+
+// Its text
+const text = await vellum.extractText(pdf, { page: 1 })
+const perPage = await vellum.extractTextAll(pdf)
 ```
 
 Pages are numbered from **1** — the number printed on the page, not an array
@@ -72,15 +77,31 @@ of one it has.
 | `krilla` | Documents we author — and, through its `pdf` feature, re-embedding pages of an existing file |
 | `image` | JPEG encoding |
 
+Text extraction rides on hayro's interpreter — it already resolves fonts,
+encodings and `/ToUnicode` maps. `pdf-extract` would have been the obvious
+choice but it pins `lopdf ^0.42` against our 0.44, which would put two copies
+of the parser in the binary.
+
 Rasterising an A4 page is around 30ms of pure computation, so it runs on the
 libuv thread pool rather than on the thread serving requests. Every method on
 the service is therefore asynchronous.
 
+## Reading text
+
+Glyphs come back in the order the page draws them, with a line break where the
+baseline moves. That order is the reading order in practice; no reordering by
+coordinates is attempted, because doing it well needs column detection and
+doing it badly makes multi-column pages worse. No spaces are invented either —
+a PDF encodes its own, and guessing them from gaps duplicates them.
+
+A scanned document with no text layer yields an empty string rather than an
+error: it has no text to give.
+
 ## Status
 
-Rendering to images is complete. Authoring content, editing existing files and
-form filling are the work ahead; `createBlank` and `inspect` are the parts of
-those paths that exist today.
+Rendering to images, metadata and text extraction are complete. Authoring
+content, editing existing files and form filling are the work ahead;
+`createBlank` is the part of those paths that exists today.
 
 ## Building the native engine
 
