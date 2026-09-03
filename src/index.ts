@@ -20,6 +20,7 @@ export { VellumError } from "./errors.js";
 export type {
 	DocumentInfo,
 	DocumentMetadata,
+	FormField,
 	PageDimensions,
 	PageSize,
 } from "./native.js";

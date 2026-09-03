@@ -199,6 +199,17 @@ describe("Vellum — document operations", () => {
 		);
 	});
 
+	it("reports no fields for a document without a form", async () => {
+		// Most PDFs carry no AcroForm; absent is not an error.
+		await expect(vellum.formFields(createBlank([A4]))).resolves.toEqual([]);
+	});
+
+	it("refuses bytes that are not a PDF when reading a form", async () => {
+		await expect(vellum.formFields(Buffer.from("not a PDF"))).rejects.toThrow(
+			VellumError,
+		);
+	});
+
 	it("refuses bytes that are not a PDF", async () => {
 		const notAPdf = Buffer.from("not a PDF");
 

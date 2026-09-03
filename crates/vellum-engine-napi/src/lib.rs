@@ -568,3 +568,47 @@ pub fn stamp_text(
         options,
     }))
 }
+
+/// One interactive field of a document's form.
+#[napi(object)]
+pub struct FormField {
+    /// The fully qualified name — every ancestor's partial name joined with
+    /// dots. This is the name used to fill the field in.
+    pub name: String,
+    /// `"text"`, `"checkbox"`, `"radio"`, `"pushButton"`, `"dropdown"`,
+    /// `"listBox"` or `"signature"`.
+    pub kind: String,
+    pub value: Option<String>,
+    /// What a choice field offers, or the states a checkbox and radio accept.
+    /// A checkbox's "on" state is chosen by the document, so ticking it means
+    /// writing one of these.
+    pub options: Vec<String>,
+    pub read_only: bool,
+    pub required: bool,
+    pub multiline: bool,
+    pub password: bool,
+    pub max_length: Option<u32>,
+}
+
+#[napi]
+pub fn form_fields(bytes: Buffer) -> Result<Vec<FormField>> {
+    let owned = bytes.to_vec();
+    wrap(move || {
+        vellum_engine::form_fields(&owned).map(|fields| {
+            fields
+                .into_iter()
+                .map(|field| FormField {
+                    name: field.name,
+                    kind: field.kind.as_str().to_string(),
+                    value: field.value,
+                    options: field.options,
+                    read_only: field.read_only,
+                    required: field.required,
+                    multiline: field.multiline,
+                    password: field.password,
+                    max_length: field.max_length,
+                })
+                .collect()
+        })
+    })
+}

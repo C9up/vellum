@@ -15,6 +15,7 @@ import { VellumError } from "./errors.js";
 import type {
 	DocumentInfo,
 	DocumentMetadata,
+	FormField,
 	StampOptions as NativeStampOptions,
 	TextStampOptions as NativeTextStampOptions,
 	PageDimensions,
@@ -45,6 +46,7 @@ type NativeVellum = typeof import("./native/generated.js");
 export type {
 	DocumentInfo,
 	DocumentMetadata,
+	FormField,
 	PageDimensions,
 	PageSize,
 } from "./native/generated.js";
@@ -257,4 +259,8 @@ export function stampTextNative(
 	return edit("STAMP_TEXT_FAILED", (loaded) =>
 		loaded.stampText(pdf, text, options),
 	);
+}
+
+export function formFieldsNative(pdf: Buffer): FormField[] {
+	return run("INVALID_PDF", (loaded) => loaded.formFields(pdf));
 }

@@ -30,6 +30,9 @@ const { pageCount, version, encrypted } = await vellum.inspect(pdf)
 const { title, author, createdAt } = await vellum.metadata(pdf)
 const sizes = await vellum.dimensions(pdf)
 
+// Its form
+const fields = await vellum.formFields(mandate)
+
 // Its text
 const text = await vellum.extractText(pdf, { page: 1 })
 const perPage = await vellum.extractTextAll(pdf)
@@ -150,11 +153,30 @@ worse than failing. For `stampText`, `y` is the text's baseline.
 Text written onto a page is escaped, so a document title cannot inject content
 stream operators.
 
+## Interactive forms
+
+`formFields` lists a document's AcroForm fields in declaration order. `name` is
+the fully qualified name — every ancestor's partial name joined with dots —
+which is the name a field is filled in by.
+
+Two details of PDF 32000-1 §12.7.3 that a caller would otherwise trip on, and
+which this resolves for them: a field's type, flags and value are *inherited*
+down `/Parent`, so a field commonly declares none of them itself; and a
+checkbox or radio's "on" state is chosen by the DOCUMENT (`/Yes`, `/On`, `/1`,
+…), not fixed by the spec. Those accepted states are reported in `options`,
+because writing anything else leaves the control untouched.
+
+For a choice field, `options` reports the *exported* values rather than the
+labels — the export value is what gets written back.
+
+Reading is implemented; writing values, regenerating appearance streams and
+flattening are the work ahead.
+
 ## Status
 
-Rendering to images, metadata, text extraction, document operations and
-stamping — image and text — are complete. Filling interactive forms (AcroForm)
-and embedding custom fonts are the work ahead.
+Rendering to images, metadata, text extraction, document operations, stamping
+— image and text — and form inspection are complete. Filling forms and
+embedding custom fonts are the work ahead.
 
 ## Building the native engine
 

@@ -97,6 +97,33 @@ export interface TextStampOptions {
 	opacity?: number;
 }
 
+/** One interactive field of a document's form. */
+
+export interface FormField {
+	/**
+	 * The fully qualified name — every ancestor's partial name joined with
+	 * dots. This is the name used to fill the field in.
+	 */
+	name: string;
+	/**
+	 * `"text"`, `"checkbox"`, `"radio"`, `"pushButton"`, `"dropdown"`,
+	 * `"listBox"` or `"signature"`.
+	 */
+	kind: string;
+	value?: string;
+	/**
+	 * What a choice field offers, or the states a checkbox and radio accept.
+	 * A checkbox's "on" state is chosen by the document, so ticking it means
+	 * writing one of these.
+	 */
+	options: Array<string>;
+	readOnly: boolean;
+	required: boolean;
+	multiline: boolean;
+	password: boolean;
+	maxLength?: number;
+}
+
 export declare function inspect(bytes: Buffer): DocumentInfo;
 
 export declare function createBlank(pages: Array<PageSize>): Buffer;
@@ -149,3 +176,5 @@ export declare function stampText(
 	text: string,
 	options?: TextStampOptions | undefined | null,
 ): Promise<Buffer>;
+
+export declare function formFields(bytes: Buffer): Array<FormField>;

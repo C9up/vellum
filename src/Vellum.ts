@@ -11,11 +11,13 @@ import { VellumError } from "./errors.js";
 import type {
 	DocumentInfo,
 	DocumentMetadata,
+	FormField,
 	PageDimensions,
 } from "./native.js";
 import {
 	extractTextAllNative,
 	extractTextNative,
+	formFieldsNative,
 	inspectNative,
 	mergeNative,
 	metadataNative,
@@ -327,6 +329,26 @@ export class Vellum {
 			color: options.color,
 			opacity: options.opacity,
 		});
+	}
+
+	/**
+	 * The interactive fields of the document's form, in declaration order.
+	 *
+	 * ```ts
+	 * for (const field of await vellum.formFields(mandate)) {
+	 *   console.log(field.name, field.kind, field.value)
+	 * }
+	 * ```
+	 *
+	 * `name` is the fully qualified name — the one used to fill the field in.
+	 * For a checkbox or a radio group, `options` lists the states the DOCUMENT
+	 * accepts: their "on" state is not a fixed name, and writing anything else
+	 * leaves the control untouched.
+	 *
+	 * A document with no form yields an empty list rather than an error.
+	 */
+	async formFields(pdf: Buffer): Promise<FormField[]> {
+		return formFieldsNative(pdf);
 	}
 
 	/** How many pages the document has. */
