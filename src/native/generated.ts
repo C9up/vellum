@@ -61,6 +61,23 @@ export interface DocumentMetadata {
 	modifiedAt?: string;
 }
 
+/** Where and how an image is laid onto a page. */
+
+export interface StampOptions {
+	/** Which page, counting from zero. Absent stamps every page. */
+	page?: number;
+	/** Points from the left edge. Default 0. */
+	x?: number;
+	/** Points from the TOP edge. Default 0. */
+	y?: number;
+	/** Drawn width in points. With `height` absent, the ratio is kept. */
+	width?: number;
+	/** Drawn height in points. With `width` absent, the ratio is kept. */
+	height?: number;
+	/** 0 is invisible, 1 is opaque. Default 1. */
+	opacity?: number;
+}
+
 export declare function inspect(bytes: Buffer): DocumentInfo;
 
 export declare function createBlank(pages: Array<PageSize>): Buffer;
@@ -100,4 +117,10 @@ export declare function rotate(
 	bytes: Buffer,
 	degrees: number,
 	pages?: Array<number> | undefined | null,
+): Promise<Buffer>;
+
+export declare function stamp(
+	pdf: Buffer,
+	image: Buffer,
+	options?: StampOptions | undefined | null,
 ): Promise<Buffer>;

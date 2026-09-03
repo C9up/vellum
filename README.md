@@ -39,6 +39,12 @@ const dossier = await vellum.merge([contract, annexe])
 const extract = await vellum.selectPages(pdf, [1, 3, 4])
 const parts = await vellum.split(pdf)
 const upright = await vellum.rotate(scan, 90, { pages: [1] })
+
+// Stamping it — a signature, a photo, a watermark
+const signed = await vellum.stamp(workOrder, signature, {
+  page: 1, x: 380, y: 690, width: 140,
+})
+const draft = await vellum.stamp(pdf, watermark, { opacity: 0.15 })
 ```
 
 Pages are numbered from **1** — the number printed on the page, not an array
@@ -115,11 +121,23 @@ attributes onto the page first.
 Rotation adds to whatever a page already carries, because a scan can arrive
 already turned.
 
+## Stamping
+
+`stamp` draws an image onto a document — the signature a technician traces on a
+tablet, a photo attached to a report, a watermark on a draft. PNG and JPEG are
+accepted, chosen by file signature rather than by name. Coordinates count from
+the top-left corner, the way a screen layout is written. Naming no page stamps
+every page, which is what a watermark wants.
+
+It works by re-embedding each existing page as a Form XObject and drawing over
+it, through krilla's `pdf` feature. (Krilla's README says embedding existing
+pages is out of scope; its published manifest says otherwise.)
+
 ## Status
 
-Rendering to images, metadata, text extraction and document operations are
-complete. Authoring content and form filling are the work ahead; `createBlank`
-is the part of those paths that exists today.
+Rendering to images, metadata, text extraction, document operations and
+stamping are complete. Authoring text content and form filling are the work
+ahead; `createBlank` is the part of those paths that exists today.
 
 ## Building the native engine
 

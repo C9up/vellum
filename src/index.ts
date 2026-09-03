@@ -28,6 +28,7 @@ export type {
 	ImageFormat,
 	PageOptions,
 	RenderOptions,
+	StampOptions,
 	VellumConfig,
 } from "./Vellum.js";
 export { Vellum } from "./Vellum.js";

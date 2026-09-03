@@ -25,6 +25,7 @@ import {
 	rotateNative,
 	selectPagesNative,
 	splitNative,
+	stampNative,
 } from "./native.js";
 
 /** Image encodings a page can be rasterised to. */
@@ -42,6 +43,25 @@ export interface VellumConfig {
 	quality?: number;
 	/** Default background: `#rgb`, `#rrggbb`, `#rrggbbaa` or `"transparent"`. */
 	background?: string;
+}
+
+/** Where and how an image is laid onto a page. */
+export interface StampOptions extends PageOptions {
+	/**
+	 * Points from the left edge. Default 0.
+	 *
+	 * Coordinates count from the TOP-LEFT corner, the way a screen layout is
+	 * written.
+	 */
+	x?: number;
+	/** Points from the top edge. Default 0. */
+	y?: number;
+	/** Drawn width in points. With `height` absent, the ratio is kept. */
+	width?: number;
+	/** Drawn height in points. With `width` absent, the ratio is kept. */
+	height?: number;
+	/** 0 is invisible, 1 is opaque. A watermark usually wants about 0.15. */
+	opacity?: number;
 }
 
 /** Options that address a single page. */
@@ -209,6 +229,35 @@ export class Vellum {
 			degrees,
 			options.pages ? this.#pageIndexes(options.pages) : undefined,
 		);
+	}
+
+	/**
+	 * Draw an image onto the document — a signature, a photo, a watermark.
+	 *
+	 * ```ts
+	 * const signed = await vellum.stamp(workOrder, signature, {
+	 *   page: 1, x: 380, y: 690, width: 140,
+	 * })
+	 * ```
+	 *
+	 * PNG and JPEG are accepted, chosen by signature rather than by file name.
+	 * Omitting `page` stamps every page, which is what a watermark wants.
+	 */
+	async stamp(
+		pdf: Buffer,
+		image: Buffer,
+		options: StampOptions = {},
+	): Promise<Buffer> {
+		return stampNative(pdf, image, {
+			// Absent means every page here, so the 1-based conversion only
+			// applies when a page was actually named.
+			page: options.page === undefined ? undefined : this.#pageIndex(options),
+			x: options.x,
+			y: options.y,
+			width: options.width,
+			height: options.height,
+			opacity: options.opacity,
+		});
 	}
 
 	/** How many pages the document has. */

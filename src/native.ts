@@ -15,6 +15,7 @@ import { VellumError } from "./errors.js";
 import type {
 	DocumentInfo,
 	DocumentMetadata,
+	StampOptions as NativeStampOptions,
 	PageDimensions,
 	PageSize,
 	RenderOptions,
@@ -237,4 +238,12 @@ export function rotateNative(
 	return edit("ROTATE_FAILED", (loaded) =>
 		loaded.rotate(pdf, degrees, pageIndexes ? [...pageIndexes] : undefined),
 	);
+}
+
+export function stampNative(
+	pdf: Buffer,
+	image: Buffer,
+	options: NativeStampOptions,
+): Promise<Buffer> {
+	return edit("STAMP_FAILED", (loaded) => loaded.stamp(pdf, image, options));
 }

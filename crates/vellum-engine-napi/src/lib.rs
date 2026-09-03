@@ -426,3 +426,60 @@ pub fn rotate(bytes: Buffer, degrees: i64, pages: Option<Vec<u32>>) -> AsyncTask
         pages,
     })
 }
+
+/// Where and how an image is laid onto a page.
+#[napi(object)]
+pub struct StampOptions {
+    /// Which page, counting from zero. Absent stamps every page.
+    pub page: Option<u32>,
+    /// Points from the left edge. Default 0.
+    pub x: Option<f64>,
+    /// Points from the TOP edge. Default 0.
+    pub y: Option<f64>,
+    /// Drawn width in points. With `height` absent, the ratio is kept.
+    pub width: Option<f64>,
+    /// Drawn height in points. With `width` absent, the ratio is kept.
+    pub height: Option<f64>,
+    /// 0 is invisible, 1 is opaque. Default 1.
+    pub opacity: Option<f64>,
+}
+
+pub struct StampTask {
+    pdf: Vec<u8>,
+    image: Vec<u8>,
+    options: vellum_engine::StampOptions,
+}
+
+impl Task for StampTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("stamping a document", || {
+            vellum_engine::stamp_image(&self.pdf, &self.image, &self.options)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn stamp(pdf: Buffer, image: Buffer, options: Option<StampOptions>) -> AsyncTask<StampTask> {
+    let defaults = vellum_engine::StampOptions::default();
+    let options = options.map_or(defaults, |given| vellum_engine::StampOptions {
+        page: given.page,
+        x: given.x.map_or(defaults.x, |value| value as f32),
+        y: given.y.map_or(defaults.y, |value| value as f32),
+        width: given.width.map(|value| value as f32),
+        height: given.height.map(|value| value as f32),
+        opacity: given.opacity.map_or(defaults.opacity, |value| value as f32),
+    });
+
+    AsyncTask::new(StampTask {
+        pdf: pdf.to_vec(),
+        image: image.to_vec(),
+        options,
+    })
+}

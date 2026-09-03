@@ -3,6 +3,16 @@ import { A4, createBlank, Vellum, VellumError } from "../../src/index.js";
 
 const A5 = { width: 419.53, height: 595.28 };
 
+/**
+ * A 1x1 red PNG, assembled from its chunks so no binary fixture is checked in.
+ */
+function redDot(): Buffer {
+	return Buffer.from(
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+		"base64",
+	);
+}
+
 describe("Vellum — document operations", () => {
 	let vellum: Vellum;
 
@@ -116,6 +126,45 @@ describe("Vellum — document operations", () => {
 				expect(error.code).toBe("E_VELLUM_INVALID_ROTATION");
 			}
 		}
+	});
+
+	it("stamps an image onto the document", async () => {
+		// A 1x1 red PNG, written out byte by byte so the test carries no
+		// binary fixture.
+		const dot = redDot();
+
+		const stamped = await vellum.stamp(createBlank([A4, A4]), dot, {
+			page: 1,
+			x: 50,
+			y: 50,
+			width: 100,
+		});
+
+		// Still a readable two-page document, and the page kept its size.
+		await expect(vellum.pageCount(stamped)).resolves.toBe(2);
+		const sizes = await vellum.dimensions(stamped);
+		expect(sizes[0]?.width).toBeCloseTo(A4.width, 0);
+	});
+
+	it("refuses an image that is neither PNG nor JPEG", async () => {
+		await expect(
+			vellum.stamp(createBlank([A4]), Buffer.from("GIF89a"), {}),
+		).rejects.toThrow(/PNG or JPEG/);
+	});
+
+	it("refuses a stamp page beyond the document", async () => {
+		await expect(
+			vellum.stamp(createBlank([A4]), redDot(), { page: 4 }),
+		).rejects.toThrow(/does not exist/);
+	});
+
+	it("stamps every page when no page is named", async () => {
+		// Absent page must mean "all", not "page 1" — the watermark case.
+		const stamped = await vellum.stamp(createBlank([A4, A4]), redDot(), {
+			width: 50,
+		});
+
+		await expect(vellum.pageCount(stamped)).resolves.toBe(2);
 	});
 
 	it("refuses bytes that are not a PDF", async () => {
