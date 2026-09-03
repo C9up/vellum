@@ -264,3 +264,10 @@ export function stampTextNative(
 export function formFieldsNative(pdf: Buffer): FormField[] {
 	return run("INVALID_PDF", (loaded) => loaded.formFields(pdf));
 }
+
+export function fillFormNative(
+	pdf: Buffer,
+	values: Record<string, string>,
+): Promise<Buffer> {
+	return edit("FILL_FAILED", (loaded) => loaded.fillForm(pdf, values));
+}

@@ -11,6 +11,7 @@
 use krilla::geom::Size;
 use krilla::page::PageSettings;
 mod edit;
+mod fill;
 mod form;
 mod metadata;
 mod render;
@@ -19,6 +20,7 @@ mod stamp_text;
 mod text;
 
 pub use edit::{merge, rotate, select_pages, split};
+pub use fill::{fill_form, FieldValue};
 pub use form::{form_fields, FieldKind, FormField};
 pub use metadata::{metadata, DocumentMetadata};
 pub use stamp::{stamp_image, StampOptions};

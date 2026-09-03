@@ -210,6 +210,14 @@ describe("Vellum — document operations", () => {
 		);
 	});
 
+	it("refuses to fill a form that has no such field", async () => {
+		// A document with no form at all: naming any field must fail rather
+		// than quietly produce an unchanged file.
+		await expect(
+			vellum.fillForm(createBlank([A4]), { fullName: "x" }),
+		).rejects.toThrow(/no field named/);
+	});
+
 	it("refuses bytes that are not a PDF", async () => {
 		const notAPdf = Buffer.from("not a PDF");
 

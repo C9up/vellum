@@ -17,6 +17,7 @@ import type {
 import {
 	extractTextAllNative,
 	extractTextNative,
+	fillFormNative,
 	formFieldsNative,
 	inspectNative,
 	mergeNative,
@@ -349,6 +350,33 @@ export class Vellum {
 	 */
 	async formFields(pdf: Buffer): Promise<FormField[]> {
 		return formFieldsNative(pdf);
+	}
+
+	/**
+	 * Fill the named fields of the document's form.
+	 *
+	 * ```ts
+	 * const filled = await vellum.fillForm(mandate, {
+	 *   'assure.nom': 'Amélie Durand',
+	 *   accepted: 'Yes',
+	 *   country: 'CH',
+	 * })
+	 * ```
+	 *
+	 * Keys are the fully qualified names {@link Vellum.formFields} reports.
+	 *
+	 * Each filled field's **appearance stream is regenerated**. Writing the
+	 * value alone is not enough: most readers paint a field from its
+	 * appearance, not from its value, so a document filled without that opens
+	 * looking empty while holding every answer.
+	 *
+	 * A name the form does not have is an error rather than a silent no-op —
+	 * a filled document missing an answer nobody noticed is worse than a
+	 * failure. The same goes for a read-only field, a value over the field's
+	 * maximum length, and a checkbox state the document does not accept.
+	 */
+	async fillForm(pdf: Buffer, values: Record<string, string>): Promise<Buffer> {
+		return fillFormNative(pdf, values);
 	}
 
 	/** How many pages the document has. */

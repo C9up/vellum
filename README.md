@@ -32,6 +32,10 @@ const sizes = await vellum.dimensions(pdf)
 
 // Its form
 const fields = await vellum.formFields(mandate)
+const filled = await vellum.fillForm(mandate, {
+  'assure.nom': 'Amélie Durand',
+  accepted: 'Yes',
+})
 
 // Its text
 const text = await vellum.extractText(pdf, { page: 1 })
@@ -169,14 +173,27 @@ because writing anything else leaves the control untouched.
 For a choice field, `options` reports the *exported* values rather than the
 labels — the export value is what gets written back.
 
-Reading is implemented; writing values, regenerating appearance streams and
-flattening are the work ahead.
+`fillForm` writes values by their qualified name and **regenerates each filled
+field's appearance stream**. That second half is the one that matters: most
+readers paint a field from its appearance, not from its value, so a document
+filled without it opens looking empty while holding every answer. A checkbox or
+radio already ships one appearance per state, so there only the widget's `/AS`
+is repointed.
+
+Refusals are loud rather than silent, because a filled document quietly missing
+an answer is worse than a failure: an unknown field name, a read-only field, a
+value over the declared maximum length, a choice the form does not offer, and a
+checkbox state the document does not accept are all errors.
+
+Two current limits, both from having no glyph metrics: text is left-aligned
+regardless of the field's `/Q`, and a multiline field honours the line breaks
+you write but does not wrap. Flattening is the work ahead.
 
 ## Status
 
 Rendering to images, metadata, text extraction, document operations, stamping
-— image and text — and form inspection are complete. Filling forms and
-embedding custom fonts are the work ahead.
+— image and text — and interactive forms, read and filled, are complete.
+Flattening a filled form and embedding custom fonts are the work ahead.
 
 ## Building the native engine
 

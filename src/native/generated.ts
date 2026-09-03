@@ -178,3 +178,13 @@ export declare function stampText(
 ): Promise<Buffer>;
 
 export declare function formFields(bytes: Buffer): Array<FormField>;
+
+/**
+ * Fill the named fields. Keys are the fully qualified names `formFields`
+ * reports.
+ */
+
+export declare function fillForm(
+	pdf: Buffer,
+	values: Record<string, string>,
+): Promise<Buffer>;

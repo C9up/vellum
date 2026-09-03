@@ -137,7 +137,7 @@ pub(crate) fn to_win_ansi(text: &str) -> Result<Vec<u8>, String> {
 /// otherwise — which does not merely corrupt the output: the remainder of the
 /// caller's text would be read as CONTENT STREAM OPERATORS. Escaping here is
 /// what stops a document title from injecting drawing commands.
-fn escape_literal(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn escape_pdf_literal(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     for byte in bytes {
         if matches!(byte, b'\\' | b'(' | b')') {
@@ -236,7 +236,7 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         return Err("text position must be finite".to_string());
     }
 
-    let encoded = escape_literal(&to_win_ansi(text)?);
+    let encoded = escape_pdf_literal(&to_win_ansi(text)?);
 
     let mut document =
         Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;

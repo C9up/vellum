@@ -272,17 +272,17 @@ fn collect_fields(
     out.push((
         field_id,
         FormField {
-        name,
-        kind,
-        value: value_of(document, field),
-        options,
-        read_only: flags & READ_ONLY != 0,
-        required: flags & REQUIRED != 0,
-        multiline: kind == FieldKind::Text && flags & MULTILINE != 0,
-        password: kind == FieldKind::Text && flags & PASSWORD != 0,
-        max_length: inherited(document, field, b"MaxLen")
-            .and_then(|value| value.as_i64().ok())
-            .and_then(|value| u32::try_from(value).ok()),
+            name,
+            kind,
+            value: value_of(document, field),
+            options,
+            read_only: flags & READ_ONLY != 0,
+            required: flags & REQUIRED != 0,
+            multiline: kind == FieldKind::Text && flags & MULTILINE != 0,
+            password: kind == FieldKind::Text && flags & PASSWORD != 0,
+            max_length: inherited(document, field, b"MaxLen")
+                .and_then(|value| value.as_i64().ok())
+                .and_then(|value| u32::try_from(value).ok()),
         },
     ));
 }
@@ -303,7 +303,6 @@ pub fn form_fields(bytes: &[u8]) -> Result<Vec<FormField>, String> {
 /// Filling needs the id to write back to; resolving names a second time would
 /// be a second implementation of §12.7.3's hierarchy rules, free to drift.
 pub(crate) fn fields_of(document: &Document) -> Vec<(ObjectId, FormField)> {
-
     let Ok(catalog) = document.catalog() else {
         return Vec::new();
     };

@@ -1,5 +1,6 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use std::collections::HashMap;
 use std::panic::catch_unwind;
 
 /// Run engine work with a panic net.
@@ -610,5 +611,38 @@ pub fn form_fields(bytes: Buffer) -> Result<Vec<FormField>> {
                 })
                 .collect()
         })
+    })
+}
+
+pub struct FillFormTask {
+    pdf: Vec<u8>,
+    values: Vec<vellum_engine::FieldValue>,
+}
+
+impl Task for FillFormTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("filling a form", || {
+            vellum_engine::fill_form(&self.pdf, &self.values)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+/// Fill the named fields. Keys are the fully qualified names `formFields`
+/// reports.
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn fill_form(pdf: Buffer, values: HashMap<String, String>) -> AsyncTask<FillFormTask> {
+    AsyncTask::new(FillFormTask {
+        pdf: pdf.to_vec(),
+        values: values
+            .into_iter()
+            .map(|(name, value)| vellum_engine::FieldValue { name, value })
+            .collect(),
     })
 }
