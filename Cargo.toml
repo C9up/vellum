@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["crates/vellum-engine", "crates/vellum-engine-napi"]

@@ -1,0 +1,15 @@
+[package]
+name = "vellum-engine-napi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", features = ["napi4"] }
+napi-derive = { version = "3", features = ["type-def"] }
+vellum-engine = { path = "../vellum-engine" }
+
+[build-dependencies]
+napi-build = "2"

@@ -1,0 +1,19 @@
+[package]
+name = "vellum-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Low-level object-tree surgery on existing documents: merge, split, rotate,
+# metadata, encryption, interactive form fields.
+lopdf = "0.44"
+# High-level authoring. The `pdf` feature pulls hayro-write, which is what
+# lets an existing page be re-embedded as a Form XObject — the basis for
+# stamping and annotating a document we did not produce.
+krilla = { version = "0.8", default-features = false, features = ["pdf", "raster-images", "simple-text"] }
+# Rasterising a page. Pure Rust, so the binary stays self-contained — the
+# reason pdfium was not used despite being more complete.
+hayro = "0.7.1"
+# JPEG encoding only. hayro emits PNG natively, but a scanned A4 at scale 2 is
+# several megabytes as PNG, which is the wrong artefact for a document preview.
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
