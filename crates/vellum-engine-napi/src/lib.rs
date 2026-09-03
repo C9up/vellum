@@ -18,6 +18,21 @@ where
     }
 }
 
+/// Run engine work on a worker thread with a panic net.
+///
+/// A panic on a libuv worker aborts the whole process, and every input here
+/// arrives from an upload, so no task may let one escape.
+fn guarded<T, F>(doing: &str, work: F) -> Result<T>
+where
+    F: FnOnce() -> std::result::Result<T, String>,
+{
+    match catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(message)) => Err(Error::from_reason(message)),
+        Err(_) => Err(Error::from_reason(format!("Internal panic while {doing}"))),
+    }
+}
+
 #[napi(object)]
 pub struct DocumentInfo {
     pub page_count: u32,
@@ -132,15 +147,9 @@ impl Task for RenderPageTask {
     fn compute(&mut self) -> Result<Self::Output> {
         // A panic on a worker thread aborts the process, so a malformed
         // document must not be able to reach one.
-        match catch_unwind(std::panic::AssertUnwindSafe(|| {
+        guarded("rendering a PDF page", || {
             vellum_engine::render_page(&self.bytes, self.page_index, &self.options)
-        })) {
-            Ok(Ok(image)) => Ok(image),
-            Ok(Err(message)) => Err(Error::from_reason(message)),
-            Err(_) => Err(Error::from_reason(
-                "Internal panic while rendering PDF page",
-            )),
-        }
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -158,13 +167,9 @@ impl Task for RenderAllTask {
     type JsValue = Vec<Buffer>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        match catch_unwind(std::panic::AssertUnwindSafe(|| {
+        guarded("rendering a PDF", || {
             vellum_engine::render_all(&self.bytes, &self.options)
-        })) {
-            Ok(Ok(images)) => Ok(images),
-            Ok(Err(message)) => Err(Error::from_reason(message)),
-            Err(_) => Err(Error::from_reason("Internal panic while rendering PDF")),
-        }
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -268,13 +273,9 @@ impl Task for ExtractTextTask {
     type JsValue = String;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        match catch_unwind(std::panic::AssertUnwindSafe(|| {
+        guarded("extracting text", || {
             vellum_engine::extract_text(&self.bytes, self.page_index)
-        })) {
-            Ok(Ok(text)) => Ok(text),
-            Ok(Err(message)) => Err(Error::from_reason(message)),
-            Err(_) => Err(Error::from_reason("Internal panic while extracting text")),
-        }
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -291,13 +292,9 @@ impl Task for ExtractTextAllTask {
     type JsValue = Vec<String>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        match catch_unwind(std::panic::AssertUnwindSafe(|| {
+        guarded("extracting text", || {
             vellum_engine::extract_text_all(&self.bytes)
-        })) {
-            Ok(Ok(pages)) => Ok(pages),
-            Ok(Err(message)) => Err(Error::from_reason(message)),
-            Err(_) => Err(Error::from_reason("Internal panic while extracting text")),
-        }
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -317,5 +314,115 @@ pub fn extract_text(bytes: Buffer, page_index: u32) -> AsyncTask<ExtractTextTask
 pub fn extract_text_all(bytes: Buffer) -> AsyncTask<ExtractTextAllTask> {
     AsyncTask::new(ExtractTextAllTask {
         bytes: bytes.to_vec(),
+    })
+}
+
+/// Rewriting a document parses and re-serialises the whole object tree, so it
+/// belongs on the thread pool alongside rendering.
+pub struct MergeTask {
+    documents: Vec<Vec<u8>>,
+}
+
+impl Task for MergeTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("merging documents", || {
+            vellum_engine::merge(&self.documents)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+pub struct SelectPagesTask {
+    bytes: Vec<u8>,
+    pages: Vec<u32>,
+}
+
+impl Task for SelectPagesTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("selecting pages", || {
+            vellum_engine::select_pages(&self.bytes, &self.pages)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+pub struct SplitTask {
+    bytes: Vec<u8>,
+}
+
+impl Task for SplitTask {
+    type Output = Vec<Vec<u8>>;
+    type JsValue = Vec<Buffer>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("splitting a document", || vellum_engine::split(&self.bytes))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output.into_iter().map(Buffer::from).collect())
+    }
+}
+
+pub struct RotateTask {
+    bytes: Vec<u8>,
+    degrees: i64,
+    pages: Option<Vec<u32>>,
+}
+
+impl Task for RotateTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("rotating pages", || {
+            vellum_engine::rotate(&self.bytes, self.degrees, self.pages.as_deref())
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn merge(documents: Vec<Buffer>) -> AsyncTask<MergeTask> {
+    AsyncTask::new(MergeTask {
+        documents: documents.iter().map(|document| document.to_vec()).collect(),
+    })
+}
+
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn select_pages(bytes: Buffer, pages: Vec<u32>) -> AsyncTask<SelectPagesTask> {
+    AsyncTask::new(SelectPagesTask {
+        bytes: bytes.to_vec(),
+        pages,
+    })
+}
+
+#[napi(ts_return_type = "Promise<Buffer[]>")]
+pub fn split(bytes: Buffer) -> AsyncTask<SplitTask> {
+    AsyncTask::new(SplitTask {
+        bytes: bytes.to_vec(),
+    })
+}
+
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn rotate(bytes: Buffer, degrees: i64, pages: Option<Vec<u32>>) -> AsyncTask<RotateTask> {
+    AsyncTask::new(RotateTask {
+        bytes: bytes.to_vec(),
+        degrees,
+        pages,
     })
 }

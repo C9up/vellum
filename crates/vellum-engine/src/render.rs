@@ -149,9 +149,11 @@ pub fn render_page(
     let pages = pdf.pages();
     let index = usize::try_from(page_index).map_err(|_| "page index out of range".to_string())?;
     let page = pages.get(index).ok_or_else(|| {
+        // Reported in human numbering, not as the index: a caller who asked
+        // for page 8 should not be told that "page 7" is missing.
         format!(
             "page {} does not exist — the document has {}",
-            page_index,
+            page_index + 1,
             pages.len()
         )
     })?;

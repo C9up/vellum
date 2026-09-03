@@ -17,10 +17,14 @@ import {
 	extractTextAllNative,
 	extractTextNative,
 	inspectNative,
+	mergeNative,
 	metadataNative,
 	pageDimensionsNative,
 	renderAllNative,
 	renderPageNative,
+	rotateNative,
+	selectPagesNative,
+	splitNative,
 } from "./native.js";
 
 /** Image encodings a page can be rasterised to. */
@@ -133,6 +137,80 @@ export class Vellum {
 		return extractTextAllNative(pdf);
 	}
 
+	/**
+	 * Join documents end to end, in the order given.
+	 *
+	 * ```ts
+	 * const dossier = await vellum.merge([contract, annexe, signature])
+	 * ```
+	 *
+	 * Attributes a page inherits from its parent — size, resources — are
+	 * materialised onto it first, so a page keeps its own size instead of
+	 * falling back to Letter.
+	 */
+	async merge(pdfs: ReadonlyArray<Buffer>): Promise<Buffer> {
+		if (pdfs.length === 0) {
+			throw new VellumError(
+				"EMPTY_MERGE",
+				"Merging needs at least one document.",
+			);
+		}
+		return mergeNative(pdfs);
+	}
+
+	/**
+	 * Keep only the pages listed, counting from 1, in document order.
+	 *
+	 * ```ts
+	 * const extract = await vellum.selectPages(pdf, [1, 3, 4])
+	 * ```
+	 */
+	async selectPages(
+		pdf: Buffer,
+		pages: ReadonlyArray<number>,
+	): Promise<Buffer> {
+		if (pages.length === 0) {
+			throw new VellumError(
+				"EMPTY_SELECTION",
+				"Selecting needs at least one page.",
+			);
+		}
+		return selectPagesNative(pdf, this.#pageIndexes(pages));
+	}
+
+	/** One single-page document per page, in document order. */
+	async split(pdf: Buffer): Promise<Buffer[]> {
+		return splitNative(pdf);
+	}
+
+	/**
+	 * Rotate pages clockwise by `degrees`, a multiple of 90.
+	 *
+	 * ```ts
+	 * const upright = await vellum.rotate(scan, 90, { pages: [1] })
+	 * ```
+	 *
+	 * The rotation is added to what a page already carries, because a scan can
+	 * arrive already turned.
+	 */
+	async rotate(
+		pdf: Buffer,
+		degrees: number,
+		options: { pages?: ReadonlyArray<number> } = {},
+	): Promise<Buffer> {
+		if (!Number.isInteger(degrees) || degrees % 90 !== 0) {
+			throw new VellumError(
+				"INVALID_ROTATION",
+				`Rotation must be a whole multiple of 90, got ${degrees}.`,
+			);
+		}
+		return rotateNative(
+			pdf,
+			degrees,
+			options.pages ? this.#pageIndexes(options.pages) : undefined,
+		);
+	}
+
 	/** How many pages the document has. */
 	async pageCount(pdf: Buffer): Promise<number> {
 		return (await this.inspect(pdf)).pageCount;
@@ -153,6 +231,16 @@ export class Vellum {
 			);
 		}
 		return page - 1;
+	}
+
+	/**
+	 * Resolve several 1-based page numbers to the engine's 0-based indexes.
+	 *
+	 * Routed through {@link Vellum.#pageIndex} so one method decides what a
+	 * page number means for the whole service.
+	 */
+	#pageIndexes(pages: ReadonlyArray<number>): number[] {
+		return pages.map((page) => this.#pageIndex({ page }));
 	}
 
 	/**

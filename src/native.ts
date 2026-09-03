@@ -195,3 +195,46 @@ export async function extractTextAllNative(pdf: Buffer): Promise<string[]> {
 		);
 	}
 }
+
+async function edit<T>(
+	code: string,
+	work: (engine: NativeVellum) => Promise<T>,
+): Promise<T> {
+	const loaded = engine();
+	try {
+		return await work(loaded);
+	} catch (error) {
+		throw new VellumError(
+			code,
+			error instanceof Error ? error.message : String(error),
+			{ cause: error },
+		);
+	}
+}
+
+export function mergeNative(documents: ReadonlyArray<Buffer>): Promise<Buffer> {
+	return edit("MERGE_FAILED", (loaded) => loaded.merge([...documents]));
+}
+
+export function selectPagesNative(
+	pdf: Buffer,
+	pageIndexes: ReadonlyArray<number>,
+): Promise<Buffer> {
+	return edit("SELECT_FAILED", (loaded) =>
+		loaded.selectPages(pdf, [...pageIndexes]),
+	);
+}
+
+export function splitNative(pdf: Buffer): Promise<Buffer[]> {
+	return edit("SPLIT_FAILED", (loaded) => loaded.split(pdf));
+}
+
+export function rotateNative(
+	pdf: Buffer,
+	degrees: number,
+	pageIndexes?: ReadonlyArray<number>,
+): Promise<Buffer> {
+	return edit("ROTATE_FAILED", (loaded) =>
+		loaded.rotate(pdf, degrees, pageIndexes ? [...pageIndexes] : undefined),
+	);
+}

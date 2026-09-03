@@ -33,6 +33,12 @@ const sizes = await vellum.dimensions(pdf)
 // Its text
 const text = await vellum.extractText(pdf, { page: 1 })
 const perPage = await vellum.extractTextAll(pdf)
+
+// Reshaping it
+const dossier = await vellum.merge([contract, annexe])
+const extract = await vellum.selectPages(pdf, [1, 3, 4])
+const parts = await vellum.split(pdf)
+const upright = await vellum.rotate(scan, 90, { pages: [1] })
 ```
 
 Pages are numbered from **1** — the number printed on the page, not an array
@@ -97,11 +103,23 @@ a PDF encodes its own, and guessing them from gaps duplicates them.
 A scanned document with no text layer yields an empty string rather than an
 error: it has no text to give.
 
+## Reshaping documents
+
+`merge`, `selectPages`, `split` and `rotate` all move pages between page
+trees, which is where PDF hides a trap: `Resources`, `MediaBox`, `CropBox` and
+`Rotate` may live on a parent node and be *inherited* by the page. Re-parent
+such a page naively and it loses its size — readers then fall back to Letter,
+quietly resizing an A4 document. Every operation materialises the inherited
+attributes onto the page first.
+
+Rotation adds to whatever a page already carries, because a scan can arrive
+already turned.
+
 ## Status
 
-Rendering to images, metadata and text extraction are complete. Authoring
-content, editing existing files and form filling are the work ahead;
-`createBlank` is the part of those paths that exists today.
+Rendering to images, metadata, text extraction and document operations are
+complete. Authoring content and form filling are the work ahead; `createBlank`
+is the part of those paths that exists today.
 
 ## Building the native engine
 

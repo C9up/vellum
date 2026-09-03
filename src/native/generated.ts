@@ -86,3 +86,18 @@ export declare function extractText(
 ): Promise<string>;
 
 export declare function extractTextAll(bytes: Buffer): Promise<string[]>;
+
+export declare function merge(documents: Array<Buffer>): Promise<Buffer>;
+
+export declare function selectPages(
+	bytes: Buffer,
+	pages: Array<number>,
+): Promise<Buffer>;
+
+export declare function split(bytes: Buffer): Promise<Buffer[]>;
+
+export declare function rotate(
+	bytes: Buffer,
+	degrees: number,
+	pages?: Array<number> | undefined | null,
+): Promise<Buffer>;

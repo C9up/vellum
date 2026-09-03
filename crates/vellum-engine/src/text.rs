@@ -143,7 +143,7 @@ pub fn extract_text(bytes: &[u8], page_index: u32) -> Result<String, String> {
     let page = pages.get(index).ok_or_else(|| {
         format!(
             "page {} does not exist — the document has {}",
-            page_index,
+            page_index + 1,
             pages.len()
         )
     })?;

@@ -10,10 +10,12 @@
 
 use krilla::geom::Size;
 use krilla::page::PageSettings;
+mod edit;
 mod metadata;
 mod render;
 mod text;
 
+pub use edit::{merge, rotate, select_pages, split};
 pub use metadata::{metadata, DocumentMetadata};
 pub use text::{extract_text, extract_text_all};
 
