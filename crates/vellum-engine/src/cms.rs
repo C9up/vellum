@@ -448,6 +448,28 @@ pub(crate) mod tests {
         assert!(error.contains("private key"), "got {error:?}");
     }
 
+    /// Write the fixture the TypeScript tests use.
+    ///
+    /// They need a real CMS to hang a timestamp on, and cannot build one:
+    /// minting a certificate is not something Node does. What it writes holds
+    /// a certificate and a signature and no private key, so it is safe to keep
+    /// in the repository.
+    ///
+    ///     cargo test -p vellum-engine write_the_typescript_fixture -- --ignored
+    #[test]
+    #[ignore = "regenerates a checked-in fixture"]
+    fn write_the_typescript_fixture() {
+        let (key, certificate) = key_and_certificate();
+        let cms = sign_cms(
+            &[0x42; 32],
+            &key,
+            std::slice::from_ref(&certificate),
+            "2026-09-04T14:30:00Z",
+        )
+        .expect("signing should succeed");
+        std::fs::write("../../tests/fixtures/signature.der", cms).expect("the fixture is written");
+    }
+
     #[test]
     fn reads_the_instant_the_caller_states() {
         // 2026-09-04T14:30:00Z

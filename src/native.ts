@@ -23,6 +23,7 @@ import type {
 	PageSize,
 	PreparedSignature,
 	RenderOptions,
+	TimestampQuery,
 } from "./native/generated.js";
 
 const requireNative = createRequire(import.meta.url);
@@ -303,5 +304,19 @@ export function signCmsNative(
 ): Promise<Buffer> {
 	return edit("SIGN_FAILED", (loaded) =>
 		loaded.signCms(digest, key, [...certificates], signedAt),
+	);
+}
+
+export function timestampQueryNative(cms: Buffer): TimestampQuery {
+	return run("TIMESTAMP_FAILED", (loaded) => loaded.timestampQuery(cms));
+}
+
+export function attachTimestampNative(
+	cms: Buffer,
+	response: Buffer,
+	nonce: Buffer,
+): Buffer {
+	return run("TIMESTAMP_FAILED", (loaded) =>
+		loaded.attachTimestamp(cms, response, nonce),
 	);
 }

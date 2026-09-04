@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it, vi } from "vitest";
 import {
 	A4,
 	createBlank,
 	pkcs8Signer,
 	type Signer,
+	timestamped,
 	Vellum,
 	VellumError,
 } from "../../src/index.js";
@@ -146,5 +149,68 @@ describe("signing with a key the application holds", () => {
 		await expect(
 			vellum.sign(createBlank([A4]), { signer: "internal" }),
 		).rejects.toThrow(/private key/);
+	});
+});
+
+describe("timestamping", () => {
+	/**
+	 * A real CMS, because a timestamp query is built from one. It holds a
+	 * certificate and a signature and no private key — see the engine test
+	 * that writes it.
+	 */
+	function stubSigner(): Signer {
+		const cms = readFileSync(
+			fileURLToPath(new URL("../fixtures/signature.der", import.meta.url)),
+		);
+		return {
+			async sign() {
+				return cms;
+			},
+		};
+	}
+
+	it("posts the query the authority expects", async () => {
+		let seen: { url: string; type: string | null; body: number } | undefined;
+		const fetchSpy = async (url: string | URL, init?: RequestInit) => {
+			const headers = new Headers(init?.headers);
+			const body = init?.body;
+			seen = {
+				url: String(url),
+				type: headers.get("content-type"),
+				body: body instanceof Uint8Array ? body.byteLength : 0,
+			};
+			// Not a timestamp; the point here is what went out.
+			return new Response(new Uint8Array([0x30, 0x00]), { status: 200 });
+		};
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const signer = timestamped(stubSigner(), { url: "https://tsa.test/tsr" });
+		// The answer is nonsense, so attaching fails — after the request.
+		await expect(signer.sign(Buffer.alloc(32))).rejects.toThrow(VellumError);
+
+		expect(seen?.url).toBe("https://tsa.test/tsr");
+		expect(seen?.type).toBe("application/timestamp-query");
+		expect(seen?.body).toBeGreaterThan(0);
+		vi.unstubAllGlobals();
+	});
+
+	it("says so when the authority cannot be reached", async () => {
+		vi.stubGlobal("fetch", async () => {
+			throw new Error("ECONNREFUSED");
+		});
+
+		const signer = timestamped(stubSigner(), { url: "https://tsa.test/tsr" });
+		await expect(signer.sign(Buffer.alloc(32))).rejects.toThrow(
+			/could not be reached/,
+		);
+		vi.unstubAllGlobals();
+	});
+
+	it("says so when the authority answers with an error", async () => {
+		vi.stubGlobal("fetch", async () => new Response("no", { status: 503 }));
+
+		const signer = timestamped(stubSigner(), { url: "https://tsa.test/tsr" });
+		await expect(signer.sign(Buffer.alloc(32))).rejects.toThrow(/answered 503/);
+		vi.unstubAllGlobals();
 	});
 });

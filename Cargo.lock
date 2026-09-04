@@ -2103,6 +2103,7 @@ dependencies = [
  "cms",
  "const-oid 0.9.6",
  "der",
+ "getrandom 0.2.17",
  "hayro",
  "image",
  "krilla",

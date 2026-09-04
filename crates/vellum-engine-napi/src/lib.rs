@@ -825,3 +825,37 @@ pub fn sign_cms(
         signed_at,
     })
 }
+
+/// A query for a timestamp authority, and the nonce it has to echo back.
+#[napi(object)]
+pub struct TimestampQuery {
+    /// The DER to post to the authority.
+    pub query: Buffer,
+    /// Opaque: hand it back to `attachTimestamp` unchanged.
+    pub nonce: Buffer,
+}
+
+/// Build the query to post to a timestamp authority.
+#[napi]
+pub fn timestamp_query(cms: Buffer) -> Result<TimestampQuery> {
+    let (query, nonce) = guarded("building a timestamp query", || {
+        vellum_engine::timestamp_query(&cms)
+    })?;
+    Ok(TimestampQuery {
+        query: Buffer::from(query),
+        nonce: Buffer::from(nonce.to_be_bytes().to_vec()),
+    })
+}
+
+/// Attach the authority's answer to the signature.
+#[napi]
+pub fn attach_timestamp(cms: Buffer, response: Buffer, nonce: Buffer) -> Result<Buffer> {
+    let bytes: [u8; 8] = nonce
+        .as_ref()
+        .try_into()
+        .map_err(|_| Error::from_reason("the nonce is not the one that was handed out"))?;
+    let signed = guarded("attaching a timestamp", || {
+        vellum_engine::attach_timestamp(&cms, &response, u64::from_be_bytes(bytes))
+    })?;
+    Ok(Buffer::from(signed))
+}

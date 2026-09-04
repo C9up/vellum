@@ -7,7 +7,11 @@
  */
 
 import { VellumError } from "./errors.js";
-import { signCmsNative } from "./native.js";
+import {
+	attachTimestampNative,
+	signCmsNative,
+	timestampQueryNative,
+} from "./native.js";
 import type { Signer } from "./Vellum.js";
 
 /** A key you hold, and the certificate that vouches for it. */
@@ -64,6 +68,81 @@ export function pkcs8Signer(options: Pkcs8SignerOptions): Signer {
 				options.key,
 				certificates,
 				new Date().toISOString(),
+			);
+		},
+	};
+}
+
+/** Where to ask for a timestamp, and how. */
+export interface TimestampOptions {
+	/** The authority's RFC 3161 endpoint. */
+	url: string;
+	/** Anything the authority needs, such as an Authorization header. */
+	headers?: Record<string, string>;
+	/** How long to wait before giving up. Default 10 seconds. */
+	timeoutMs?: number;
+}
+
+/**
+ * Add a trusted timestamp to whatever `inner` signs.
+ *
+ * ```ts
+ * signers: {
+ *   internal: timestamped(pkcs8Signer({ key, certificate }), {
+ *     url: 'https://freetsa.org/tsr',
+ *   }),
+ * }
+ * ```
+ *
+ * A signature proves a document has not changed since a key signed it, not
+ * *when*. Once the signing certificate expires, a verifier cannot tell a
+ * signature made while it was valid from one forged afterwards, and stops
+ * accepting it. For a document kept for years — which is most of the documents
+ * anyone bothers to sign — a timestamp is what keeps it verifiable.
+ *
+ * It wraps any signer, so it works over a provider's as well as the local one.
+ * The token goes on as an unsigned attribute, which is what lets it be added
+ * without disturbing the signature.
+ *
+ * The signature grows by a few kilobytes, so a document prepared with a tight
+ * `capacity` may need a larger one.
+ */
+export function timestamped(inner: Signer, options: TimestampOptions): Signer {
+	return {
+		async sign(digest: Buffer): Promise<Buffer> {
+			const cms = await inner.sign(digest);
+			const { query, nonce } = timestampQueryNative(cms);
+
+			let answer: Response;
+			try {
+				answer = await fetch(options.url, {
+					method: "POST",
+					headers: {
+						"content-type": "application/timestamp-query",
+						...options.headers,
+					},
+					body: new Uint8Array(query),
+					signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
+				});
+			} catch (error) {
+				throw new VellumError(
+					"TIMESTAMP_UNREACHABLE",
+					`The timestamp authority at ${options.url} could not be reached.`,
+					{ cause: error },
+				);
+			}
+
+			if (!answer.ok) {
+				throw new VellumError(
+					"TIMESTAMP_REFUSED",
+					`The timestamp authority at ${options.url} answered ${answer.status}.`,
+				);
+			}
+
+			return attachTimestampNative(
+				cms,
+				Buffer.from(await answer.arrayBuffer()),
+				nonce,
 			);
 		},
 	};

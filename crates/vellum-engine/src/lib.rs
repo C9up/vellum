@@ -24,6 +24,7 @@ mod sign;
 mod stamp;
 mod stamp_text;
 mod text;
+mod timestamp;
 
 pub use cms::sign_cms;
 pub use edit::{merge, rotate, select_pages, split};
@@ -35,6 +36,7 @@ pub use sign::{embed_signature, prepare, Prepared, SignatureOptions, DEFAULT_CAP
 pub use stamp::{stamp_image, StampOptions};
 pub use stamp_text::{stamp_text, FontChoice, StandardFont, TextStampOptions};
 pub use text::{extract_text, extract_text_all};
+pub use timestamp::{attach_timestamp, timestamp_query};
 
 pub use render::{
     page_dimensions, parse_color, render_all, render_page, ImageFormat, PageDimensions,

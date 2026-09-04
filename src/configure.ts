@@ -64,6 +64,13 @@ export default defineConfig({
   //     certificate: readFileSync(app.makePath('storage/signing.crt.der')),
   //   }),
   //   qualified: myProviderAdapter({ ... }),
+  //
+  // Wrap any of them in timestamped() to add a trusted timestamp, without
+  // which a signature stops being verifiable once its certificate expires:
+  //
+  //   internal: timestamped(pkcs8Signer({ ... }), {
+  //     url: 'https://freetsa.org/tsr',
+  //   }),
   // },
 })`,
 	);

@@ -337,9 +337,34 @@ A provider is a `Signer` and nothing more, so an adapter is a short function
 returning one. None ship here: naming a vendor would tie an agnostic package to
 one, and an HTTP client is not a dependency it should carry.
 
-**Timestamping** (PAdES B-T) belongs in a signer too. It is worth having for a
-document kept for years: without a trusted timestamp a signature cannot be
-validated once its certificate has expired.
+### Timestamping
+
+`timestamped` wraps any signer, the local one or a provider's:
+
+```ts
+signers: {
+  internal: timestamped(pkcs8Signer({ key, certificate }), {
+    url: 'https://freetsa.org/tsr',
+  }),
+}
+```
+
+A signature proves a document has not changed since a key signed it, not
+*when*. Once the certificate expires a verifier cannot tell a signature made
+while it was valid from one forged afterwards, and stops accepting it. For a
+document kept for years — which is most of the documents anyone bothers to
+sign — this is what keeps it verifiable.
+
+The token goes on as an **unsigned** attribute, which is what lets it be added
+without disturbing the signature. What comes back is checked rather than
+trusted: the authority's status, that it stamped the signature we actually
+sent, and that it answered *this* request rather than replaying an older
+answer. Those are read out of the token's structure, not looked for in its
+bytes — a hash that happens to appear inside a certificate is not a hash the
+authority stamped. A token that cannot be read is refused, which fails closed.
+
+The signature grows by a few kilobytes, so a document prepared with a tight
+`capacity` may need a larger one.
 
 ### On the dependencies
 
@@ -354,8 +379,9 @@ One line of `Cargo.toml` to revisit when they ship.
 
 Rendering to images, metadata, text extraction, document operations, stamping
 — image and text — supplied fonts, interactive forms read, filled, laid out
-and flattened, and signing with a key you hold, are complete. What remains is
-adapters: a certified provider, and a timestamping authority.
+and flattened, and signing with a key you hold, timestamped, are complete.
+What remains is an adapter for a certified provider, which is a short function
+returning a `Signer` and belongs to whoever has the account.
 
 ## Building the native engine
 

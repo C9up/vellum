@@ -158,6 +158,15 @@ export interface PreparedSignature {
 	digest: Buffer;
 }
 
+/** A query for a timestamp authority, and the nonce it has to echo back. */
+
+export interface TimestampQuery {
+	/** The DER to post to the authority. */
+	query: Buffer;
+	/** Opaque: hand it back to `attachTimestamp` unchanged. */
+	nonce: Buffer;
+}
+
 export declare function inspect(bytes: Buffer): DocumentInfo;
 
 export declare function createBlank(pages: Array<PageSize>): Buffer;
@@ -253,3 +262,15 @@ export declare function signCms(
 	certificates: Array<Buffer>,
 	signedAt: string,
 ): Promise<Buffer>;
+
+/** Build the query to post to a timestamp authority. */
+
+export declare function timestampQuery(cms: Buffer): TimestampQuery;
+
+/** Attach the authority's answer to the signature. */
+
+export declare function attachTimestamp(
+	cms: Buffer,
+	response: Buffer,
+	nonce: Buffer,
+): Buffer;
