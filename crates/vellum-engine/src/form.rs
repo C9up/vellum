@@ -83,7 +83,11 @@ fn resolve<'a>(document: &'a Document, object: &'a Object) -> Option<&'a Object>
 ///
 /// `/FT`, `/Ff`, `/V` and `/DA` are all inheritable: a terminal field commonly
 /// declares none of them and takes them from the node above.
-fn inherited<'a>(document: &'a Document, field: &'a Dictionary, key: &[u8]) -> Option<&'a Object> {
+pub(crate) fn inherited<'a>(
+    document: &'a Document,
+    field: &'a Dictionary,
+    key: &[u8],
+) -> Option<&'a Object> {
     let mut current = field;
     let mut seen: HashSet<ObjectId> = HashSet::new();
 

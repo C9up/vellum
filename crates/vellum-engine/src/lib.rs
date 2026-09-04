@@ -15,6 +15,7 @@ mod fill;
 mod flatten;
 mod form;
 mod metadata;
+mod metrics;
 mod render;
 mod stamp;
 mod stamp_text;

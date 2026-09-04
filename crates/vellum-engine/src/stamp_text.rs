@@ -104,14 +104,17 @@ pub(crate) fn to_win_ansi(text: &str) -> Result<Vec<u8>, String> {
         .map(|character| match character {
             '\u{20ac}' => Ok(0x80),
             '\u{201a}' => Ok(0x82),
+            '\u{201e}' => Ok(0x84),
             '\u{0192}' => Ok(0x83),
             '\u{2026}' => Ok(0x85),
             '\u{2020}' => Ok(0x86),
             '\u{2021}' => Ok(0x87),
+            '\u{02c6}' => Ok(0x88),
             '\u{2030}' => Ok(0x89),
             '\u{0160}' => Ok(0x8a),
             '\u{2039}' => Ok(0x8b),
             '\u{0152}' => Ok(0x8c),
+            '\u{017d}' => Ok(0x8e),
             '\u{2018}' => Ok(0x91),
             '\u{2019}' => Ok(0x92),
             '\u{201c}' => Ok(0x93),
@@ -119,9 +122,12 @@ pub(crate) fn to_win_ansi(text: &str) -> Result<Vec<u8>, String> {
             '\u{2022}' => Ok(0x95),
             '\u{2013}' => Ok(0x96),
             '\u{2014}' => Ok(0x97),
+            '\u{02dc}' => Ok(0x98),
+            '\u{2122}' => Ok(0x99),
             '\u{0161}' => Ok(0x9a),
             '\u{203a}' => Ok(0x9b),
             '\u{0153}' => Ok(0x9c),
+            '\u{017e}' => Ok(0x9e),
             '\u{0178}' => Ok(0x9f),
             other => u8::try_from(other as u32).map_err(|_| {
                 format!(
@@ -413,6 +419,49 @@ mod tests {
 
     /// The reason WinAnsi is mapped explicitly rather than truncated to
     /// Latin-1: French uses both accents and typographic punctuation.
+    /// WinAnsi defines every code between 0x80 and 0x9F but five, and the
+    /// encoder has to reach all of them: a trademark sign or a low quotation
+    /// mark is ordinary text, not something to refuse.
+    #[test]
+    fn encodes_the_whole_of_the_windows_block() {
+        let expected = [
+            ('\u{20ac}', 0x80),
+            ('\u{201a}', 0x82),
+            ('\u{0192}', 0x83),
+            ('\u{201e}', 0x84),
+            ('\u{2026}', 0x85),
+            ('\u{2020}', 0x86),
+            ('\u{2021}', 0x87),
+            ('\u{02c6}', 0x88),
+            ('\u{2030}', 0x89),
+            ('\u{0160}', 0x8a),
+            ('\u{2039}', 0x8b),
+            ('\u{0152}', 0x8c),
+            ('\u{017d}', 0x8e),
+            ('\u{2018}', 0x91),
+            ('\u{2019}', 0x92),
+            ('\u{201c}', 0x93),
+            ('\u{201d}', 0x94),
+            ('\u{2022}', 0x95),
+            ('\u{2013}', 0x96),
+            ('\u{2014}', 0x97),
+            ('\u{02dc}', 0x98),
+            ('\u{2122}', 0x99),
+            ('\u{0161}', 0x9a),
+            ('\u{203a}', 0x9b),
+            ('\u{0153}', 0x9c),
+            ('\u{017e}', 0x9e),
+            ('\u{0178}', 0x9f),
+        ];
+        for (character, code) in expected {
+            assert_eq!(
+                to_win_ansi(&character.to_string()).map(|bytes| bytes[0]),
+                Ok(code),
+                "{character:?}"
+            );
+        }
+    }
+
     #[test]
     fn writes_accented_french() {
         let text = "Prévoyance — décès à 65 ans (n°42)";

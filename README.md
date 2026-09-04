@@ -186,9 +186,17 @@ an answer is worse than a failure: an unknown field name, a read-only field, a
 value over the declared maximum length, a choice the form does not offer, and a
 checkbox state the document does not accept are all errors.
 
-Two current limits, both from having no glyph metrics: text is left-aligned
-regardless of the field's `/Q`, and a multiline field honours the line breaks
-you write but does not wrap.
+Text is laid out with the **published widths of the standard fonts**, because
+that is what the reader lays it out with. A field's `/Q` is honoured, a
+multiline field wraps at the width of its box, and a `/DA` asking for size 0
+gets a size chosen to fit. A word too long for the line is broken across lines
+rather than left to run past the edge, where the appearance's bounding box
+would clip it away.
+
+The widths are generated from the URW base-35 metrics by
+`scripts/generate-metrics.py` and cross-checked against published Adobe values
+in the tests — a table that had drifted would not compile its way into a
+release.
 
 `flattenForm` closes the document: every widget's appearance becomes ordinary
 page content, the widget annotations go, and the form itself is dropped. What
@@ -212,8 +220,9 @@ a document that still looks complete.
 ## Status
 
 Rendering to images, metadata, text extraction, document operations, stamping
-— image and text — and interactive forms, read, filled and flattened, are
-complete. Embedding custom fonts and PAdES signing are the work ahead.
+— image and text — and interactive forms, read, filled, laid out and
+flattened, are complete. Embedding custom fonts and PAdES signing are the work
+ahead.
 
 ## Building the native engine
 
