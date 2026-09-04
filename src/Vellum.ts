@@ -82,6 +82,15 @@ export interface VellumConfig {
 	 * the digest of it. Which one signs is therefore a line of configuration.
 	 */
 	signers?: Record<string, Signer>;
+	/**
+	 * Certificates to trust when checking a signature, DER or PEM.
+	 *
+	 * Typically the roots of the authorities your jurisdiction recognises,
+	 * which supervisory bodies publish as a trusted list. Supplying none is a
+	 * position too: every signature then comes back untrusted, which is the
+	 * honest answer rather than a comfortable one.
+	 */
+	trustedAnchors?: ReadonlyArray<Buffer>;
 }
 
 /**
@@ -98,6 +107,15 @@ export interface VellumConfig {
  */
 export interface Signer {
 	sign(digest: Buffer): Promise<Buffer>;
+}
+
+/** What to check a signature against. */
+export interface VerifyOptions {
+	/**
+	 * Certificates to trust as roots, DER or PEM. Falls back to
+	 * `trustedAnchors` in `config/vellum.ts`.
+	 */
+	anchors?: ReadonlyArray<Buffer>;
 }
 
 /** What the signature says about itself. */
@@ -591,11 +609,26 @@ export class Vellum {
 	 * it has since been revoked: that needs a trust store and a live revocation
 	 * check, neither of which belongs in a PDF engine.
 	 *
+	 * `trusted` says a path was found from the signer's certificate to one of
+	 * the anchors you accept, judged **at the moment of signing** rather than
+	 * now — a certificate that has since expired did not retroactively unsign
+	 * anything. `moment` says where that instant came from: a timestamp is
+	 * worth having because it makes it something other than the signer's word.
+	 *
+	 * **Revocation is not checked.** A certificate withdrawn after it was
+	 * issued still looks valid here; a caller who needs to know must ask OCSP
+	 * or a CRL.
+	 *
 	 * A document with no signatures reports none. That is an answer, not a
 	 * failure.
 	 */
-	async verifySignatures(pdf: Buffer): Promise<SignatureReport[]> {
-		return verifySignaturesNative(pdf);
+	async verifySignatures(
+		pdf: Buffer,
+		options: VerifyOptions = {},
+	): Promise<SignatureReport[]> {
+		return verifySignaturesNative(pdf, {
+			anchors: [...(options.anchors ?? this.#config.trustedAnchors ?? [])],
+		});
 	}
 
 	/** How many pages the document has. */

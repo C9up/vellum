@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
 
 use crate::form::fields_of;
+use crate::trust::{evaluate, read_anchors, Moment, TrustOptions};
 
 /// `id-aa-signatureTimeStampToken`.
 const SIGNATURE_TIME_STAMP: const_oid::ObjectIdentifier =
@@ -49,6 +50,14 @@ pub struct SignatureReport {
     /// A timestamp authority has vouched for when — so the signature outlives
     /// the certificate's own validity.
     pub timestamped: bool,
+    /// A path was found from the signer's certificate to a trusted anchor.
+    /// False whenever no anchors were supplied, which is the honest answer.
+    pub trusted: bool,
+    /// That path, the signer first and the anchor last.
+    pub chain: Vec<String>,
+    /// Where the instant used to judge the path came from: a timestamp, the
+    /// signer's own claim, or nowhere.
+    pub moment: &'static str,
     /// Everything that could not be checked, or checked out wrong.
     pub problems: Vec<String>,
 }
@@ -63,6 +72,9 @@ impl SignatureReport {
             signer: None,
             signed_at: None,
             timestamped: false,
+            trusted: false,
+            chain: Vec::new(),
+            moment: Moment::Unknown.as_str(),
             problems: vec![problem],
         }
     }
@@ -100,7 +112,12 @@ fn subject_of(certificate: &Certificate) -> String {
 
 /// Verify one signature, reporting rather than refusing: a caller wants to
 /// know what is wrong with a document, not merely that something is.
-fn verify_one(pdf: &[u8], field: String, signature: &lopdf::Dictionary) -> SignatureReport {
+fn verify_one(
+    pdf: &[u8],
+    field: String,
+    signature: &lopdf::Dictionary,
+    anchors: &[Certificate],
+) -> SignatureReport {
     let Some(range) = byte_range(signature) else {
         return SignatureReport::failed(field, "the signature declares no byte range".to_string());
     };
@@ -132,6 +149,9 @@ fn verify_one(pdf: &[u8], field: String, signature: &lopdf::Dictionary) -> Signa
         signer: None,
         signed_at: None,
         timestamped: false,
+        trusted: false,
+        chain: Vec::new(),
+        moment: Moment::Unknown.as_str(),
         problems: Vec::new(),
     };
     if !report.covers_whole_document {
@@ -234,6 +254,58 @@ fn verify_one(pdf: &[u8], field: String, signature: &lopdf::Dictionary) -> Signa
     };
     report.signer = Some(subject_of(&certificate));
 
+    // Judged when the document was signed, not now: a certificate that has
+    // since expired did not retroactively unsign anything. A timestamp is
+    // worth having because it makes that instant something other than the
+    // signer's own word.
+    let stamped = signer
+        .unsigned_attrs
+        .as_ref()
+        .and_then(|attributes| {
+            attributes
+                .iter()
+                .find(|attribute| attribute.oid == SIGNATURE_TIME_STAMP)
+        })
+        .and_then(|attribute| attribute.values.as_slice().first())
+        .and_then(crate::timestamp::stamped_at);
+    let claimed = attributes
+        .iter()
+        .find(|attribute| attribute.oid == const_oid::db::rfc5911::ID_SIGNING_TIME)
+        .and_then(|attribute| attribute.values.as_slice().first())
+        .and_then(|value| value.to_der().ok())
+        .and_then(|der| cms::attr::SigningTime::from_der(&der).ok())
+        .map(|time| match time {
+            cms::attr::SigningTime::UtcTime(time) => time.to_unix_duration().as_secs(),
+            cms::attr::SigningTime::GeneralTime(time) => time.to_unix_duration().as_secs(),
+        });
+
+    let (at, moment) = match (stamped, claimed) {
+        (Some(at), _) => (Some(at), Moment::Timestamp),
+        (None, Some(at)) => (Some(at), Moment::Claimed),
+        (None, None) => (None, Moment::Unknown),
+    };
+    report.moment = moment.as_str();
+
+    let carried: Vec<Certificate> = signed
+        .certificates
+        .as_ref()
+        .map(|set| {
+            set.0
+                .iter()
+                .filter_map(|choice| match choice {
+                    cms::cert::CertificateChoices::Certificate(certificate) => {
+                        Some(certificate.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let trust = evaluate(&certificate, &carried, anchors, at);
+    report.trusted = trust.trusted;
+    report.chain = trust.chain;
+    report.problems.extend(trust.problems);
+
     let verified = certificate
         .tbs_certificate
         .subject_public_key_info
@@ -272,9 +344,13 @@ fn verify_one(pdf: &[u8], field: String, signature: &lopdf::Dictionary) -> Signa
 ///
 /// A document with no signatures reports none; that is an answer, not a
 /// failure.
-pub fn verify_signatures(pdf: &[u8]) -> Result<Vec<SignatureReport>, String> {
+pub fn verify_signatures(
+    pdf: &[u8],
+    options: &TrustOptions,
+) -> Result<Vec<SignatureReport>, String> {
     let document = Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;
 
+    let (anchors, anchor_problems) = read_anchors(&options.anchors);
     let mut reports = Vec::new();
     for (field_id, field) in fields_of(&document) {
         if field.kind != crate::FieldKind::Signature {
@@ -291,7 +367,11 @@ pub fn verify_signatures(pdf: &[u8]) -> Result<Vec<SignatureReport>, String> {
             });
 
         match signature {
-            Some(signature) => reports.push(verify_one(pdf, field.name, &signature)),
+            Some(signature) => {
+                let mut report = verify_one(pdf, field.name, &signature, &anchors);
+                report.problems.extend(anchor_problems.iter().cloned());
+                reports.push(report);
+            }
             // A signature field with no value is an empty place for one, not a
             // broken signature.
             None => continue,
@@ -303,7 +383,7 @@ pub fn verify_signatures(pdf: &[u8]) -> Result<Vec<SignatureReport>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cms::tests::key_and_certificate;
+    use crate::cms::tests::{key_and_certificate, key_and_chain};
     use crate::{
         create_blank, embed_signature, prepare, sign_cms, stamp_text, SignatureOptions,
         TextStampOptions,
@@ -346,16 +426,67 @@ mod tests {
         embed_signature(&prepared.document, &value).expect("embedding should succeed")
     }
 
+    fn document_signed_with(key: &[u8], certificate: &[u8]) -> Vec<u8> {
+        signed_at(key, certificate, "2026-09-04T14:30:00Z")
+    }
+
+    fn signed_at(key: &[u8], certificate: &[u8], when: &str) -> Vec<u8> {
+        let prepared = prepare(
+            &create_blank(&[(595.28, 841.89)]).unwrap(),
+            &SignatureOptions {
+                signed_at: Some(when.to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("preparing should succeed");
+        let value = sign_cms(
+            &prepared.digest,
+            key,
+            std::slice::from_ref(&certificate.to_vec()),
+            when,
+        )
+        .expect("signing should succeed");
+        embed_signature(&prepared.document, &value).expect("embedding should succeed")
+    }
+
+    /// Base64 for the PEM test, the other way round from the decoder.
+    fn base64_encode(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut buffer = [0u8; 3];
+            buffer[..chunk.len()].copy_from_slice(chunk);
+            let value = u32::from_be_bytes([0, buffer[0], buffer[1], buffer[2]]);
+            for index in 0..4 {
+                if index <= chunk.len() {
+                    out.push(char::from(
+                        ALPHABET[((value >> (18 - index * 6)) & 0x3F) as usize],
+                    ));
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn a_signed_document_checks_out() {
-        let reports = verify_signatures(&signed_document()).expect("it reads");
+        let reports =
+            verify_signatures(&signed_document(), &TrustOptions::default()).expect("it reads");
         assert_eq!(reports.len(), 1);
         let report = &reports[0];
 
         assert!(report.covers_whole_document, "{:?}", report.problems);
         assert!(report.digest_matches, "{:?}", report.problems);
         assert!(report.signature_verifies, "{:?}", report.problems);
-        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        // Integrity is settled; trust is a separate question and, with no
+        // anchors supplied, its answer is no.
+        assert!(!report.trusted);
+        assert_eq!(
+            report.problems,
+            vec!["no trusted anchors were supplied, so nothing can be trusted"]
+        );
         assert!(
             report
                 .signer
@@ -376,7 +507,7 @@ mod tests {
         let mut tampered = signed_document();
         tampered.extend_from_slice(b"\n% and then someone added this\n");
 
-        let reports = verify_signatures(&tampered).expect("it reads");
+        let reports = verify_signatures(&tampered, &TrustOptions::default()).expect("it reads");
         let report = &reports[0];
 
         assert!(
@@ -409,7 +540,7 @@ mod tests {
         // Same length, so nothing moves and only the digest can tell.
         tampered[at + 8] = b'M';
 
-        let reports = verify_signatures(&tampered).expect("it reads");
+        let reports = verify_signatures(&tampered, &TrustOptions::default()).expect("it reads");
         let report = &reports[0];
 
         assert!(report.covers_whole_document, "nothing was added");
@@ -429,7 +560,8 @@ mod tests {
     #[test]
     fn a_timestamped_signature_is_reported_as_one() {
         assert!(
-            !verify_signatures(&signed_document()).expect("it reads")[0].timestamped,
+            !verify_signatures(&signed_document(), &TrustOptions::default()).expect("it reads")[0]
+                .timestamped,
             "the plain one carries none"
         );
 
@@ -453,7 +585,7 @@ mod tests {
         .expect("attaching");
 
         let document = embed_signature(&prepared.document, &stamped).expect("embedding");
-        let report = &verify_signatures(&document).expect("it reads")[0];
+        let report = &verify_signatures(&document, &TrustOptions::default()).expect("it reads")[0];
 
         assert!(report.timestamped, "the timestamp should be reported");
         assert!(
@@ -465,8 +597,11 @@ mod tests {
 
     #[test]
     fn a_document_with_no_signature_reports_none() {
-        let reports =
-            verify_signatures(&create_blank(&[(595.28, 841.89)]).unwrap()).expect("it reads");
+        let reports = verify_signatures(
+            &create_blank(&[(595.28, 841.89)]).unwrap(),
+            &TrustOptions::default(),
+        )
+        .expect("it reads");
         assert!(
             reports.is_empty(),
             "no signatures is an answer, not a fault"
@@ -477,12 +612,126 @@ mod tests {
     /// one, and reporting it as a failure would cry wolf.
     #[test]
     fn an_empty_signature_field_is_not_a_failure() {
-        let reports = verify_signatures(&crate::fill::tests::form_document()).expect("it reads");
+        let reports = verify_signatures(
+            &crate::fill::tests::form_document(),
+            &TrustOptions::default(),
+        )
+        .expect("it reads");
         assert!(reports.is_empty());
+    }
+
+    /// A document signed under an authority the caller accepts. The path runs
+    /// from the signing certificate up to that authority, and every link of it
+    /// is checked.
+    #[test]
+    fn a_certificate_under_a_trusted_authority_is_trusted() {
+        let (key, certificate, authority) = key_and_chain();
+        let document = document_signed_with(&key, &certificate);
+
+        let report = &verify_signatures(
+            &document,
+            &TrustOptions {
+                anchors: vec![authority],
+            },
+        )
+        .expect("it reads")[0];
+
+        assert!(report.trusted, "{:?}", report.problems);
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert_eq!(
+            report.chain.len(),
+            2,
+            "signer then authority: {:?}",
+            report.chain
+        );
+        assert!(report.chain[0].contains("Signer"));
+        assert!(report.chain[1].contains("Authority"));
+        assert_eq!(
+            report.moment, "claimed",
+            "nothing timestamped it, so the instant is the signer's own word"
+        );
+    }
+
+    /// Someone else's authority says nothing about this signature.
+    #[test]
+    fn an_unrelated_anchor_does_not_confer_trust() {
+        let (key, certificate, _) = key_and_chain();
+        let unrelated = crate::cms::tests::unrelated_authority();
+        let document = document_signed_with(&key, &certificate);
+
+        let report = &verify_signatures(
+            &document,
+            &TrustOptions {
+                anchors: vec![unrelated],
+            },
+        )
+        .expect("it reads")[0];
+
+        assert!(!report.trusted);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("no path to a trusted anchor")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// A certificate is judged at the moment of signing, so one that was not
+    /// yet valid then cannot be rescued by being valid now.
+    #[test]
+    fn a_certificate_not_valid_when_it_signed_is_reported() {
+        let (key, certificate, authority) = key_and_chain();
+        // The fixture is valid from 2020; this claims to have signed in 2019.
+        let document = signed_at(&key, &certificate, "2019-06-01T10:00:00Z");
+
+        let report = &verify_signatures(
+            &document,
+            &TrustOptions {
+                anchors: vec![authority],
+            },
+        )
+        .expect("it reads")[0];
+
+        assert!(!report.trusted);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("not valid when the document was signed")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// PEM is what an authority usually publishes, so it has to be accepted
+    /// without the caller converting it first.
+    #[test]
+    fn an_anchor_may_be_pem() {
+        let (key, certificate, authority) = key_and_chain();
+        let document = document_signed_with(&key, &certificate);
+
+        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in base64_encode(&authority).as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+
+        let report = &verify_signatures(
+            &document,
+            &TrustOptions {
+                anchors: vec![pem.into_bytes()],
+            },
+        )
+        .expect("it reads")[0];
+
+        assert!(report.trusted, "{:?}", report.problems);
     }
 
     #[test]
     fn refuses_bytes_that_are_not_a_pdf() {
-        assert!(verify_signatures(b"not a PDF").is_err());
+        assert!(verify_signatures(b"not a PDF", &TrustOptions::default()).is_err());
     }
 }

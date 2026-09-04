@@ -201,6 +201,24 @@ fn check(token: &Any, expected_imprint: &[u8], nonce: u64) -> Result<(), String>
     Err("the timestamp does not say which request it answers".to_string())
 }
 
+/// When the authority says it stamped, which is the one instant in a
+/// signature that does not rest on the signer's own word.
+pub(crate) fn stamped_at(token: &Any) -> Option<u64> {
+    let content: ContentInfo = token.decode_as().ok()?;
+    let signed: SignedData = content.content.decode_as().ok()?;
+    let stamped = signed.encap_content_info.econtent?;
+    let info = OctetString::from_der(&stamped.to_der().ok()?).ok()?;
+    let info = Any::from_der(info.as_bytes()).ok()?;
+
+    let mut reader = der::SliceReader::new(info.value()).ok()?;
+    // version, policy, messageImprint, serialNumber, then genTime.
+    for _ in 0..4 {
+        reader.tlv_bytes().ok()?;
+    }
+    let time: der::asn1::GeneralizedTime = reader.decode().ok()?;
+    Some(time.to_unix_duration().as_secs())
+}
+
 /// Attach a timestamp token to a signature.
 ///
 /// It goes in as an UNSIGNED attribute, which is what lets it be added after

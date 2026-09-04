@@ -25,6 +25,7 @@ mod stamp;
 mod stamp_text;
 mod text;
 mod timestamp;
+mod trust;
 mod verify;
 
 pub use cms::sign_cms;
@@ -38,6 +39,7 @@ pub use stamp::{stamp_image, StampOptions};
 pub use stamp_text::{stamp_text, FontChoice, StandardFont, TextStampOptions};
 pub use text::{extract_text, extract_text_all};
 pub use timestamp::{attach_timestamp, timestamp_query};
+pub use trust::TrustOptions;
 pub use verify::{verify_signatures, SignatureReport};
 
 pub use render::{

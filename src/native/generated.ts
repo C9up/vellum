@@ -184,8 +184,27 @@ export interface SignatureReport {
 	signedAt?: string;
 	/** An authority has vouched for when, so it outlives the certificate. */
 	timestamped: boolean;
+	/** A path was found from the signer's certificate to a trusted anchor. */
+	trusted: boolean;
+	/** That path, the signer first and the anchor last. */
+	chain: Array<string>;
+	/**
+	 * Where the instant used to judge the path came from: `"timestamp"`,
+	 * `"claimed"` or `"unknown"`.
+	 */
+	moment: string;
 	/** Everything that could not be checked, or checked out wrong. */
 	problems: Array<string>;
+}
+
+/** What a caller is willing to believe. */
+
+export interface TrustOptions {
+	/**
+	 * Certificates to trust as roots, DER or PEM. Without them nothing can be
+	 * trusted, which is what the report will say.
+	 */
+	anchors?: Array<Buffer>;
 }
 
 export declare function inspect(bytes: Buffer): DocumentInfo;
@@ -306,4 +325,5 @@ export declare function attachTimestamp(
 
 export declare function verifySignatures(
 	pdf: Buffer,
+	trust?: TrustOptions | undefined | null,
 ): Promise<SignatureReport[]>;

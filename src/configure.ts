@@ -64,6 +64,14 @@ export default defineConfig({
   //     certificate: readFileSync(app.makePath('storage/signing.crt.der')),
   //   }),
   //   qualified: myProviderAdapter({ ... }),
+  // },
+  //
+  // Certificates to trust when CHECKING a signature — typically the roots
+  // your jurisdiction's supervisory body publishes as a trusted list. With
+  // none, every signature comes back untrusted, which is the honest answer.
+  //
+  // trustedAnchors: [
+  //   readFileSync(app.makePath('storage/anchors/authority.pem')),
   //
   // Wrap any of them in timestamped() to add a trusted timestamp, without
   // which a signature stops being verifiable once its certificate expires:

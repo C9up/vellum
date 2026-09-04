@@ -39,6 +39,7 @@ export type {
 	StandardFont,
 	TextStampOptions,
 	VellumConfig,
+	VerifyOptions,
 } from "./Vellum.js";
 export { Vellum } from "./Vellum.js";
 

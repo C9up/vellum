@@ -877,12 +877,28 @@ pub struct SignatureReport {
     pub signed_at: Option<String>,
     /// An authority has vouched for when, so it outlives the certificate.
     pub timestamped: bool,
+    /// A path was found from the signer's certificate to a trusted anchor.
+    pub trusted: bool,
+    /// That path, the signer first and the anchor last.
+    pub chain: Vec<String>,
+    /// Where the instant used to judge the path came from: `"timestamp"`,
+    /// `"claimed"` or `"unknown"`.
+    pub moment: String,
     /// Everything that could not be checked, or checked out wrong.
     pub problems: Vec<String>,
 }
 
+/// What a caller is willing to believe.
+#[napi(object)]
+pub struct TrustOptions {
+    /// Certificates to trust as roots, DER or PEM. Without them nothing can be
+    /// trusted, which is what the report will say.
+    pub anchors: Option<Vec<Buffer>>,
+}
+
 pub struct VerifySignaturesTask {
     pdf: Vec<u8>,
+    trust: vellum_engine::TrustOptions,
 }
 
 impl Task for VerifySignaturesTask {
@@ -891,7 +907,7 @@ impl Task for VerifySignaturesTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("checking signatures", || {
-            vellum_engine::verify_signatures(&self.pdf)
+            vellum_engine::verify_signatures(&self.pdf, &self.trust)
         })
     }
 
@@ -906,6 +922,9 @@ impl Task for VerifySignaturesTask {
                 signer: report.signer,
                 signed_at: report.signed_at,
                 timestamped: report.timestamped,
+                trusted: report.trusted,
+                chain: report.chain,
+                moment: report.moment.to_string(),
                 problems: report.problems,
             })
             .collect())
@@ -918,6 +937,17 @@ impl Task for VerifySignaturesTask {
 /// whether the certificate comes from an authority you accept, nor whether it
 /// has been revoked.
 #[napi(ts_return_type = "Promise<SignatureReport[]>")]
-pub fn verify_signatures(pdf: Buffer) -> AsyncTask<VerifySignaturesTask> {
-    AsyncTask::new(VerifySignaturesTask { pdf: pdf.to_vec() })
+pub fn verify_signatures(
+    pdf: Buffer,
+    trust: Option<TrustOptions>,
+) -> AsyncTask<VerifySignaturesTask> {
+    AsyncTask::new(VerifySignaturesTask {
+        pdf: pdf.to_vec(),
+        trust: vellum_engine::TrustOptions {
+            anchors: trust
+                .and_then(|given| given.anchors)
+                .map(|anchors| anchors.iter().map(|anchor| anchor.to_vec()).collect())
+                .unwrap_or_default(),
+        },
+    })
 }

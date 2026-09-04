@@ -268,3 +268,50 @@ describe("checking the signatures on a document", () => {
 		).rejects.toThrow(VellumError);
 	});
 });
+
+describe("trusting a signature", () => {
+	it("trusts nothing when no anchors are configured", async () => {
+		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+
+		const [report] = await vellum.verifySignatures(signed);
+		expect(report?.trusted).toBe(false);
+		expect(report?.problems.join(" ")).toMatch(/no trusted anchors/);
+	});
+
+	it("takes the anchors from the configuration", async () => {
+		// The fixture's own authority is not to hand here, so what this pins is
+		// the wiring: a configured anchor reaches the engine and changes the
+		// answer it gives.
+		const vellum = new Vellum({
+			signers: { internal: stubCmsSigner() },
+			trustedAnchors: [Buffer.from("not a certificate")],
+		});
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+
+		const [report] = await vellum.verifySignatures(signed);
+		expect(report?.trusted).toBe(false);
+		expect(report?.problems.join(" ")).toMatch(/anchor 0 is not readable/);
+	});
+
+	it("lets a call override the configured anchors", async () => {
+		const vellum = new Vellum({
+			signers: { internal: stubCmsSigner() },
+			trustedAnchors: [Buffer.from("not a certificate")],
+		});
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+
+		const [report] = await vellum.verifySignatures(signed, { anchors: [] });
+		expect(report?.problems.join(" ")).toMatch(/no trusted anchors/);
+		expect(report?.problems.join(" ")).not.toMatch(/not readable/);
+	});
+
+	it("says where the instant it judged at came from", async () => {
+		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+
+		const [report] = await vellum.verifySignatures(signed);
+		// The fixture states a signing time and carries no timestamp.
+		expect(report?.moment).toBe("claimed");
+	});
+});

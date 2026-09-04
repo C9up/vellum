@@ -19,6 +19,7 @@ import type {
 	SignatureOptions as NativeSignatureOptions,
 	StampOptions as NativeStampOptions,
 	TextStampOptions as NativeTextStampOptions,
+	TrustOptions as NativeTrustOptions,
 	PageDimensions,
 	PageSize,
 	PreparedSignature,
@@ -325,6 +326,7 @@ export function attachTimestampNative(
 
 export function verifySignaturesNative(
 	pdf: Buffer,
+	trust: NativeTrustOptions,
 ): Promise<SignatureReport[]> {
-	return edit("VERIFY_FAILED", (loaded) => loaded.verifySignatures(pdf));
+	return edit("VERIFY_FAILED", (loaded) => loaded.verifySignatures(pdf, trust));
 }

@@ -397,20 +397,52 @@ arrived later is not one.
 The report also names the signer, the time they stated, and whether an
 authority has timestamped it.
 
-What this establishes is **integrity and authorship, not trust**. It does not
-ask whether the certificate comes from an authority you accept, nor whether it
-has since been revoked: that needs a trust store and a live revocation check,
-neither of which belongs in a PDF engine. The report says what was checked, and
-a caller needing more has the certificate to check it with.
+### Trust
+
+Checking that a signature matches the certificate it carries says nothing about
+who that certificate belongs to: anyone can make one. Trust comes from a path
+to an anchor you have decided to accept:
+
+```ts
+// config/vellum.ts
+export default defineConfig({
+  trustedAnchors: [readFileSync(app.makePath('storage/anchors/authority.pem'))],
+})
+```
+
+Supply the roots your jurisdiction's supervisory body publishes — they are
+distributed as trusted lists in the ETSI TS 119 612 format — or your own
+authority's, and `trusted` says whether a path was found. DER or PEM; PEM is
+what an authority usually publishes. Supplying none is a position too: every
+signature then comes back untrusted, which is the honest answer rather than a
+comfortable one.
+
+The path is judged **at the moment of signing**, not now: a certificate valid
+when the document was signed and expired since did not retroactively unsign
+anything. `moment` says where that instant came from — `"timestamp"` if an
+authority vouched for it, `"claimed"` if it rests on the signer's own word.
+That is the concrete reason timestamping is worth the round trip.
+
+Every link is checked: each certificate is signed by the one above it, each
+issuer says it is an authority, and the signing certificate is allowed to sign
+at all. A path longer than eight is treated as a loop.
+
+**Revocation is not checked.** A certificate withdrawn after it was issued
+still looks valid here, because knowing otherwise means asking OCSP or a CRL
+over the network, and the engine does no I/O. A caller who needs to know has
+the certificate to ask with.
 
 ## Status
 
 Rendering to images, metadata, text extraction, document operations, stamping
 — image and text — supplied fonts, interactive forms read, filled, laid out
-and flattened, and signatures made, timestamped and checked, are complete.
-What remains is an adapter for a certified provider, which is a short function
-returning a `Signer` and belongs to whoever has the account, and trust
-evaluation — a store of accepted authorities and a revocation check.
+and flattened, and signatures made, timestamped, checked and traced to an
+authority you accept, are complete.
+
+What remains needs something this package cannot supply itself: an adapter for
+a certified provider, which is a short function returning a `Signer` and
+belongs to whoever has the account, and a revocation check, which means asking
+OCSP or a CRL over the network.
 
 ## Building the native engine
 

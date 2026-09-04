@@ -244,55 +244,124 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// A throwaway key and a certificate for it, made fresh each run.
-    ///
-    /// Checking a private key into the repository — even a worthless one —
-    /// trips every scanner that exists and teaches the wrong habit, so the
-    /// tests build their own.
-    pub(crate) fn key_and_certificate() -> (Vec<u8>, Vec<u8>) {
-        let mut rng = rsa::rand_core::OsRng;
-        // Short, because the tests only need the arithmetic to be real.
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("a key");
-        let signing_key = SigningKey::<Sha256>::new(private_key.clone());
-
-        let subject = Name::from_str("CN=Vellum Test,O=Vellum").expect("a name");
-        let public = SubjectPublicKeyInfoOwned {
+    /// The public key of a private one, in the shape a certificate carries.
+    fn spki(private_key: &RsaPrivateKey) -> SubjectPublicKeyInfoOwned {
+        let public = rsa::pkcs1::EncodeRsaPublicKey::to_pkcs1_der(&private_key.to_public_key())
+            .expect("a public key");
+        SubjectPublicKeyInfoOwned {
             algorithm: AlgorithmIdentifierOwned {
                 oid: const_oid::db::rfc5912::RSA_ENCRYPTION,
                 parameters: Some(Any::null()),
             },
-            subject_public_key: BitString::from_der(
-                &rsa::pkcs1::EncodeRsaPublicKey::to_pkcs1_der(&private_key.to_public_key())
-                    .map(|document| {
-                        BitString::new(0, document.as_bytes())
-                            .expect("a bit string")
-                            .to_der()
-                            .expect("encodable")
-                    })
-                    .expect("a public key"),
+            subject_public_key: BitString::new(0, public.as_bytes()).expect("a bit string"),
+        }
+    }
+
+    /// A fixed window rather than one relative to the clock, so a test that
+    /// judges a certificate at a stated instant stays deterministic.
+    fn validity() -> Validity {
+        let at = |seconds| {
+            x509_cert::time::Time::UtcTime(
+                der::asn1::UtcTime::from_unix_duration(Duration::from_secs(seconds))
+                    .expect("a date"),
             )
-            .expect("a bit string"),
         };
+        Validity {
+            not_before: at(1_577_836_800), // 2020-01-01
+            not_after: at(2_051_222_400),  // 2035-01-01
+        }
+    }
 
-        let builder = CertificateBuilder::new(
-            Profile::Root,
-            SerialNumber::from(1u32),
-            Validity::from_now(Duration::from_secs(3600)).expect("a validity"),
-            subject,
-            public,
-            &signing_key,
-        )
-        .expect("a certificate builder");
-        let certificate: Certificate = builder.build().expect("a certificate");
+    /// A throwaway authority and a signing certificate under it.
+    ///
+    /// Two levels rather than one, because a self-signed root is not allowed
+    /// to sign documents — it is marked for signing certificates — and a
+    /// fixture that ignored that would hide the check that says so.
+    ///
+    /// Built once: two RSA keys are slow, and nothing here needs them fresh.
+    /// No private key is checked into the repository this way.
+    pub(crate) fn key_and_chain() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        static CHAIN: std::sync::OnceLock<(Vec<u8>, Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
 
-        (
-            private_key
-                .to_pkcs8_der()
-                .expect("the key encodes")
-                .as_bytes()
-                .to_vec(),
-            certificate.to_der().expect("the certificate encodes"),
-        )
+        CHAIN
+            .get_or_init(|| {
+                let mut rng = rsa::rand_core::OsRng;
+                let authority_key = RsaPrivateKey::new(&mut rng, 2048).expect("a key");
+                let authority_signing = SigningKey::<Sha256>::new(authority_key.clone());
+                let authority_name =
+                    Name::from_str("CN=Vellum Test Authority,O=Vellum").expect("a name");
+
+                let authority: Certificate = CertificateBuilder::new(
+                    Profile::Root,
+                    SerialNumber::from(1u32),
+                    validity(),
+                    authority_name.clone(),
+                    spki(&authority_key),
+                    &authority_signing,
+                )
+                .expect("a builder")
+                .build()
+                .expect("a certificate");
+
+                let signing_key = RsaPrivateKey::new(&mut rng, 2048).expect("a key");
+                let signer: Certificate = CertificateBuilder::new(
+                    Profile::Leaf {
+                        issuer: authority_name,
+                        enable_key_agreement: false,
+                        enable_key_encipherment: false,
+                    },
+                    SerialNumber::from(2u32),
+                    validity(),
+                    Name::from_str("CN=Vellum Test Signer,O=Vellum").expect("a name"),
+                    spki(&signing_key),
+                    &authority_signing,
+                )
+                .expect("a builder")
+                .build()
+                .expect("a certificate");
+
+                (
+                    signing_key
+                        .to_pkcs8_der()
+                        .expect("the key encodes")
+                        .as_bytes()
+                        .to_vec(),
+                    signer.to_der().expect("the certificate encodes"),
+                    authority.to_der().expect("the certificate encodes"),
+                )
+            })
+            .clone()
+    }
+
+    /// An authority with nothing to do with the one above, for tests that need
+    /// an anchor that should confer no trust.
+    pub(crate) fn unrelated_authority() -> Vec<u8> {
+        static OTHER: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+        OTHER
+            .get_or_init(|| {
+                let mut rng = rsa::rand_core::OsRng;
+                let key = RsaPrivateKey::new(&mut rng, 2048).expect("a key");
+                let certificate: Certificate = CertificateBuilder::new(
+                    Profile::Root,
+                    SerialNumber::from(9u32),
+                    validity(),
+                    Name::from_str("CN=Somebody Else,O=Elsewhere").expect("a name"),
+                    spki(&key),
+                    &SigningKey::<Sha256>::new(key.clone()),
+                )
+                .expect("a builder")
+                .build()
+                .expect("a certificate");
+                certificate.to_der().expect("the certificate encodes")
+            })
+            .clone()
+    }
+
+    /// The signing half of the chain, for tests that do not care about trust.
+    pub(crate) fn key_and_certificate() -> (Vec<u8>, Vec<u8>) {
+        let (key, certificate, _) = key_and_chain();
+        (key, certificate)
     }
 
     fn signed() -> (Vec<u8>, [u8; 32], Vec<u8>) {
