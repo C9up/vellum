@@ -427,22 +427,42 @@ Every link is checked: each certificate is signed by the one above it, each
 issuer says it is an authority, and the signing certificate is allowed to sign
 at all. A path longer than eight is treated as a loop.
 
-**Revocation is not checked.** A certificate withdrawn after it was issued
-still looks valid here, because knowing otherwise means asking OCSP or a CRL
-over the network, and the engine does no I/O. A caller who needs to know has
-the certificate to ask with.
+### Revocation
+
+A certificate can be valid on its face and worthless in fact: keys are lost,
+people leave, authorities discover a mistake. Only the issuer knows, and only
+if asked.
+
+```ts
+const signatures = await vellum.verifySignatures(mandate, { checkRevocation: true })
+// signatures[0].revocation → { status: 'good' | 'revoked' | 'unknown', detail? }
+```
+
+That is a network call per signature, to the responder the certificate names,
+so it is off unless asked for.
+
+The answer has **three** values, not two. `unknown` covers everything else —
+the responder was unreachable, answered about a different certificate, or could
+not be believed. Collapsing it into either of the others is the mistake to
+avoid: treating it as good waves a withdrawn certificate through, and treating
+it as revoked rejects documents whenever a server is down. **Which to do is
+your policy**, so it is reported rather than decided.
+
+An answer is only read if the issuer, or somebody the issuer authorised to
+answer for it, actually signed it — otherwise anyone could revoke anything. And
+a certificate withdrawn **after** the document was signed does not taint it:
+that is what a signing time, and better a timestamp, is for.
 
 ## Status
 
 Rendering to images, metadata, text extraction, document operations, stamping
 — image and text — supplied fonts, interactive forms read, filled, laid out
-and flattened, and signatures made, timestamped, checked and traced to an
-authority you accept, are complete.
+and flattened, and signatures made, timestamped, checked, traced to an
+authority you accept and asked about at their issuer, are complete.
 
 What remains needs something this package cannot supply itself: an adapter for
 a certified provider, which is a short function returning a `Signer` and
-belongs to whoever has the account, and a revocation check, which means asking
-OCSP or a CRL over the network.
+belongs to whoever has the account.
 
 ## Building the native engine
 

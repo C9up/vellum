@@ -193,6 +193,12 @@ export interface SignatureReport {
 	 * `"claimed"` or `"unknown"`.
 	 */
 	moment: string;
+	/** That instant, in seconds since the epoch. */
+	momentAt?: number;
+	/** The certificate that signed, DER. */
+	signerCertificate?: Buffer;
+	/** The certificate that issued it, DER — who answers about revocation. */
+	issuerCertificate?: Buffer;
 	/** Everything that could not be checked, or checked out wrong. */
 	problems: Array<string>;
 }
@@ -205,6 +211,15 @@ export interface TrustOptions {
 	 * trusted, which is what the report will say.
 	 */
 	anchors?: Array<Buffer>;
+}
+
+/** What a responder's answer says. */
+
+export interface RevocationAnswer {
+	/** `"good"`, `"revoked"` or `"unknown"`. */
+	status: string;
+	/** When it was withdrawn, or why nobody could be believed. */
+	detail?: string;
 }
 
 export declare function inspect(bytes: Buffer): DocumentInfo;
@@ -327,3 +342,28 @@ export declare function verifySignatures(
 	pdf: Buffer,
 	trust?: TrustOptions | undefined | null,
 ): Promise<SignatureReport[]>;
+
+/** The responder a certificate names, if it names one. */
+
+export declare function responderUrl(certificate: Buffer): string | null;
+
+/** Build the question to post to a revocation responder. */
+
+export declare function revocationQuery(
+	certificate: Buffer,
+	issuer: Buffer,
+): Buffer;
+
+/**
+ * Read a responder's answer about a certificate.
+ *
+ * `at` is the instant the document was signed: a certificate withdrawn after
+ * that does not taint what it signed before.
+ */
+
+export declare function readRevocation(
+	response: Buffer,
+	certificate: Buffer,
+	issuer: Buffer,
+	at?: number | undefined | null,
+): RevocationAnswer;

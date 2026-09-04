@@ -64,6 +64,9 @@ pub struct TrustReport {
     pub trusted: bool,
     /// The subjects of the path, the signer first and the anchor last.
     pub chain: Vec<String>,
+    /// The certificate that issued the signer's, which is who has to be asked
+    /// about revocation.
+    pub issuer: Option<Vec<u8>>,
     pub problems: Vec<String>,
 }
 
@@ -316,6 +319,9 @@ pub fn evaluate(
             }
         }
 
+        if depth == 0 {
+            report.issuer = issuer.to_der().ok();
+        }
         report
             .chain
             .push(issuer.tbs_certificate.subject.to_string());

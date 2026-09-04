@@ -38,6 +38,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 der = "0.7"
 const-oid = { version = "0.9", features = ["db"] }
 getrandom = "0.2"
+sha1 = "0.10"
 
 [dev-dependencies]
 # Building a throwaway certificate for the signature tests, so that no private

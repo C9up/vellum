@@ -280,6 +280,14 @@ pub(crate) mod tests {
     ///
     /// Built once: two RSA keys are slow, and nothing here needs them fresh.
     /// No private key is checked into the repository this way.
+    static AUTHORITY_KEY: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+    /// The authority's own key, for a test that has to answer as it.
+    pub(crate) fn authority_key() -> Vec<u8> {
+        key_and_chain();
+        AUTHORITY_KEY.get().expect("the chain was built").clone()
+    }
+
     pub(crate) fn key_and_chain() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         static CHAIN: std::sync::OnceLock<(Vec<u8>, Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
 
@@ -304,7 +312,7 @@ pub(crate) mod tests {
                 .expect("a certificate");
 
                 let signing_key = RsaPrivateKey::new(&mut rng, 2048).expect("a key");
-                let signer: Certificate = CertificateBuilder::new(
+                let mut builder = CertificateBuilder::new(
                     Profile::Leaf {
                         issuer: authority_name,
                         enable_key_agreement: false,
@@ -316,9 +324,34 @@ pub(crate) mod tests {
                     spki(&signing_key),
                     &authority_signing,
                 )
-                .expect("a builder")
-                .build()
-                .expect("a certificate");
+                .expect("a builder");
+                // A responder to ask about it, so the revocation path has a
+                // real certificate to read an address out of.
+                builder
+                    .add_extension(&x509_cert::ext::pkix::AuthorityInfoAccessSyntax(vec![
+                        x509_cert::ext::pkix::AccessDescription {
+                            access_method: const_oid::ObjectIdentifier::new_unwrap(
+                                "1.3.6.1.5.5.7.48.1",
+                            ),
+                            access_location:
+                                x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(
+                                    der::asn1::Ia5String::new("http://ocsp.vellum.test/")
+                                        .expect("a url"),
+                                ),
+                        },
+                    ]))
+                    .expect("the extension is added");
+                let signer: Certificate = builder.build().expect("a certificate");
+
+                AUTHORITY_KEY
+                    .set(
+                        authority_key
+                            .to_pkcs8_der()
+                            .expect("the key encodes")
+                            .as_bytes()
+                            .to_vec(),
+                    )
+                    .ok();
 
                 (
                     signing_key

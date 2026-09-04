@@ -15,6 +15,7 @@ import type {
 	DocumentMetadata,
 	FormField,
 	PageDimensions,
+	RevocationAnswer,
 	SignatureReport,
 } from "./native.js";
 import {
@@ -29,8 +30,11 @@ import {
 	metadataNative,
 	pageDimensionsNative,
 	prepareSignatureNative,
+	readRevocationNative,
 	renderAllNative,
 	renderPageNative,
+	responderUrlNative,
+	revocationQueryNative,
 	rotateNative,
 	selectPagesNative,
 	splitNative,
@@ -109,6 +113,14 @@ export interface Signer {
 	sign(digest: Buffer): Promise<Buffer>;
 }
 
+/**
+ * A signature report, plus what the issuer said about the certificate when
+ * `checkRevocation` asked.
+ */
+export type CheckedSignature = SignatureReport & {
+	revocation?: RevocationAnswer;
+};
+
 /** What to check a signature against. */
 export interface VerifyOptions {
 	/**
@@ -116,6 +128,20 @@ export interface VerifyOptions {
 	 * `trustedAnchors` in `config/vellum.ts`.
 	 */
 	anchors?: ReadonlyArray<Buffer>;
+	/**
+	 * Ask each certificate's issuer whether it still stands.
+	 *
+	 * A network call per signature, to the responder the certificate names.
+	 * The answer has **three** values, not two: `"good"`, `"revoked"`, and
+	 * `"unknown"` for everything else — the responder was unreachable,
+	 * answered about something else, or could not be believed. Treating
+	 * `"unknown"` as good waves through a withdrawn certificate; treating it
+	 * as revoked rejects documents whenever a server is down. Which to do is
+	 * your policy, so it is reported rather than decided.
+	 */
+	checkRevocation?: boolean;
+	/** How long to wait on a responder. Default 10 seconds. */
+	revocationTimeoutMs?: number;
 }
 
 /** What the signature says about itself. */
@@ -625,10 +651,82 @@ export class Vellum {
 	async verifySignatures(
 		pdf: Buffer,
 		options: VerifyOptions = {},
-	): Promise<SignatureReport[]> {
-		return verifySignaturesNative(pdf, {
+	): Promise<CheckedSignature[]> {
+		const reports = await verifySignaturesNative(pdf, {
 			anchors: [...(options.anchors ?? this.#config.trustedAnchors ?? [])],
 		});
+		if (options.checkRevocation !== true) return reports;
+
+		return Promise.all(
+			reports.map(async (report) => ({
+				...report,
+				revocation: await this.#revocationOf(
+					report,
+					options.revocationTimeoutMs ?? 10_000,
+				),
+			})),
+		);
+	}
+
+	/**
+	 * Ask a certificate's issuer whether it still stands.
+	 *
+	 * Everything that can go wrong answers `"unknown"`, never `"good"`: a
+	 * responder that cannot be reached has told us nothing, and pretending
+	 * otherwise is how a withdrawn certificate gets waved through.
+	 */
+	async #revocationOf(
+		report: SignatureReport,
+		timeoutMs: number,
+	): Promise<RevocationAnswer> {
+		const { signerCertificate, issuerCertificate } = report;
+		if (signerCertificate === undefined || issuerCertificate === undefined) {
+			return {
+				status: "unknown",
+				detail:
+					"the issuer of this certificate is not known, so nobody can be asked",
+			};
+		}
+
+		const url = responderUrlNative(signerCertificate);
+		if (url === null || url === undefined) {
+			return {
+				status: "unknown",
+				detail: "the certificate names no responder to ask",
+			};
+		}
+
+		let answer: Response;
+		try {
+			answer = await fetch(url, {
+				method: "POST",
+				headers: { "content-type": "application/ocsp-request" },
+				body: new Uint8Array(
+					revocationQueryNative(signerCertificate, issuerCertificate),
+				),
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+		} catch (error) {
+			return {
+				status: "unknown",
+				detail: `the responder at ${url} could not be reached: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			};
+		}
+		if (!answer.ok) {
+			return {
+				status: "unknown",
+				detail: `the responder at ${url} answered ${answer.status}`,
+			};
+		}
+
+		return readRevocationNative(
+			Buffer.from(await answer.arrayBuffer()),
+			signerCertificate,
+			issuerCertificate,
+			report.momentAt ?? null,
+		);
 	}
 
 	/** How many pages the document has. */

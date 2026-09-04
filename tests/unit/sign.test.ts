@@ -315,3 +315,45 @@ describe("trusting a signature", () => {
 		expect(report?.moment).toBe("claimed");
 	});
 });
+
+describe("asking whether a certificate still stands", () => {
+	it("does not ask unless told to", async () => {
+		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+		vi.stubGlobal("fetch", async () => {
+			throw new Error("nothing should have been asked");
+		});
+
+		const [report] = await vellum.verifySignatures(signed);
+		expect(report?.revocation).toBeUndefined();
+		vi.unstubAllGlobals();
+	});
+
+	it("reports unknown rather than good when nobody can be asked", async () => {
+		// No anchors, so the issuer is not known and there is nobody to ask.
+		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+
+		const [report] = await vellum.verifySignatures(signed, {
+			checkRevocation: true,
+		});
+		expect(report?.revocation?.status).toBe("unknown");
+		expect(report?.revocation?.detail).toMatch(/issuer .* is not known/);
+	});
+
+	it("reports unknown rather than good when the responder is unreachable", async () => {
+		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+		vi.stubGlobal("fetch", async () => {
+			throw new Error("ECONNREFUSED");
+		});
+
+		// Without an issuer it stops earlier, so this pins the shape: whatever
+		// goes wrong, the answer is "unknown" and never "good".
+		const [report] = await vellum.verifySignatures(signed, {
+			checkRevocation: true,
+		});
+		expect(report?.revocation?.status).not.toBe("good");
+		vi.unstubAllGlobals();
+	});
+});

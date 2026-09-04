@@ -24,6 +24,7 @@ import type {
 	PageSize,
 	PreparedSignature,
 	RenderOptions,
+	RevocationAnswer,
 	SignatureReport,
 	TimestampQuery,
 } from "./native/generated.js";
@@ -55,6 +56,7 @@ export type {
 	PageDimensions,
 	PageSize,
 	PreparedSignature,
+	RevocationAnswer,
 	SignatureReport,
 } from "./native/generated.js";
 
@@ -329,4 +331,28 @@ export function verifySignaturesNative(
 	trust: NativeTrustOptions,
 ): Promise<SignatureReport[]> {
 	return edit("VERIFY_FAILED", (loaded) => loaded.verifySignatures(pdf, trust));
+}
+
+export function responderUrlNative(certificate: Buffer): string | null {
+	return run("VERIFY_FAILED", (loaded) => loaded.responderUrl(certificate));
+}
+
+export function revocationQueryNative(
+	certificate: Buffer,
+	issuer: Buffer,
+): Buffer {
+	return run("VERIFY_FAILED", (loaded) =>
+		loaded.revocationQuery(certificate, issuer),
+	);
+}
+
+export function readRevocationNative(
+	response: Buffer,
+	certificate: Buffer,
+	issuer: Buffer,
+	at: number | null,
+): RevocationAnswer {
+	return run("VERIFY_FAILED", (loaded) =>
+		loaded.readRevocation(response, certificate, issuer, at ?? undefined),
+	);
 }

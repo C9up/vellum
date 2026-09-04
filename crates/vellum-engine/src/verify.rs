@@ -58,6 +58,13 @@ pub struct SignatureReport {
     /// Where the instant used to judge the path came from: a timestamp, the
     /// signer's own claim, or nowhere.
     pub moment: &'static str,
+    /// That instant, in seconds since the epoch, for a caller who has to ask
+    /// somebody else about it.
+    pub moment_at: Option<u64>,
+    /// The certificate that signed, so a caller can ask about it.
+    pub signer_certificate: Option<Vec<u8>>,
+    /// The certificate that issued it, which is who answers about revocation.
+    pub issuer_certificate: Option<Vec<u8>>,
     /// Everything that could not be checked, or checked out wrong.
     pub problems: Vec<String>,
 }
@@ -75,6 +82,9 @@ impl SignatureReport {
             trusted: false,
             chain: Vec::new(),
             moment: Moment::Unknown.as_str(),
+            moment_at: None,
+            signer_certificate: None,
+            issuer_certificate: None,
             problems: vec![problem],
         }
     }
@@ -152,6 +162,9 @@ fn verify_one(
         trusted: false,
         chain: Vec::new(),
         moment: Moment::Unknown.as_str(),
+        moment_at: None,
+        signer_certificate: None,
+        issuer_certificate: None,
         problems: Vec::new(),
     };
     if !report.covers_whole_document {
@@ -285,6 +298,8 @@ fn verify_one(
         (None, None) => (None, Moment::Unknown),
     };
     report.moment = moment.as_str();
+    report.moment_at = at;
+    report.signer_certificate = certificate.to_der().ok();
 
     let carried: Vec<Certificate> = signed
         .certificates
@@ -304,6 +319,7 @@ fn verify_one(
     let trust = evaluate(&certificate, &carried, anchors, at);
     report.trusted = trust.trusted;
     report.chain = trust.chain;
+    report.issuer_certificate = trust.issuer;
     report.problems.extend(trust.problems);
 
     let verified = certificate

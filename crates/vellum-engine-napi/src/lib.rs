@@ -884,6 +884,12 @@ pub struct SignatureReport {
     /// Where the instant used to judge the path came from: `"timestamp"`,
     /// `"claimed"` or `"unknown"`.
     pub moment: String,
+    /// That instant, in seconds since the epoch.
+    pub moment_at: Option<i64>,
+    /// The certificate that signed, DER.
+    pub signer_certificate: Option<Buffer>,
+    /// The certificate that issued it, DER — who answers about revocation.
+    pub issuer_certificate: Option<Buffer>,
     /// Everything that could not be checked, or checked out wrong.
     pub problems: Vec<String>,
 }
@@ -925,6 +931,9 @@ impl Task for VerifySignaturesTask {
                 trusted: report.trusted,
                 chain: report.chain,
                 moment: report.moment.to_string(),
+                moment_at: report.moment_at.and_then(|at| i64::try_from(at).ok()),
+                signer_certificate: report.signer_certificate.map(Buffer::from),
+                issuer_certificate: report.issuer_certificate.map(Buffer::from),
                 problems: report.problems,
             })
             .collect())
@@ -950,4 +959,55 @@ pub fn verify_signatures(
                 .unwrap_or_default(),
         },
     })
+}
+
+/// The responder a certificate names, if it names one.
+#[napi]
+pub fn responder_url(certificate: Buffer) -> Option<String> {
+    vellum_engine::responder_url(&certificate)
+}
+
+/// Build the question to post to a revocation responder.
+#[napi]
+pub fn revocation_query(certificate: Buffer, issuer: Buffer) -> Result<Buffer> {
+    let query = guarded("building a revocation query", || {
+        vellum_engine::revocation_query(&certificate, &issuer)
+    })?;
+    Ok(Buffer::from(query))
+}
+
+/// What a responder's answer says.
+#[napi(object)]
+pub struct RevocationAnswer {
+    /// `"good"`, `"revoked"` or `"unknown"`.
+    pub status: String,
+    /// When it was withdrawn, or why nobody could be believed.
+    pub detail: Option<String>,
+}
+
+/// Read a responder's answer about a certificate.
+///
+/// `at` is the instant the document was signed: a certificate withdrawn after
+/// that does not taint what it signed before.
+#[napi]
+pub fn read_revocation(
+    response: Buffer,
+    certificate: Buffer,
+    issuer: Buffer,
+    at: Option<i64>,
+) -> RevocationAnswer {
+    let answer = vellum_engine::read_revocation(
+        &response,
+        &certificate,
+        &issuer,
+        at.and_then(|at| u64::try_from(at).ok()),
+    );
+    RevocationAnswer {
+        status: answer.as_str().to_string(),
+        detail: match &answer {
+            vellum_engine::Revocation::Good => None,
+            vellum_engine::Revocation::Revoked { at } => Some(at.clone()),
+            vellum_engine::Revocation::Unknown { reason } => Some(reason.clone()),
+        },
+    }
 }
