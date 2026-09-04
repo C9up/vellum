@@ -782,3 +782,46 @@ pub fn embed_signature(prepared: Buffer, value: Buffer) -> AsyncTask<EmbedSignat
         value: value.to_vec(),
     })
 }
+
+pub struct SignCmsTask {
+    digest: Vec<u8>,
+    key: Vec<u8>,
+    certificates: Vec<Vec<u8>>,
+    signed_at: String,
+}
+
+impl Task for SignCmsTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("signing", || {
+            vellum_engine::sign_cms(&self.digest, &self.key, &self.certificates, &self.signed_at)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+/// Turn a digest into the CMS a PDF signature carries, with a key we hold.
+///
+/// The key is PKCS#8 DER and the certificates are DER, the signer's first.
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn sign_cms(
+    digest: Buffer,
+    key: Buffer,
+    certificates: Vec<Buffer>,
+    signed_at: String,
+) -> AsyncTask<SignCmsTask> {
+    AsyncTask::new(SignCmsTask {
+        digest: digest.to_vec(),
+        key: key.to_vec(),
+        certificates: certificates
+            .into_iter()
+            .map(|certificate| certificate.to_vec())
+            .collect(),
+        signed_at,
+    })
+}

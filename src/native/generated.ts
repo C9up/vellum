@@ -240,3 +240,16 @@ export declare function embedSignature(
 	prepared: Buffer,
 	value: Buffer,
 ): Promise<Buffer>;
+
+/**
+ * Turn a digest into the CMS a PDF signature carries, with a key we hold.
+ *
+ * The key is PKCS#8 DER and the certificates are DER, the signer's first.
+ */
+
+export declare function signCms(
+	digest: Buffer,
+	key: Buffer,
+	certificates: Array<Buffer>,
+	signedAt: string,
+): Promise<Buffer>;

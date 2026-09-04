@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	A4,
 	createBlank,
+	pkcs8Signer,
 	type Signer,
 	Vellum,
 	VellumError,
@@ -115,5 +116,35 @@ describe("signing", () => {
 		await expect(
 			vellum.sign(createBlank([A4]), { signer: "oversized", capacity: 512 }),
 		).rejects.toThrow(/larger capacity/);
+	});
+});
+
+describe("signing with a key the application holds", () => {
+	// The cryptography is proven in the engine's own tests, where a throwaway
+	// key and certificate can be built and the result verified — including by
+	// OpenSSL. What is worth testing here is the adapter: that it refuses
+	// nonsense early, and that an engine refusal reaches the caller as one.
+	it("refuses an empty key or certificate before anything else happens", () => {
+		expect(() =>
+			pkcs8Signer({ key: Buffer.alloc(0), certificate: Buffer.from([1]) }),
+		).toThrow(VellumError);
+		expect(() =>
+			pkcs8Signer({ key: Buffer.from([1]), certificate: Buffer.alloc(0) }),
+		).toThrow(VellumError);
+	});
+
+	it("says what it could not read rather than producing a broken document", async () => {
+		const vellum = new Vellum({
+			signers: {
+				internal: pkcs8Signer({
+					key: Buffer.from("this is not a key"),
+					certificate: Buffer.from("nor is this a certificate"),
+				}),
+			},
+		});
+
+		await expect(
+			vellum.sign(createBlank([A4]), { signer: "internal" }),
+		).rejects.toThrow(/private key/);
 	});
 });

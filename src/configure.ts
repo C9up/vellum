@@ -59,8 +59,11 @@ export default defineConfig({
   // certified provider the same interface.
   //
   // signers: {
-  //   internal: myLocalSigner,
-  //   qualified: myProviderSigner,
+  //   internal: pkcs8Signer({
+  //     key: readFileSync(app.makePath('storage/signing.key.der')),
+  //     certificate: readFileSync(app.makePath('storage/signing.crt.der')),
+  //   }),
+  //   qualified: myProviderAdapter({ ... }),
   // },
 })`,
 	);

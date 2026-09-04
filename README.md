@@ -304,19 +304,58 @@ already on it and destroy the history a signature exists to establish.
 A visible signature — a drawn one, an image — is a separate matter: `stamp` it
 on first, then sign.
 
-**What is not here yet**: no signer ships with the package. A local key needs a
-CMS builder, which is a dependency the application chooses; a certified
-provider generally returns a complete CMS and needs none. Timestamping (PAdES
-B-T) is an HTTP call and belongs in a signer too — worth having for a document
-kept for years, since a signature cannot be validated once its certificate has
-expired without one.
+### Signing with a key you hold
+
+`pkcs8Signer` is the one signer that ships, because it is the one with no
+vendor behind it:
+
+```ts
+signers: {
+  internal: pkcs8Signer({
+    key: readFileSync(app.makePath('storage/signing.key.der')),
+    certificate: readFileSync(app.makePath('storage/signing.crt.der')),
+  }),
+}
+```
+
+It builds a CAdES `SignedData` whose signed attributes carry the content type,
+the document's digest, the signing time and — as PAdES requires —
+`signing-certificate-v2`. That last one is not decoration: without it a
+signature is bound to a key but not to an identity.
+
+PKCS#8 and DER rather than a `.p12`, because reading PKCS#12 in Rust is not
+something to put underneath a signature, and
+`openssl pkcs12 -in bundle.p12 -nodes` gets you there in one command.
+
+This is an **advanced** signature: it proves the document has not changed since
+a particular key signed it. Where the law requires a *qualified* one, the key
+has to live with a certified provider — and that is an adapter, not this.
+
+### Adapters
+
+A provider is a `Signer` and nothing more, so an adapter is a short function
+returning one. None ship here: naming a vendor would tie an agnostic package to
+one, and an HTTP client is not a dependency it should carry.
+
+**Timestamping** (PAdES B-T) belongs in a signer too. It is worth having for a
+document kept for years: without a trusted timestamp a signature cannot be
+validated once its certificate has expired.
+
+### On the dependencies
+
+The CMS stack sits on the older RustCrypto generation, which costs a second
+copy of `digest` next to the one lopdf uses. The alternative was the matching
+generation, where `cms` and `rsa` are still release candidates — and a release
+candidate in the one path where correctness is legally load-bearing is a worse
+trade than a duplicated hash, which produces identical bytes by definition.
+One line of `Cargo.toml` to revisit when they ship.
 
 ## Status
 
 Rendering to images, metadata, text extraction, document operations, stamping
-— image and text — supplied fonts, and interactive forms, read, filled, laid
-out and flattened, are complete. Signing has its document half: what remains is
-a signer to plug into it.
+— image and text — supplied fonts, interactive forms read, filled, laid out
+and flattened, and signing with a key you hold, are complete. What remains is
+adapters: a certified provider, and a timestamping authority.
 
 ## Building the native engine
 

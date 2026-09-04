@@ -25,6 +25,7 @@ mod stamp;
 mod stamp_text;
 mod text;
 
+pub use cms::sign_cms;
 pub use edit::{merge, rotate, select_pages, split};
 pub use fill::{fill_form, FieldValue};
 pub use flatten::flatten_form;

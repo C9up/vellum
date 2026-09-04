@@ -27,8 +27,18 @@ sha2 = { version = "0.10", features = ["oid"] }
 # JPEG encoding for page previews, and PNG decoding for stamping: a PNG has
 # to become raw samples to enter a PDF, while a JPEG goes in untouched.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+# The signature value itself: a CMS SignedData, its certificates, the RSA
+# signature and the ASN.1 they are all written in. These sit on the older
+# RustCrypto generation, which costs a second copy of `digest` next to the one
+# lopdf uses — the alternative was release-candidate crates in the one path
+# where correctness is legally load-bearing.
 cms = { version = "0.2.3", features = ["builder"] }
 x509-cert = "0.2"
 rsa = { version = "0.9", features = ["sha2"] }
 der = "0.7"
 const-oid = { version = "0.9", features = ["db"] }
+
+[dev-dependencies]
+# Building a throwaway certificate for the signature tests, so that no private
+# key is ever checked into the repository.
+x509-cert = { version = "0.2", features = ["builder"] }

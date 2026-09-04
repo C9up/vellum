@@ -294,3 +294,14 @@ export function embedSignatureNative(
 		loaded.embedSignature(prepared, value),
 	);
 }
+
+export function signCmsNative(
+	digest: Buffer,
+	key: Buffer,
+	certificates: ReadonlyArray<Buffer>,
+	signedAt: string,
+): Promise<Buffer> {
+	return edit("SIGN_FAILED", (loaded) =>
+		loaded.signCms(digest, key, [...certificates], signedAt),
+	);
+}

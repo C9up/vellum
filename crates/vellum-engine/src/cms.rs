@@ -21,7 +21,7 @@ use cms::content_info::ContentInfo;
 use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier};
 use const_oid::db::rfc5911::ID_DATA;
 use der::asn1::{OctetString, SetOfVec, UtcTime};
-use der::{Any, Decode, Encode, Sequence, Tag};
+use der::{Any, Decode, Encode, Sequence};
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::RsaPrivateKey;
@@ -227,4 +227,232 @@ pub fn sign_cms(
     signed
         .to_der()
         .map_err(|error| format!("cannot encode the signature: {error}"))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    use der::asn1::BitString;
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::signature::Verifier;
+    use x509_cert::builder::{Builder, CertificateBuilder, Profile};
+    use x509_cert::name::Name;
+    use x509_cert::spki::SubjectPublicKeyInfoOwned;
+    use x509_cert::time::Validity;
+
+    use super::*;
+
+    /// A throwaway key and a certificate for it, made fresh each run.
+    ///
+    /// Checking a private key into the repository — even a worthless one —
+    /// trips every scanner that exists and teaches the wrong habit, so the
+    /// tests build their own.
+    pub(crate) fn key_and_certificate() -> (Vec<u8>, Vec<u8>) {
+        let mut rng = rsa::rand_core::OsRng;
+        // Short, because the tests only need the arithmetic to be real.
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("a key");
+        let signing_key = SigningKey::<Sha256>::new(private_key.clone());
+
+        let subject = Name::from_str("CN=Vellum Test,O=Vellum").expect("a name");
+        let public = SubjectPublicKeyInfoOwned {
+            algorithm: AlgorithmIdentifierOwned {
+                oid: const_oid::db::rfc5912::RSA_ENCRYPTION,
+                parameters: Some(Any::null()),
+            },
+            subject_public_key: BitString::from_der(
+                &rsa::pkcs1::EncodeRsaPublicKey::to_pkcs1_der(&private_key.to_public_key())
+                    .map(|document| {
+                        BitString::new(0, document.as_bytes())
+                            .expect("a bit string")
+                            .to_der()
+                            .expect("encodable")
+                    })
+                    .expect("a public key"),
+            )
+            .expect("a bit string"),
+        };
+
+        let builder = CertificateBuilder::new(
+            Profile::Root,
+            SerialNumber::from(1u32),
+            Validity::from_now(Duration::from_secs(3600)).expect("a validity"),
+            subject,
+            public,
+            &signing_key,
+        )
+        .expect("a certificate builder");
+        let certificate: Certificate = builder.build().expect("a certificate");
+
+        (
+            private_key
+                .to_pkcs8_der()
+                .expect("the key encodes")
+                .as_bytes()
+                .to_vec(),
+            certificate.to_der().expect("the certificate encodes"),
+        )
+    }
+
+    fn signed() -> (Vec<u8>, [u8; 32], Vec<u8>) {
+        let (key, certificate) = key_and_certificate();
+        let digest = [0x42; 32];
+        let cms = sign_cms(
+            &digest,
+            &key,
+            std::slice::from_ref(&certificate),
+            "2026-09-04T14:30:00Z",
+        )
+        .expect("signing should succeed");
+        (cms, digest, certificate)
+    }
+
+    /// The signature has to verify — and it is verified here through the
+    /// verifying half of the crate, not by re-running the code that made it.
+    #[test]
+    fn the_signature_verifies_against_the_certificate() {
+        let (cms, _, certificate) = signed();
+
+        let content = ContentInfo::from_der(&cms).expect("a content info");
+        let data = content
+            .content
+            .decode_as::<cms::signed_data::SignedData>()
+            .expect("signed data");
+        let signer = data.signer_infos.0.as_slice().first().expect("a signer");
+
+        // What was signed is the DER of the signed attributes, tagged as a SET
+        // rather than with the implicit [0] they carry inside the structure.
+        let attributes = signer
+            .signed_attrs
+            .as_ref()
+            .expect("signed attributes")
+            .to_der()
+            .expect("encodable");
+
+        let certificate = Certificate::from_der(&certificate).expect("the certificate");
+        let spki = certificate
+            .tbs_certificate
+            .subject_public_key_info
+            .to_der()
+            .expect("the public key encodes");
+        let public_key = rsa::RsaPublicKey::try_from(
+            rsa::pkcs8::SubjectPublicKeyInfoRef::from_der(&spki).expect("a public key"),
+        )
+        .expect("an RSA key");
+
+        rsa::pkcs1v15::VerifyingKey::<Sha256>::new(public_key)
+            .verify(
+                &attributes,
+                &rsa::pkcs1v15::Signature::try_from(signer.signature.as_bytes())
+                    .expect("a signature"),
+            )
+            .expect("the signature must verify");
+    }
+
+    /// The digest of the document has to be what the signature commits to.
+    /// A signature over the right structure but the wrong digest would verify
+    /// and mean nothing.
+    #[test]
+    fn the_message_digest_is_the_documents_own() {
+        let (cms, digest, _) = signed();
+
+        let content = ContentInfo::from_der(&cms).expect("a content info");
+        let data = content
+            .content
+            .decode_as::<cms::signed_data::SignedData>()
+            .expect("signed data");
+        let signer = data.signer_infos.0.as_slice().first().expect("a signer");
+        let attributes = signer.signed_attrs.as_ref().expect("signed attributes");
+
+        let carried = attributes
+            .iter()
+            .find(|attribute| attribute.oid == const_oid::db::rfc5911::ID_MESSAGE_DIGEST)
+            .and_then(|attribute| attribute.values.as_slice().first())
+            .map(|value| value.value().to_vec())
+            .expect("a message digest");
+
+        assert_eq!(
+            OctetString::from_der(&[&[0x04, carried.len() as u8][..], &carried[..]].concat())
+                .map(|octets| octets.as_bytes().to_vec())
+                .unwrap_or(carried),
+            digest.to_vec(),
+            "the signature commits to the document's digest"
+        );
+    }
+
+    /// PAdES requires the signature to name the certificate that made it.
+    /// Without it a signature is bound to a key but not to an identity.
+    #[test]
+    fn the_signing_certificate_is_named() {
+        let (cms, _, certificate) = signed();
+
+        let content = ContentInfo::from_der(&cms).expect("a content info");
+        let data = content
+            .content
+            .decode_as::<cms::signed_data::SignedData>()
+            .expect("signed data");
+        let signer = data.signer_infos.0.as_slice().first().expect("a signer");
+        let attribute = signer
+            .signed_attrs
+            .as_ref()
+            .expect("signed attributes")
+            .iter()
+            .find(|attribute| attribute.oid == SIGNING_CERTIFICATE_V2)
+            .expect("the signing certificate attribute");
+
+        let value = attribute.values.as_slice().first().expect("a value");
+        let hash = Sha256::digest(&certificate);
+        assert!(
+            value
+                .value()
+                .windows(hash.len())
+                .any(|window| window == hash.as_slice()),
+            "it has to hold the hash of the certificate that signed"
+        );
+    }
+
+    #[test]
+    fn the_certificate_travels_with_the_signature() {
+        let (cms, _, _) = signed();
+        let content = ContentInfo::from_der(&cms).expect("a content info");
+        let data = content
+            .content
+            .decode_as::<cms::signed_data::SignedData>()
+            .expect("signed data");
+
+        assert_eq!(
+            data.certificates.map(|set| set.0.len()),
+            Some(1),
+            "a verifier needs the certificate, and cannot be assumed to have it"
+        );
+    }
+
+    #[test]
+    fn refuses_to_sign_without_a_certificate() {
+        let (key, _) = key_and_certificate();
+        let error = sign_cms(&[0x42; 32], &key, &[], "2026-09-04T14:30:00Z")
+            .expect_err("there is nothing to sign as");
+        assert!(error.contains("certificate"), "got {error:?}");
+    }
+
+    #[test]
+    fn refuses_a_key_it_cannot_read() {
+        let error = sign_cms(
+            &[0x42; 32],
+            b"not a key",
+            &[vec![0]],
+            "2026-09-04T14:30:00Z",
+        )
+        .expect_err("that is not a key");
+        assert!(error.contains("private key"), "got {error:?}");
+    }
+
+    #[test]
+    fn reads_the_instant_the_caller_states() {
+        // 2026-09-04T14:30:00Z
+        assert_eq!(parse_iso("2026-09-04T14:30:00Z"), Some(1_788_532_200));
+        assert_eq!(parse_iso("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso("not a date"), None);
+    }
 }
