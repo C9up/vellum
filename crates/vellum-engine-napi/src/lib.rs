@@ -678,3 +678,107 @@ impl Task for FlattenFormTask {
 pub fn flatten_form(pdf: Buffer) -> AsyncTask<FlattenFormTask> {
     AsyncTask::new(FlattenFormTask { pdf: pdf.to_vec() })
 }
+
+/// What the signature says about itself.
+#[napi(object)]
+pub struct SignatureOptions {
+    /// Why the document was signed.
+    pub reason: Option<String>,
+    /// Where it was signed.
+    pub location: Option<String>,
+    /// How to reach the signatory.
+    pub contact: Option<String>,
+    /// Who signed, as it should be displayed.
+    pub name: Option<String>,
+    /// When, as an ISO 8601 instant.
+    pub signed_at: Option<String>,
+    /// Bytes reserved for the signature value. Default 16384.
+    pub capacity: Option<u32>,
+}
+
+/// A document with room for a signature, and the digest to sign.
+#[napi(object)]
+pub struct PreparedSignature {
+    pub document: Buffer,
+    /// SHA-256 of everything the signature covers.
+    pub digest: Buffer,
+}
+
+pub struct PrepareSignatureTask {
+    pdf: Vec<u8>,
+    options: vellum_engine::SignatureOptions,
+}
+
+impl Task for PrepareSignatureTask {
+    type Output = vellum_engine::Prepared;
+    type JsValue = PreparedSignature;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("preparing a document for signature", || {
+            vellum_engine::prepare(&self.pdf, &self.options)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(PreparedSignature {
+            document: Buffer::from(output.document),
+            digest: Buffer::from(output.digest.to_vec()),
+        })
+    }
+}
+
+/// Write a document with room for a signature, and say what has to be signed.
+#[napi(ts_return_type = "Promise<PreparedSignature>")]
+pub fn prepare_signature(
+    pdf: Buffer,
+    options: Option<SignatureOptions>,
+) -> AsyncTask<PrepareSignatureTask> {
+    let given = options.unwrap_or(SignatureOptions {
+        reason: None,
+        location: None,
+        contact: None,
+        name: None,
+        signed_at: None,
+        capacity: None,
+    });
+    AsyncTask::new(PrepareSignatureTask {
+        pdf: pdf.to_vec(),
+        options: vellum_engine::SignatureOptions {
+            reason: given.reason,
+            location: given.location,
+            contact: given.contact,
+            name: given.name,
+            signed_at: given.signed_at,
+            capacity: given.capacity.map_or(0, |value| value as usize),
+        },
+    })
+}
+
+pub struct EmbedSignatureTask {
+    prepared: Vec<u8>,
+    value: Vec<u8>,
+}
+
+impl Task for EmbedSignatureTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("putting a signature into a document", || {
+            vellum_engine::embed_signature(&self.prepared, &self.value)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+/// Put the signature value into the space that was reserved for it.
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn embed_signature(prepared: Buffer, value: Buffer) -> AsyncTask<EmbedSignatureTask> {
+    AsyncTask::new(EmbedSignatureTask {
+        prepared: prepared.to_vec(),
+        value: value.to_vec(),
+    })
+}

@@ -20,6 +20,9 @@ skrifa = "0.42"
 # Cutting that font down to the glyphs actually used. Embedding a whole family
 # would put megabytes into every stamped document.
 subsetter = "0.2"
+# The digest a signature is computed over. Already in the lock through lopdf's
+# encryption support, so naming it directly adds no crate.
+sha2 = "0.11"
 # JPEG encoding for page previews, and PNG decoding for stamping: a PNG has
 # to become raw samples to enter a PDF, while a JPEG goes in untouched.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }

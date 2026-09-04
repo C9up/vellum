@@ -17,6 +17,7 @@ import type {
 	PageDimensions,
 } from "./native.js";
 import {
+	embedSignatureNative,
 	extractTextAllNative,
 	extractTextNative,
 	fillFormNative,
@@ -26,6 +27,7 @@ import {
 	mergeNative,
 	metadataNative,
 	pageDimensionsNative,
+	prepareSignatureNative,
 	renderAllNative,
 	renderPageNative,
 	rotateNative,
@@ -63,6 +65,59 @@ export interface VellumConfig {
 	 * that ships its own Helvetica means that one.
 	 */
 	fonts?: Record<string, string>;
+	/**
+	 * Who may sign a document, by the name a caller asks for.
+	 *
+	 * ```ts
+	 * signers: {
+	 *   internal: myLocalSigner,
+	 *   qualified: myProviderSigner,
+	 * }
+	 * ```
+	 *
+	 * A key held here and a key held by a certified provider are the same
+	 * thing to this package, because a signer never sees the document — only
+	 * the digest of it. Which one signs is therefore a line of configuration.
+	 */
+	signers?: Record<string, Signer>;
+}
+
+/**
+ * Whatever turns a digest into a signature.
+ *
+ * It is given the SHA-256 of the byte range the signature covers, and returns
+ * the CMS `SignedData` to put in the document. It is never given the document:
+ * a PDF signature covers a byte range of the file it lives in, so the value
+ * has to be computed over a digest and dropped into space reserved for it.
+ *
+ * That is what lets a key in a file and a certified provider's API be the same
+ * interface — and why signing over the network belongs here rather than in the
+ * engine, which does no I/O.
+ */
+export interface Signer {
+	sign(digest: Buffer): Promise<Buffer>;
+}
+
+/** What the signature says about itself. */
+export interface SignOptions {
+	/** Which signer, by the name it has in `config/vellum.ts`. */
+	signer: string;
+	/** Why the document was signed. */
+	reason?: string;
+	/** Where it was signed. */
+	location?: string;
+	/** How to reach the signatory. */
+	contact?: string;
+	/** Who signed, as it should be displayed. */
+	name?: string;
+	/** When. Defaults to now. */
+	signedAt?: Date;
+	/**
+	 * Bytes reserved for the signature value. Default 16384, comfortable for a
+	 * timestamped signature. The room cannot be found afterwards, so a signer
+	 * that returns more than fits has to be given more here.
+	 */
+	capacity?: number;
 }
 
 /**
@@ -463,6 +518,55 @@ export class Vellum {
 	 */
 	async flattenForm(pdf: Buffer): Promise<Buffer> {
 		return flattenFormNative(pdf);
+	}
+
+	/**
+	 * Sign the document with one of the configured signers.
+	 *
+	 * ```ts
+	 * const signed = await vellum.sign(mandate, {
+	 *   signer: 'qualified',
+	 *   reason: 'Mandat de prévoyance',
+	 *   name: 'Amélie Durand',
+	 * })
+	 * ```
+	 *
+	 * The signature is appended as an **incremental revision**: the bytes it
+	 * signs are preserved exactly, and nothing already in the document is
+	 * rewritten. Rewriting would invalidate any signature already on it and
+	 * destroy the history a signature exists to establish.
+	 *
+	 * The signer is handed the digest of what the signature covers and returns
+	 * the CMS to embed. It never sees the document, which is what makes a
+	 * local key and a certified provider interchangeable.
+	 *
+	 * A visible signature — a drawn one, an image — is a separate matter:
+	 * {@link Vellum.stamp} it on first, then sign.
+	 */
+	async sign(pdf: Buffer, options: SignOptions): Promise<Buffer> {
+		const signer = this.#config.signers?.[options.signer];
+		if (signer === undefined) {
+			const known = Object.keys(this.#config.signers ?? {});
+			throw new VellumError(
+				"UNKNOWN_SIGNER",
+				`No signer named ${options.signer} is configured — ` +
+					(known.length === 0
+						? "config/vellum.ts declares none."
+						: `config/vellum.ts declares ${known.join(", ")}.`),
+			);
+		}
+
+		const prepared = await prepareSignatureNative(pdf, {
+			reason: options.reason,
+			location: options.location,
+			contact: options.contact,
+			name: options.name,
+			signedAt: (options.signedAt ?? new Date()).toISOString(),
+			capacity: options.capacity,
+		});
+
+		const value = await signer.sign(prepared.digest);
+		return embedSignatureNative(prepared.document, value);
 	}
 
 	/** How many pages the document has. */

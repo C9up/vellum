@@ -16,10 +16,12 @@ import type {
 	DocumentInfo,
 	DocumentMetadata,
 	FormField,
+	SignatureOptions as NativeSignatureOptions,
 	StampOptions as NativeStampOptions,
 	TextStampOptions as NativeTextStampOptions,
 	PageDimensions,
 	PageSize,
+	PreparedSignature,
 	RenderOptions,
 } from "./native/generated.js";
 
@@ -49,6 +51,7 @@ export type {
 	FormField,
 	PageDimensions,
 	PageSize,
+	PreparedSignature,
 } from "./native/generated.js";
 
 let native: NativeVellum | undefined;
@@ -274,4 +277,20 @@ export function fillFormNative(
 
 export function flattenFormNative(pdf: Buffer): Promise<Buffer> {
 	return edit("FLATTEN_FAILED", (loaded) => loaded.flattenForm(pdf));
+}
+
+export function prepareSignatureNative(
+	pdf: Buffer,
+	options: NativeSignatureOptions,
+): Promise<PreparedSignature> {
+	return edit("SIGN_FAILED", (loaded) => loaded.prepareSignature(pdf, options));
+}
+
+export function embedSignatureNative(
+	prepared: Buffer,
+	value: Buffer,
+): Promise<Buffer> {
+	return edit("SIGN_FAILED", (loaded) =>
+		loaded.embedSignature(prepared, value),
+	);
 }

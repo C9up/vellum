@@ -1,9 +1,10 @@
 /**
  * @c9up/vellum — PDF toolkit.
  *
- * Converting a PDF to an image is what the package does today; authoring,
- * editing and form filling are the work ahead. The rendering engine is Rust
- * behind NAPI, because PDF has no adequate JavaScript implementation.
+ * Rendering pages to images, reading text and metadata, reshaping documents,
+ * stamping them, filling and flattening their forms, and signing them. The
+ * engine is Rust behind NAPI, because PDF has no adequate JavaScript
+ * implementation — a capability the platform lacks, not an optimisation.
  *
  * ```ts
  * import vellum from '@c9up/vellum/services/main'
@@ -29,6 +30,8 @@ export type {
 	ImageFormat,
 	PageOptions,
 	RenderOptions,
+	Signer,
+	SignOptions,
 	StampOptions,
 	StandardFont,
 	TextStampOptions,
@@ -43,9 +46,9 @@ import { createBlankNative, inspectNative } from "./native.js";
  * Report the shape of a PDF: how many pages it has, which version of the
  * format it claims, and whether it is encrypted.
  *
- * Metadata strings are not reported yet. The `/Info` dictionary stores them in
- * either UTF-16BE or PDFDocEncoding, and a half-correct decoder would quietly
- * mangle every accented character — so that lands with a real decoder.
+ * The `/Info` strings are read by {@link Vellum.metadata} instead, which has
+ * the decoder they need: they are stored in UTF-16BE, UTF-8 or
+ * PDFDocEncoding, and guessing between them mangles every accent.
  */
 export function inspect(pdf: Buffer): DocumentInfo {
 	return inspectNative(pdf);
@@ -54,8 +57,7 @@ export function inspect(pdf: Buffer): DocumentInfo {
 /**
  * Author a document of blank pages, sized in points (72 per inch).
  *
- * This is the authoring path with nothing drawn on it yet; drawing arrives
- * with the generation work.
+ * Draw onto them with {@link Vellum.stamp} and {@link Vellum.stampText}.
  */
 export function createBlank(pages: ReadonlyArray<PageSize>): Buffer {
 	return createBlankNative(pages);

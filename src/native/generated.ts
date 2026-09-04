@@ -133,6 +133,31 @@ export interface FormField {
 	maxLength?: number;
 }
 
+/** What the signature says about itself. */
+
+export interface SignatureOptions {
+	/** Why the document was signed. */
+	reason?: string;
+	/** Where it was signed. */
+	location?: string;
+	/** How to reach the signatory. */
+	contact?: string;
+	/** Who signed, as it should be displayed. */
+	name?: string;
+	/** When, as an ISO 8601 instant. */
+	signedAt?: string;
+	/** Bytes reserved for the signature value. Default 16384. */
+	capacity?: number;
+}
+
+/** A document with room for a signature, and the digest to sign. */
+
+export interface PreparedSignature {
+	document: Buffer;
+	/** SHA-256 of everything the signature covers. */
+	digest: Buffer;
+}
+
 export declare function inspect(bytes: Buffer): DocumentInfo;
 
 export declare function createBlank(pages: Array<PageSize>): Buffer;
@@ -201,3 +226,17 @@ export declare function fillForm(
 /** Paint every field into the page and drop the interactive layer. */
 
 export declare function flattenForm(pdf: Buffer): Promise<Buffer>;
+
+/** Write a document with room for a signature, and say what has to be signed. */
+
+export declare function prepareSignature(
+	pdf: Buffer,
+	options?: SignatureOptions | undefined | null,
+): Promise<PreparedSignature>;
+
+/** Put the signature value into the space that was reserved for it. */
+
+export declare function embedSignature(
+	prepared: Buffer,
+	value: Buffer,
+): Promise<Buffer>;

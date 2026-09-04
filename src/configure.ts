@@ -52,6 +52,16 @@ export default defineConfig({
   // fonts: {
   //   body: app.makePath('resources/fonts/Inter-Regular.ttf'),
   // },
+
+  // Who may sign a document. A signer is handed the digest of what the
+  // signature covers and returns the CMS to embed — it never sees the
+  // document, which is what makes a key you hold and a key held by a
+  // certified provider the same interface.
+  //
+  // signers: {
+  //   internal: myLocalSigner,
+  //   qualified: myProviderSigner,
+  // },
 })`,
 	);
 }
