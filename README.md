@@ -200,7 +200,7 @@ at the rectangle's corner instead would misplace every appearance whose form
 matrix is not the identity, which is most of the ones a real form ships. The
 page's own content is wrapped in `q`/`Q` first: a `cm` outside any pair is
 legal and never restored, so appended content would otherwise inherit a
-transform it never asked for.
+transform it never asked for. `stampText` does the same, for the same reason.
 
 Annotations that are not form widgets — links, notes — are left where they are;
 flattening removes the form, not the document's other furniture. A hidden

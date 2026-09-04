@@ -13,6 +13,7 @@
 use lopdf::{dictionary, Dictionary, Document, Object, ObjectId};
 
 use crate::edit::flatten_inheritance;
+use crate::flatten::isolate_existing_contents;
 
 /// One of the 14 fonts every PDF reader is required to have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +311,9 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         content.extend_from_slice(b") Tj\nET\nQ\n");
 
         register_resources(&mut document, page_id, font_id, state_id)?;
+        // The page is free to leave the graphics state transformed, so its own
+        // content is balanced before ours is appended after it.
+        isolate_existing_contents(&mut document, page_id)?;
         document
             .add_page_contents(page_id, content)
             .map_err(|error| format!("cannot write onto the page: {error}"))?;
@@ -350,6 +354,40 @@ mod tests {
         .expect("rendering should succeed");
         let pixmap = Pixmap::from_png(Cursor::new(png)).expect("the render decodes");
         pixmap.data().iter().any(|pixel| pixel.r < 200)
+    }
+
+    /// A page may leave the graphics state transformed — a `cm` outside any
+    /// `q`/`Q` pair is legal and never restored — and a stamp appended after
+    /// it would inherit that transform. Here the page doubles everything, so
+    /// an unbalanced stamp would land at twice the distance and fall off.
+    #[test]
+    fn a_page_that_left_its_transform_open_does_not_move_the_stamp() {
+        let mut document = Document::load_mem(&blank()).expect("the blank parses");
+        let page_id = *document
+            .get_pages()
+            .values()
+            .next()
+            .expect("the document has a page");
+        document
+            .add_page_contents(page_id, b"2 0 0 2 0 0 cm\n".to_vec())
+            .expect("the fixture takes contents");
+        let mut source = Vec::new();
+        document.save_to(&mut source).expect("the fixture saves");
+
+        let stamped = stamp_text(
+            &source,
+            "PAID",
+            &TextStampOptions {
+                x: 400.0,
+                y: 700.0,
+                size: 24.0,
+                ..Default::default()
+            },
+        )
+        .expect("stamping should succeed");
+
+        // Doubled, the baseline would sit at x 800 on a 595pt-wide page.
+        assert!(has_ink(&stamped, 0), "the stamp belongs on the page");
     }
 
     /// The strongest check available: write text, then read it back with our

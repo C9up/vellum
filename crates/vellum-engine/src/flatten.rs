@@ -177,7 +177,10 @@ fn annotations_of(document: &Document, page_id: ObjectId) -> Vec<Object> {
 /// leave the graphics state transformed. Appended content would inherit that
 /// transform and land somewhere else entirely; wrapping the existing streams
 /// hands us the identity matrix the placement was computed against.
-fn isolate_existing_contents(document: &mut Document, page_id: ObjectId) -> Result<(), String> {
+pub(crate) fn isolate_existing_contents(
+    document: &mut Document,
+    page_id: ObjectId,
+) -> Result<(), String> {
     let existing = document
         .get_dictionary(page_id)
         .ok()
