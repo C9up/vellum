@@ -13,6 +13,7 @@ use krilla::page::PageSettings;
 mod edit;
 mod fill;
 mod flatten;
+mod font;
 mod form;
 mod metadata;
 mod metrics;
@@ -28,7 +29,7 @@ pub use flatten::flatten_form;
 pub use form::{form_fields, FieldKind, FormField};
 pub use metadata::{metadata, DocumentMetadata};
 pub use stamp::{stamp_image, StampOptions};
-pub use stamp_text::{stamp_text, StandardFont, TextStampOptions};
+pub use stamp_text::{stamp_text, FontChoice, StandardFont, TextStampOptions};
 pub use text::{extract_text, extract_text_all};
 
 pub use render::{

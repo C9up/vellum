@@ -13,6 +13,7 @@
 use lopdf::{dictionary, Document, ObjectId};
 
 use crate::edit::flatten_inheritance;
+use crate::font::embed;
 use crate::page::{isolate_existing_contents, page_height, register_resources};
 
 /// One of the 14 fonts every PDF reader is required to have.
@@ -62,7 +63,24 @@ impl StandardFont {
 }
 
 /// Where and how a line of text is written onto a page.
-#[derive(Debug, Clone, Copy)]
+/// Which font writes the text.
+///
+/// A standard font costs nothing and is limited to WinAnsi; a supplied one is
+/// embedded, subsetted to what the text uses, and covers whatever it covers.
+#[derive(Debug, Clone)]
+pub enum FontChoice {
+    Standard(StandardFont),
+    /// The bytes of a TrueType or OpenType file.
+    Supplied(Vec<u8>),
+}
+
+impl Default for FontChoice {
+    fn default() -> Self {
+        Self::Standard(StandardFont::Helvetica)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct TextStampOptions {
     /// Which page, addressed from zero. `None` writes on every page.
     pub page: Option<u32>,
@@ -72,7 +90,7 @@ pub struct TextStampOptions {
     /// letters sit on, not the top of their bounding box.
     pub y: f32,
     pub size: f32,
-    pub font: StandardFont,
+    pub font: FontChoice,
     pub color: [u8; 3],
     /// 0 is invisible, 1 is opaque.
     pub opacity: f32,
@@ -85,7 +103,7 @@ impl Default for TextStampOptions {
             x: 0.0,
             y: 0.0,
             size: 12.0,
-            font: StandardFont::Helvetica,
+            font: FontChoice::default(),
             color: [0, 0, 0],
             opacity: 1.0,
         }
@@ -176,8 +194,6 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         return Err("text position must be finite".to_string());
     }
 
-    let encoded = escape_pdf_literal(&to_win_ansi(text)?);
-
     let mut document =
         Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;
     flatten_inheritance(&mut document);
@@ -193,12 +209,28 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         }
     }
 
-    let font_id = document.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => options.font.base_font(),
-        "Encoding" => "WinAnsiEncoding",
-    });
+    // A standard font is named and the text goes in as WinAnsi bytes; a
+    // supplied one is embedded and the text goes in as glyph identifiers.
+    let (font_id, shown) = match &options.font {
+        FontChoice::Standard(standard) => {
+            let font_id = document.add_object(dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => standard.base_font(),
+                "Encoding" => "WinAnsiEncoding",
+            });
+            let mut literal = vec![b'('];
+            literal.extend_from_slice(&escape_pdf_literal(&to_win_ansi(text)?));
+            literal.extend_from_slice(b") Tj");
+            (font_id, literal)
+        }
+        FontChoice::Supplied(data) => {
+            let embedded = embed(&mut document, data, text)?;
+            let mut shown = embedded.as_hex().into_bytes();
+            shown.extend_from_slice(b" Tj");
+            (embedded.font_id, shown)
+        }
+    };
     let state_id = if options.opacity < 1.0 {
         Some(document.add_object(dictionary! {
             "Type" => "ExtGState",
@@ -245,9 +277,8 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
             )
             .as_bytes(),
         );
-        content.push(b'(');
-        content.extend_from_slice(&encoded);
-        content.extend_from_slice(b") Tj\nET\nQ\n");
+        content.extend_from_slice(&shown);
+        content.extend_from_slice(b"\nET\nQ\n");
 
         register_resources(
             &mut document,
@@ -340,6 +371,74 @@ mod tests {
 
         // Doubled, the baseline would sit at x 800 on a 595pt-wide page.
         assert!(has_ink(&stamped, 0), "the stamp belongs on the page");
+    }
+
+    /// The whole reason for supplying a font: WinAnsi has no byte for Ř, so
+    /// the standard-font path refuses it outright. An embedded font draws it —
+    /// and the text still reads back, which is what says the /ToUnicode map
+    /// was written correctly. Without one the glyphs appear and the document
+    /// cannot be searched or copied from.
+    #[test]
+    fn a_supplied_font_writes_what_winansi_cannot() {
+        let beyond = "Uměl Řehoř";
+        assert!(
+            to_win_ansi(beyond).is_err(),
+            "the point of the test is that a standard font cannot carry this"
+        );
+
+        let stamped = stamp_text(
+            &blank(),
+            beyond,
+            &TextStampOptions {
+                x: 40.0,
+                y: 120.0,
+                size: 28.0,
+                font: FontChoice::Supplied(crate::font::tests::TEST_FONT.to_vec()),
+                ..Default::default()
+            },
+        )
+        .expect("stamping with a supplied font should succeed");
+
+        assert!(has_ink(&stamped, 0), "the text is drawn");
+        assert_eq!(
+            crate::extract_text(&stamped, 0).expect("the text reads back"),
+            beyond,
+            "and it reads back, so /ToUnicode is right"
+        );
+    }
+
+    /// A supplied font carries the file; a standard one names it. The
+    /// difference is the whole trade-off, so it is worth pinning.
+    #[test]
+    fn a_standard_font_stays_out_of_the_file() {
+        let named = stamp_text(
+            &blank(),
+            "Amelie",
+            &TextStampOptions {
+                size: 24.0,
+                y: 100.0,
+                ..Default::default()
+            },
+        )
+        .expect("stamping should succeed");
+        let carried = stamp_text(
+            &blank(),
+            "Amelie",
+            &TextStampOptions {
+                size: 24.0,
+                y: 100.0,
+                font: FontChoice::Supplied(crate::font::tests::TEST_FONT.to_vec()),
+                ..Default::default()
+            },
+        )
+        .expect("stamping should succeed");
+
+        assert!(
+            carried.len() > named.len() + 1000,
+            "the supplied font has to be in there, got {} against {}",
+            carried.len(),
+            named.len()
+        );
     }
 
     /// The strongest check available: write text, then read it back with our

@@ -14,6 +14,12 @@ krilla = { version = "0.8", default-features = false, features = ["pdf", "raster
 # Rasterising a page. Pure Rust, so the binary stays self-contained — the
 # reason pdfium was not used despite being more complete.
 hayro = "0.7.1"
+# Reading a font a caller supplies: its character map, its glyph advances and
+# the metrics a PDF font descriptor has to declare.
+skrifa = "0.42"
+# Cutting that font down to the glyphs actually used. Embedding a whole family
+# would put megabytes into every stamped document.
+subsetter = "0.2"
 # JPEG encoding for page previews, and PNG decoding for stamping: a PNG has
 # to become raw samples to enter a PDF, while a JPEG goes in untouched.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }

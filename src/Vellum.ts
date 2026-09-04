@@ -7,6 +7,8 @@
  * thread serving requests.
  */
 
+import { readFile } from "node:fs/promises";
+
 import { VellumError } from "./errors.js";
 import type {
 	DocumentInfo,
@@ -48,6 +50,19 @@ export interface VellumConfig {
 	quality?: number;
 	/** Default background: `#rgb`, `#rrggbb`, `#rrggbbaa` or `"transparent"`. */
 	background?: string;
+	/**
+	 * Fonts to write text with, by the name a caller asks for them by. Values
+	 * are paths to TrueType or OpenType files.
+	 *
+	 * ```ts
+	 * fonts: { body: app.makePath('resources/fonts/Inter-Regular.ttf') }
+	 * ```
+	 *
+	 * A name declared here is looked up before the standard fonts, so calling
+	 * one `Helvetica` shadows the standard one — deliberately, since a project
+	 * that ships its own Helvetica means that one.
+	 */
+	fonts?: Record<string, string>;
 }
 
 /**
@@ -77,8 +92,13 @@ export interface TextStampOptions extends PageOptions {
 	y?: number;
 	/** Type size in points. Default 12. */
 	size?: number;
-	/** Default `"Helvetica"`. */
-	font?: StandardFont;
+	/**
+	 * A font named in `config/vellum.ts`, or one of the 14 standard fonts.
+	 * Default `"Helvetica"`.
+	 */
+	// The intersection keeps the standard names suggested while still
+	// accepting a configured one.
+	font?: StandardFont | (string & {});
 	/** `#rgb` or `#rrggbb`. Default black. */
 	color?: string;
 	/** 0 is invisible, 1 is opaque. */
@@ -118,9 +138,39 @@ export interface RenderOptions extends VellumConfig, PageOptions {}
 
 export class Vellum {
 	readonly #config: VellumConfig;
+	/** Configured fonts, read once each. They do not change under us. */
+	readonly #fonts = new Map<string, Buffer>();
 
 	constructor(config: VellumConfig = {}) {
 		this.#config = config;
+	}
+
+	/**
+	 * The bytes of a configured font, or `undefined` when the name is not one.
+	 *
+	 * A name that is not configured falls through to the standard fonts, which
+	 * is what makes `font: 'Times-Roman'` keep working with no configuration
+	 * at all.
+	 */
+	async #font(name: string | undefined): Promise<Buffer | undefined> {
+		if (name === undefined) return undefined;
+		const path = this.#config.fonts?.[name];
+		if (path === undefined) return undefined;
+
+		const loaded = this.#fonts.get(path);
+		if (loaded !== undefined) return loaded;
+
+		try {
+			const data = await readFile(path);
+			this.#fonts.set(path, data);
+			return data;
+		} catch (error) {
+			throw new VellumError(
+				"FONT_UNREADABLE",
+				`The font ${name} is configured as ${path}, which cannot be read.`,
+				{ cause: error },
+			);
+		}
 	}
 
 	/** The configured defaults, as the service resolved them. */
@@ -309,10 +359,20 @@ export class Vellum {
 	 * })
 	 * ```
 	 *
-	 * Uses the 14 standard fonts, which a PDF may reference without embedding
-	 * — so nothing is added to the file and no font has to be supplied. The
-	 * trade-off is the WinAnsi character set: Western European text is
-	 * covered, and anything outside it is refused rather than mangled.
+	 * `font` names one of the 14 standard fonts by default. A PDF may
+	 * reference those without embedding them, so nothing is added to the file
+	 * — at the cost of the WinAnsi character set, outside which text is
+	 * refused rather than mangled.
+	 *
+	 * Naming a font declared in `config/vellum.ts` instead embeds it,
+	 * subsetted to the characters actually written, and lifts that limit:
+	 *
+	 * ```ts
+	 * // config/vellum.ts
+	 * fonts: { body: app.makePath('resources/fonts/Inter-Regular.ttf') }
+	 *
+	 * await vellum.stampText(pdf, 'Uměl Řehoř', { font: 'body' })
+	 * ```
 	 *
 	 * Naming no page writes on every page, which is what a draft marking
 	 * wants.
@@ -322,12 +382,14 @@ export class Vellum {
 		text: string,
 		options: TextStampOptions = {},
 	): Promise<Buffer> {
+		const fontData = await this.#font(options.font);
 		return stampTextNative(pdf, text, {
 			page: options.page === undefined ? undefined : this.#pageIndex(options),
 			x: options.x,
 			y: options.y,
 			size: options.size,
-			font: options.font,
+			font: fontData === undefined ? options.font : undefined,
+			fontData,
 			color: options.color,
 			opacity: options.opacity,
 		});

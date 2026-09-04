@@ -175,6 +175,36 @@ mask — which is what makes a signature drawn on a tablet transparent
 everywhere but the stroke. A CMYK JPEG is refused rather than silently
 inverted.
 
+## Fonts
+
+`stampText` uses the 14 standard fonts by default. A PDF may reference those
+without embedding them, so nothing is added to the file and no font has to be
+supplied — at the cost of the WinAnsi character set, outside which text is
+refused rather than mangled.
+
+A font declared in `config/vellum.ts` is embedded instead:
+
+```ts
+// config/vellum.ts
+export default defineConfig({
+  fonts: { body: app.makePath('resources/fonts/Inter-Regular.ttf') },
+})
+
+await vellum.stampText(pdf, 'Uměl Řehoř', { font: 'body' })
+```
+
+It is **subsetted to the characters actually written**, because embedding a
+family whole would put megabytes into every stamped document, and a
+`/ToUnicode` table is written alongside it — without one the text is drawn
+correctly and cannot be selected, copied or searched, a loss that only shows up
+when someone tries to read the document back.
+
+A configured name is looked up before the standard fonts, so calling one
+`Helvetica` shadows the standard one; a name that is not configured falls
+through, which is what keeps `font: 'Times-Roman'` working with no
+configuration at all. A character the supplied font has no glyph for is
+refused by name rather than dropped.
+
 ## Interactive forms
 
 `formFields` lists a document's AcroForm fields in declaration order. `name` is

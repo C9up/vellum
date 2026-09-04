@@ -44,6 +44,14 @@ export default defineConfig({
   // A PDF paints no background of its own, so rendering it transparent
   // makes black text invisible over a dark viewer.
   background: '#ffffff',
+
+  // Fonts to write text with, by the name you ask for them by. A font
+  // declared here is embedded in the document, subsetted to the characters
+  // written, which lifts the WinAnsi limit of the standard fonts.
+  //
+  // fonts: {
+  //   body: app.makePath('resources/fonts/Inter-Regular.ttf'),
+  // },
 })`,
 	);
 }

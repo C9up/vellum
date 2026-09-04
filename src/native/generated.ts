@@ -89,8 +89,17 @@ export interface TextStampOptions {
 	y?: number;
 	/** Type size in points. Default 12. */
 	size?: number;
-	/** One of the 14 standard fonts, e.g. `"Helvetica"`, `"Times-Roman"`. */
+	/**
+	 * One of the 14 standard fonts, e.g. `"Helvetica"`, `"Times-Roman"`.
+	 * Ignored when `fontData` is given.
+	 */
 	font?: string;
+	/**
+	 * A TrueType or OpenType file to embed, subsetted to the text. Lifts the
+	 * WinAnsi limit of the standard fonts, at the cost of carrying the glyphs
+	 * in the document.
+	 */
+	fontData?: Buffer;
 	/** `#rgb` or `#rrggbb`. Default black. */
 	color?: string;
 	/** 0 is invisible, 1 is opaque. Default 1. */

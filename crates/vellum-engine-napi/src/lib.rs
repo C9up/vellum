@@ -497,7 +497,12 @@ pub struct TextStampOptions {
     /// Type size in points. Default 12.
     pub size: Option<f64>,
     /// One of the 14 standard fonts, e.g. `"Helvetica"`, `"Times-Roman"`.
+    /// Ignored when `fontData` is given.
     pub font: Option<String>,
+    /// A TrueType or OpenType file to embed, subsetted to the text. Lifts the
+    /// WinAnsi limit of the standard fonts, at the cost of carrying the glyphs
+    /// in the document.
+    pub font_data: Option<Buffer>,
     /// `#rgb` or `#rrggbb`. Default black.
     pub color: Option<String>,
     /// 0 is invisible, 1 is opaque. Default 1.
@@ -535,11 +540,13 @@ pub fn stamp_text(
     let options = match options {
         None => defaults,
         Some(given) => {
-            let font = match given.font.as_deref() {
-                Some(name) => {
-                    vellum_engine::StandardFont::parse(name).map_err(Error::from_reason)?
-                }
-                None => defaults.font,
+            let font = match (&given.font_data, given.font.as_deref()) {
+                // Supplied bytes win: a caller who passed a font meant it.
+                (Some(data), _) => vellum_engine::FontChoice::Supplied(data.to_vec()),
+                (None, Some(name)) => vellum_engine::FontChoice::Standard(
+                    vellum_engine::StandardFont::parse(name).map_err(Error::from_reason)?,
+                ),
+                (None, None) => defaults.font.clone(),
             };
             // The colour parser is the engine's, so `#rgb` means the same
             // thing here as it does for a render background.
