@@ -10,6 +10,7 @@
 
 use krilla::geom::Size;
 use krilla::page::PageSettings;
+mod cms;
 mod edit;
 mod fill;
 mod flatten;
