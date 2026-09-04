@@ -15,6 +15,7 @@ import type {
 	DocumentMetadata,
 	FormField,
 	PageDimensions,
+	SignatureReport,
 } from "./native.js";
 import {
 	embedSignatureNative,
@@ -35,6 +36,7 @@ import {
 	splitNative,
 	stampNative,
 	stampTextNative,
+	verifySignaturesNative,
 } from "./native.js";
 
 /** Image encodings a page can be rasterised to. */
@@ -567,6 +569,33 @@ export class Vellum {
 
 		const value = await signer.sign(prepared.digest);
 		return embedSignatureNative(prepared.document, value);
+	}
+
+	/**
+	 * Report on every signature the document carries.
+	 *
+	 * ```ts
+	 * for (const signature of await vellum.verifySignatures(mandate)) {
+	 *   if (!signature.coversWholeDocument) reject('content was added after signing')
+	 *   if (!signature.digestMatches) reject('the document has changed')
+	 * }
+	 * ```
+	 *
+	 * `coversWholeDocument` is the one that catches the trap everybody meets
+	 * first: content appended after a signature is not covered by it, and the
+	 * arithmetic over the covered part still checks out. A document whose
+	 * second half arrived later is not a signed document.
+	 *
+	 * This establishes **integrity and authorship, not trust**. It does not ask
+	 * whether the certificate comes from an authority you accept, nor whether
+	 * it has since been revoked: that needs a trust store and a live revocation
+	 * check, neither of which belongs in a PDF engine.
+	 *
+	 * A document with no signatures reports none. That is an answer, not a
+	 * failure.
+	 */
+	async verifySignatures(pdf: Buffer): Promise<SignatureReport[]> {
+		return verifySignaturesNative(pdf);
 	}
 
 	/** How many pages the document has. */

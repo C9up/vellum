@@ -24,6 +24,7 @@ export type {
 	FormField,
 	PageDimensions,
 	PageSize,
+	SignatureReport,
 } from "./native.js";
 export { isNativeAvailable, VellumNativeRequiredError } from "./native.js";
 export type { Pkcs8SignerOptions, TimestampOptions } from "./signers.js";

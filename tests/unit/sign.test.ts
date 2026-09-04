@@ -214,3 +214,57 @@ describe("timestamping", () => {
 		vi.unstubAllGlobals();
 	});
 });
+
+/**
+ * A signer returning the checked-in CMS. Its signature is real but commits to
+ * a digest that is not the document's — which is the shape a tampered file
+ * has, and lets the checks be exercised without a key.
+ */
+function stubCmsSigner(): Signer {
+	const cms = readFileSync(
+		fileURLToPath(new URL("../fixtures/signature.der", import.meta.url)),
+	);
+	return {
+		async sign() {
+			return cms;
+		},
+	};
+}
+
+describe("checking the signatures on a document", () => {
+	it("reports none for a document that has none", async () => {
+		const vellum = new Vellum();
+		await expect(vellum.verifySignatures(createBlank([A4]))).resolves.toEqual(
+			[],
+		);
+	});
+
+	it("reports what it could not check rather than throwing", async () => {
+		// The stub signer's CMS is real but signs a digest that is not this
+		// document's, which is exactly the shape of a tampered file.
+		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+
+		const [report] = await vellum.verifySignatures(signed);
+		expect(report?.coversWholeDocument).toBe(true);
+		expect(report?.digestMatches).toBe(false);
+		expect(report?.problems.join(" ")).toMatch(/changed since it was signed/);
+	});
+
+	it("catches content appended after the signature", async () => {
+		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
+		const appended = Buffer.concat([signed, Buffer.from("\n% added later\n")]);
+
+		const [report] = await vellum.verifySignatures(appended);
+		expect(report?.coversWholeDocument).toBe(false);
+		expect(report?.problems.join(" ")).toMatch(/added after this signature/);
+	});
+
+	it("refuses bytes that are not a PDF", async () => {
+		const vellum = new Vellum();
+		await expect(
+			vellum.verifySignatures(Buffer.from("not a PDF")),
+		).rejects.toThrow(VellumError);
+	});
+});

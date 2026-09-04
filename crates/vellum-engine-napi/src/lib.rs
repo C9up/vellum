@@ -859,3 +859,65 @@ pub fn attach_timestamp(cms: Buffer, response: Buffer, nonce: Buffer) -> Result<
     })?;
     Ok(Buffer::from(signed))
 }
+
+/// What one signature on a document turns out to be.
+#[napi(object)]
+pub struct SignatureReport {
+    /// The field the signature sits in.
+    pub field: String,
+    /// The signed range runs to the last byte, so nothing was appended after.
+    pub covers_whole_document: bool,
+    /// The document's bytes hash to what the signature committed to.
+    pub digest_matches: bool,
+    /// The signature verifies against the certificate it carries.
+    pub signature_verifies: bool,
+    /// Who the certificate says signed.
+    pub signer: Option<String>,
+    /// When the signature says it was made.
+    pub signed_at: Option<String>,
+    /// An authority has vouched for when, so it outlives the certificate.
+    pub timestamped: bool,
+    /// Everything that could not be checked, or checked out wrong.
+    pub problems: Vec<String>,
+}
+
+pub struct VerifySignaturesTask {
+    pdf: Vec<u8>,
+}
+
+impl Task for VerifySignaturesTask {
+    type Output = Vec<vellum_engine::SignatureReport>;
+    type JsValue = Vec<SignatureReport>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("checking signatures", || {
+            vellum_engine::verify_signatures(&self.pdf)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output
+            .into_iter()
+            .map(|report| SignatureReport {
+                field: report.field,
+                covers_whole_document: report.covers_whole_document,
+                digest_matches: report.digest_matches,
+                signature_verifies: report.signature_verifies,
+                signer: report.signer,
+                signed_at: report.signed_at,
+                timestamped: report.timestamped,
+                problems: report.problems,
+            })
+            .collect())
+    }
+}
+
+/// Report on every signature the document carries.
+///
+/// This establishes integrity and authorship, not trust: it does not ask
+/// whether the certificate comes from an authority you accept, nor whether it
+/// has been revoked.
+#[napi(ts_return_type = "Promise<SignatureReport[]>")]
+pub fn verify_signatures(pdf: Buffer) -> AsyncTask<VerifySignaturesTask> {
+    AsyncTask::new(VerifySignaturesTask { pdf: pdf.to_vec() })
+}

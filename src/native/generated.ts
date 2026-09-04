@@ -167,6 +167,27 @@ export interface TimestampQuery {
 	nonce: Buffer;
 }
 
+/** What one signature on a document turns out to be. */
+
+export interface SignatureReport {
+	/** The field the signature sits in. */
+	field: string;
+	/** The signed range runs to the last byte, so nothing was appended after. */
+	coversWholeDocument: boolean;
+	/** The document's bytes hash to what the signature committed to. */
+	digestMatches: boolean;
+	/** The signature verifies against the certificate it carries. */
+	signatureVerifies: boolean;
+	/** Who the certificate says signed. */
+	signer?: string;
+	/** When the signature says it was made. */
+	signedAt?: string;
+	/** An authority has vouched for when, so it outlives the certificate. */
+	timestamped: boolean;
+	/** Everything that could not be checked, or checked out wrong. */
+	problems: Array<string>;
+}
+
 export declare function inspect(bytes: Buffer): DocumentInfo;
 
 export declare function createBlank(pages: Array<PageSize>): Buffer;
@@ -274,3 +295,15 @@ export declare function attachTimestamp(
 	response: Buffer,
 	nonce: Buffer,
 ): Buffer;
+
+/**
+ * Report on every signature the document carries.
+ *
+ * This establishes integrity and authorship, not trust: it does not ask
+ * whether the certificate comes from an authority you accept, nor whether it
+ * has been revoked.
+ */
+
+export declare function verifySignatures(
+	pdf: Buffer,
+): Promise<SignatureReport[]>;

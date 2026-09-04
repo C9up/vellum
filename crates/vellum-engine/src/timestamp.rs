@@ -252,7 +252,7 @@ pub fn attach_timestamp(cms: &[u8], response: &[u8], nonce: u64) -> Result<Vec<u
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use cms::signed_data::{EncapsulatedContentInfo, SignerInfos};
     use der::asn1::GeneralizedTime;
 
@@ -330,6 +330,12 @@ mod tests {
         }
         .to_der()
         .unwrap()
+    }
+
+    /// A granted answer for a given signature, so other modules can test what
+    /// a timestamped signature looks like without an authority.
+    pub(crate) fn granted_response(cms: &[u8], nonce: u64) -> Vec<u8> {
+        response(0, &imprint_of(cms), nonce)
     }
 
     fn imprint_of(cms: &[u8]) -> Vec<u8> {

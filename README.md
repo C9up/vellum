@@ -375,13 +375,42 @@ candidate in the one path where correctness is legally load-bearing is a worse
 trade than a duplicated hash, which produces identical bytes by definition.
 One line of `Cargo.toml` to revisit when they ship.
 
+## Checking a signature
+
+Signing is half the job. A document that arrives signed is worth nothing until
+someone has checked it:
+
+```ts
+for (const signature of await vellum.verifySignatures(mandate)) {
+  if (!signature.coversWholeDocument) reject('content was added after signing')
+  if (!signature.digestMatches) reject('the document has changed')
+  if (!signature.signatureVerifies) reject('the signature does not match')
+}
+```
+
+`coversWholeDocument` is the one that catches the trap everybody meets first:
+**content appended after a signature is not covered by it**, and the arithmetic
+over the covered part still checks out. A reader that verifies only the
+digest will happily call such a document signed. A document whose second half
+arrived later is not one.
+
+The report also names the signer, the time they stated, and whether an
+authority has timestamped it.
+
+What this establishes is **integrity and authorship, not trust**. It does not
+ask whether the certificate comes from an authority you accept, nor whether it
+has since been revoked: that needs a trust store and a live revocation check,
+neither of which belongs in a PDF engine. The report says what was checked, and
+a caller needing more has the certificate to check it with.
+
 ## Status
 
 Rendering to images, metadata, text extraction, document operations, stamping
 — image and text — supplied fonts, interactive forms read, filled, laid out
-and flattened, and signing with a key you hold, timestamped, are complete.
+and flattened, and signatures made, timestamped and checked, are complete.
 What remains is an adapter for a certified provider, which is a short function
-returning a `Signer` and belongs to whoever has the account.
+returning a `Signer` and belongs to whoever has the account, and trust
+evaluation — a store of accepted authorities and a revocation check.
 
 ## Building the native engine
 

@@ -23,6 +23,7 @@ import type {
 	PageSize,
 	PreparedSignature,
 	RenderOptions,
+	SignatureReport,
 	TimestampQuery,
 } from "./native/generated.js";
 
@@ -53,6 +54,7 @@ export type {
 	PageDimensions,
 	PageSize,
 	PreparedSignature,
+	SignatureReport,
 } from "./native/generated.js";
 
 let native: NativeVellum | undefined;
@@ -319,4 +321,10 @@ export function attachTimestampNative(
 	return run("TIMESTAMP_FAILED", (loaded) =>
 		loaded.attachTimestamp(cms, response, nonce),
 	);
+}
+
+export function verifySignaturesNative(
+	pdf: Buffer,
+): Promise<SignatureReport[]> {
+	return edit("VERIFY_FAILED", (loaded) => loaded.verifySignatures(pdf));
 }
