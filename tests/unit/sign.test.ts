@@ -357,3 +357,81 @@ describe("asking whether a certificate still stands", () => {
 		vi.unstubAllGlobals();
 	});
 });
+
+/** The authority the fixture signature chains to. A certificate, nothing more. */
+function testAuthority(): Buffer {
+	return readFileSync(
+		fileURLToPath(new URL("../fixtures/authority.der", import.meta.url)),
+	);
+}
+
+describe("asking the issuer named by the certificate", () => {
+	async function signedUnderTheAuthority() {
+		const vellum = new Vellum({
+			signers: { internal: stubCmsSigner() },
+			trustedAnchors: [testAuthority()],
+		});
+		return {
+			vellum,
+			signed: await vellum.sign(createBlank([A4]), { signer: "internal" }),
+		};
+	}
+
+	it("finds the issuer once the authority is accepted", async () => {
+		const { vellum, signed } = await signedUnderTheAuthority();
+
+		const [report] = await vellum.verifySignatures(signed);
+		expect(report?.chain).toHaveLength(2);
+		expect(report?.issuerCertificate).toBeDefined();
+	});
+
+	it("asks the responder the certificate names", async () => {
+		const { vellum, signed } = await signedUnderTheAuthority();
+		let asked: { url: string; type: string | null } | undefined;
+		vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+			asked = {
+				url: String(url),
+				type: new Headers(init?.headers).get("content-type"),
+			};
+			return new Response(new Uint8Array([0x30, 0x00]), { status: 200 });
+		});
+
+		const [report] = await vellum.verifySignatures(signed, {
+			checkRevocation: true,
+		});
+
+		expect(asked?.url).toBe("http://ocsp.vellum.test/");
+		expect(asked?.type).toBe("application/ocsp-request");
+		// The answer was nonsense, and nonsense is never "good".
+		expect(report?.revocation?.status).toBe("unknown");
+		vi.unstubAllGlobals();
+	});
+
+	it("does not call an unanswered responder good", async () => {
+		const { vellum, signed } = await signedUnderTheAuthority();
+		vi.stubGlobal("fetch", async () => new Response("no", { status: 503 }));
+
+		const [report] = await vellum.verifySignatures(signed, {
+			checkRevocation: true,
+		});
+
+		expect(report?.revocation?.status).toBe("unknown");
+		expect(report?.revocation?.detail).toMatch(/answered 503/);
+		vi.unstubAllGlobals();
+	});
+
+	it("does not call an unreachable responder good either", async () => {
+		const { vellum, signed } = await signedUnderTheAuthority();
+		vi.stubGlobal("fetch", async () => {
+			throw new Error("ECONNREFUSED");
+		});
+
+		const [report] = await vellum.verifySignatures(signed, {
+			checkRevocation: true,
+		});
+
+		expect(report?.revocation?.status).toBe("unknown");
+		expect(report?.revocation?.detail).toMatch(/could not be reached/);
+		vi.unstubAllGlobals();
+	});
+});

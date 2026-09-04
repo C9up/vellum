@@ -552,16 +552,17 @@ pub(crate) mod tests {
 
     /// Write the fixture the TypeScript tests use.
     ///
-    /// They need a real CMS to hang a timestamp on, and cannot build one:
-    /// minting a certificate is not something Node does. What it writes holds
-    /// a certificate and a signature and no private key, so it is safe to keep
-    /// in the repository.
+    /// They need a real CMS to hang a timestamp on, and an authority to accept
+    /// as an anchor, and cannot build either: minting a certificate is not
+    /// something Node does. Both files are public by nature — a signature and
+    /// certificates, no private key — so they are safe to keep in the
+    /// repository.
     ///
     ///     cargo test -p vellum-engine write_the_typescript_fixture -- --ignored
     #[test]
     #[ignore = "regenerates a checked-in fixture"]
     fn write_the_typescript_fixture() {
-        let (key, certificate) = key_and_certificate();
+        let (key, certificate, authority) = key_and_chain();
         let cms = sign_cms(
             &[0x42; 32],
             &key,
@@ -570,6 +571,10 @@ pub(crate) mod tests {
         )
         .expect("signing should succeed");
         std::fs::write("../../tests/fixtures/signature.der", cms).expect("the fixture is written");
+        // The authority the signature chains to, so a test can accept it as an
+        // anchor. A certificate is public by nature; nothing secret is written.
+        std::fs::write("../../tests/fixtures/authority.der", authority)
+            .expect("the fixture is written");
     }
 
     #[test]

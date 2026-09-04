@@ -197,3 +197,22 @@ describe("Vellum — configuration", () => {
 		expect(new Vellum(config).config).toEqual(config);
 	});
 });
+
+describe("the whole-document operations refuse bad input too", () => {
+	const service = new Vellum();
+
+	// Their per-page siblings are covered; these take a different path through
+	// the engine and had no test of their own, so a failure there would have
+	// surfaced as an unhelpful raw error rather than a coded one.
+	it("refuses bytes that are not a PDF when rendering every page", async () => {
+		await expect(service.renderAll(Buffer.from("not a PDF"))).rejects.toThrow(
+			VellumError,
+		);
+	});
+
+	it("refuses bytes that are not a PDF when extracting every page", async () => {
+		await expect(
+			service.extractTextAll(Buffer.from("not a PDF")),
+		).rejects.toThrow(VellumError);
+	});
+});
