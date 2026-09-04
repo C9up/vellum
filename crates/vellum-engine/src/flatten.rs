@@ -13,10 +13,11 @@
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
+use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::fill::widgets_of;
 use crate::form::fields_of;
+use crate::page::{isolate_existing_contents, register_resources};
 
 /// Bit 2 of an annotation's `/F`: the annotation is shown nowhere. Painting it
 /// into the page would make visible what the document hid.
@@ -171,83 +172,6 @@ fn annotations_of(document: &Document, page_id: ObjectId) -> Vec<Object> {
     }
 }
 
-/// Balance whatever the page already draws before appending to it.
-///
-/// A `cm` outside any `q`/`Q` pair is legal and permanent, so a page is free to
-/// leave the graphics state transformed. Appended content would inherit that
-/// transform and land somewhere else entirely; wrapping the existing streams
-/// hands us the identity matrix the placement was computed against.
-pub(crate) fn isolate_existing_contents(
-    document: &mut Document,
-    page_id: ObjectId,
-) -> Result<(), String> {
-    let existing = document
-        .get_dictionary(page_id)
-        .ok()
-        .and_then(|page| page.get(b"Contents").ok().cloned());
-
-    let mut streams: Vec<Object> = match existing {
-        Some(Object::Array(items)) => items,
-        Some(Object::Reference(id)) => vec![Object::Reference(id)],
-        _ => return Ok(()),
-    };
-    if streams.is_empty() {
-        return Ok(());
-    }
-
-    let open = document.add_object(Stream::new(Dictionary::new(), b"q\n".to_vec()));
-    let close = document.add_object(Stream::new(Dictionary::new(), b"Q\n".to_vec()));
-    streams.insert(0, Object::Reference(open));
-    streams.push(Object::Reference(close));
-
-    let page = document
-        .get_object_mut(page_id)
-        .and_then(|object| object.as_dict_mut())
-        .map_err(|error| format!("cannot update page: {error}"))?;
-    page.set("Contents", Object::Array(streams));
-    Ok(())
-}
-
-/// Ensure the page's `Resources` name every appearance we are about to paint.
-fn register_xobjects(
-    document: &mut Document,
-    page_id: ObjectId,
-    entries: &[(String, ObjectId)],
-) -> Result<(), String> {
-    let existing = document
-        .get_dictionary(page_id)
-        .ok()
-        .and_then(|page| page.get(b"Resources").ok().cloned());
-
-    let mut resources = match existing {
-        Some(Object::Reference(id)) => document
-            .get_dictionary(id)
-            .cloned()
-            .map_err(|error| format!("cannot read page resources: {error}"))?,
-        Some(Object::Dictionary(dictionary)) => dictionary,
-        _ => Dictionary::new(),
-    };
-
-    let mut xobjects = match resources.get(b"XObject") {
-        Ok(Object::Reference(id)) => document.get_dictionary(*id).cloned().unwrap_or_default(),
-        Ok(Object::Dictionary(dictionary)) => dictionary.clone(),
-        _ => Dictionary::new(),
-    };
-    for (key, id) in entries {
-        xobjects.set(key.as_str(), Object::Reference(*id));
-    }
-    resources.set("XObject", Object::Dictionary(xobjects));
-
-    // Written back inline so the page owns them, rather than mutating a
-    // resource dictionary that other pages may share.
-    let page = document
-        .get_object_mut(page_id)
-        .and_then(|object| object.as_dict_mut())
-        .map_err(|error| format!("cannot update page: {error}"))?;
-    page.set("Resources", Object::Dictionary(resources));
-    Ok(())
-}
-
 /// Drop the `/AcroForm` entry: with no widgets left, an interactive form
 /// pointing at fields that draw nothing is worse than none at all.
 fn remove_acroform(document: &mut Document) {
@@ -328,7 +252,7 @@ fn flatten_page(
         .iter()
         .map(|(key, stream_id, _)| (key.clone(), *stream_id))
         .collect();
-    register_xobjects(document, page_id, &entries)?;
+    register_resources(document, page_id, "XObject", &entries)?;
 
     let mut content: Vec<u8> = Vec::new();
     for (key, _, matrix) in &painted {
@@ -392,7 +316,7 @@ pub fn flatten_form(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use lopdf::dictionary;
+    use lopdf::{dictionary, Stream};
 
     use super::*;
     use crate::fill::tests::{form_document, ink_in};

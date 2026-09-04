@@ -3,29 +3,26 @@
 //! This is the signature a technician draws on a tablet, the photo attached to
 //! an intervention report, the watermark on a draft.
 //!
-//! It goes through krilla's authoring path rather than hand-written content
-//! streams: krilla's `pdf` feature can re-embed an existing page as a Form
-//! XObject, so the original page is drawn onto a fresh one and the image goes
-//! over it. Its README says embedding existing pages is out of scope; the
-//! published `Cargo.toml` says otherwise, and that feature is what makes this
-//! module possible.
+//! The picture is written into the document that already exists, as an image
+//! XObject named in the page's resources and drawn from its content stream.
+//! The obvious alternative — re-authoring the file and redrawing each page
+//! onto a fresh one — loses everything the page structure carries: the
+//! interactive form, the annotations, the links. A signature is usually
+//! stamped onto exactly the kind of document that has all three.
 
-use std::sync::Arc;
+use lopdf::{dictionary, Document, Object, ObjectId, Stream};
 
-use hayro::hayro_interpret::hayro_syntax::Pdf;
-use krilla::geom::{Size, Transform};
-use krilla::image::Image;
-use krilla::num::NormalizedF32;
-use krilla::page::PageSettings;
-use krilla::pdf::PdfDocument;
-use krilla::Data;
-use krilla::Document as Authored;
+use crate::edit::flatten_inheritance;
+use crate::page::{isolate_existing_contents, page_height, register_resources};
+
+const IMAGE_KEY: &str = "VellumStamp";
+const STATE_KEY: &str = "VellumStampState";
 
 /// Where and how an image is laid onto a page.
 ///
 /// Coordinates are in points from the TOP-LEFT corner, the way a screen layout
-/// is written — krilla's own convention, and the one a caller placing a
-/// signature box on a form is already thinking in.
+/// is written — the convention a caller placing a signature box on a form is
+/// already thinking in.
 #[derive(Debug, Clone, Copy)]
 pub struct StampOptions {
     /// Which page, addressed from zero. `None` stamps every page.
@@ -53,27 +50,175 @@ impl Default for StampOptions {
     }
 }
 
-/// Decode an image from its bytes, choosing the codec by signature.
+/// A picture ready to be written into a document.
+struct Picture {
+    width: u32,
+    height: u32,
+    image: Stream,
+    /// The alpha channel, as a soft mask. PNG only, and only when the picture
+    /// is not fully opaque.
+    mask: Option<Stream>,
+}
+
+/// Read a JPEG's frame header: its size, and how many colour components it
+/// carries.
+///
+/// Only the header is parsed. The compressed bytes go into the document
+/// untouched, as `DCTDecode`, so a photograph stays the size it arrived at
+/// instead of being inflated into raw samples — which is the difference
+/// between a 2MB intervention report and a 30MB one.
+fn jpeg_frame(bytes: &[u8]) -> Result<(u32, u32, u8), String> {
+    let malformed = || "cannot read JPEG: no frame header".to_string();
+    let mut at = 2; // past the start-of-image marker
+
+    loop {
+        let (&0xFF, Some(&marker)) = (bytes.get(at).ok_or_else(malformed)?, bytes.get(at + 1))
+        else {
+            return Err(malformed());
+        };
+
+        // Restart markers and TEM carry no payload.
+        if (0xD0..=0xD9).contains(&marker) || marker == 0x01 {
+            at += 2;
+            continue;
+        }
+
+        let length = match (bytes.get(at + 2), bytes.get(at + 3)) {
+            (Some(high), Some(low)) => usize::from(u16::from_be_bytes([*high, *low])),
+            _ => return Err(malformed()),
+        };
+
+        // Every start-of-frame marker but the three that share the range and
+        // mean something else.
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let field = |offset: usize| -> Result<u16, String> {
+                match (bytes.get(at + offset), bytes.get(at + offset + 1)) {
+                    (Some(high), Some(low)) => Ok(u16::from_be_bytes([*high, *low])),
+                    _ => Err(malformed()),
+                }
+            };
+            let height = u32::from(field(5)?);
+            let width = u32::from(field(7)?);
+            let components = *bytes.get(at + 9).ok_or_else(malformed)?;
+            return Ok((width, height, components));
+        }
+
+        at += 2 + length;
+    }
+}
+
+fn jpeg_picture(bytes: &[u8]) -> Result<Picture, String> {
+    let (width, height, components) = jpeg_frame(bytes)?;
+    let colour_space = match components {
+        1 => "DeviceGray",
+        3 => "DeviceRGB",
+        // A CMYK JPEG needs the Adobe colour transform and an inverted
+        // /Decode. Getting that wrong turns a photograph into its negative
+        // without saying so, which is worse than refusing it.
+        4 => return Err("cannot stamp a CMYK JPEG — convert it to RGB first".to_string()),
+        other => {
+            return Err(format!(
+                "cannot stamp a JPEG with {other} colour components"
+            ))
+        }
+    };
+
+    let image = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => width,
+            "Height" => height,
+            "ColorSpace" => colour_space,
+            "BitsPerComponent" => 8,
+            "Filter" => "DCTDecode",
+        },
+        bytes.to_vec(),
+    )
+    // The bytes are already compressed; re-encoding them would only make the
+    // file bigger and the filter chain wrong.
+    .with_compression(false);
+
+    Ok(Picture {
+        width,
+        height,
+        image,
+        mask: None,
+    })
+}
+
+fn png_picture(bytes: &[u8]) -> Result<Picture, String> {
+    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("cannot read PNG: {error}"))?;
+    let (width, height) = (decoded.width(), decoded.height());
+    let pixels = decoded.to_rgba8();
+
+    let mut colour = Vec::with_capacity(pixels.len() / 4 * 3);
+    let mut alpha = Vec::with_capacity(pixels.len() / 4);
+    for pixel in pixels.pixels() {
+        colour.extend_from_slice(&pixel.0[..3]);
+        alpha.push(pixel.0[3]);
+    }
+
+    let mut image = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => width,
+            "Height" => height,
+            "ColorSpace" => "DeviceRGB",
+            "BitsPerComponent" => 8,
+        },
+        colour,
+    );
+    image
+        .compress()
+        .map_err(|error| format!("cannot compress the image: {error}"))?;
+
+    // A signature drawn on a tablet is transparent everywhere but the stroke,
+    // so the alpha channel is the whole point of accepting PNG.
+    let mask = alpha.iter().any(|value| *value != 255).then(|| {
+        let mut mask = Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => width,
+                "Height" => height,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            alpha,
+        );
+        let _ = mask.compress();
+        mask
+    });
+
+    Ok(Picture {
+        width,
+        height,
+        image,
+        mask,
+    })
+}
+
+/// Read an image, choosing the codec by signature.
 ///
 /// Sniffed rather than taken on trust: a caller passing a JPEG named `.png`
 /// would otherwise get an opaque decode failure.
-fn decode_image(bytes: &[u8]) -> Result<Image, String> {
-    let data = Data::from(bytes.to_vec());
-
+fn read_picture(bytes: &[u8]) -> Result<Picture, String> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Image::from_png(data, false).map_err(|error| format!("cannot read PNG: {error}"))
+        png_picture(bytes)
     } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Image::from_jpeg(data, false).map_err(|error| format!("cannot read JPEG: {error}"))
+        jpeg_picture(bytes)
     } else {
         Err("unsupported image format — expected PNG or JPEG".to_string())
     }
 }
 
 /// Work out the drawn size from the options and the image's own proportions.
-fn drawn_size(image: &Image, options: &StampOptions) -> Result<Size, String> {
-    let (pixel_width, pixel_height) = image.size();
-    let natural_width = pixel_width as f32;
-    let natural_height = pixel_height as f32;
+fn drawn_size(picture: &Picture, options: &StampOptions) -> Result<(f32, f32), String> {
+    let natural_width = picture.width as f32;
+    let natural_height = picture.height as f32;
     if natural_width <= 0.0 || natural_height <= 0.0 {
         return Err("image has no area".to_string());
     }
@@ -86,8 +231,12 @@ fn drawn_size(image: &Image, options: &StampOptions) -> Result<Size, String> {
         (None, None) => (natural_width, natural_height),
     };
 
-    Size::from_wh(width, height)
-        .ok_or_else(|| format!("stamp size must be positive and finite, got {width}x{height}"))
+    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+        return Err(format!(
+            "stamp size must be positive and finite, got {width}x{height}"
+        ));
+    }
+    Ok((width, height))
 }
 
 /// Draw `image` onto the pages of `pdf`.
@@ -102,60 +251,98 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
         return Err("stamp position must be finite".to_string());
     }
 
-    let image = decode_image(image)?;
-    let size = drawn_size(&image, options)?;
-    let opacity = NormalizedF32::new(options.opacity)
-        .ok_or_else(|| format!("opacity must be between 0 and 1, got {}", options.opacity))?;
+    let picture = read_picture(image)?;
+    let (width, height) = drawn_size(&picture, options)?;
 
-    let source = Pdf::new(pdf.to_vec()).map_err(|error| format!("cannot read PDF: {error:?}"))?;
-    let page_count = source.pages().len();
-    if page_count == 0 {
+    let mut document =
+        Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;
+    // Inherited attributes are materialised before the pages are touched, so
+    // reading a page's MediaBox and Resources does not depend on its ancestry.
+    flatten_inheritance(&mut document);
+
+    let pages = document.get_pages();
+    if pages.is_empty() {
         return Err("the document has no page".to_string());
     }
     if let Some(page) = options.page {
-        let index = usize::try_from(page).map_err(|_| "page index out of range".to_string())?;
-        if index >= page_count {
+        if usize::try_from(page).is_err() || page as usize >= pages.len() {
             return Err(format!(
-                "page {} does not exist — the document has {page_count}",
-                page + 1
+                "page {} does not exist — the document has {}",
+                page + 1,
+                pages.len()
             ));
         }
     }
 
-    // Sizes are read before the Pdf is handed to krilla, which takes ownership
-    // of it behind an Arc.
-    let page_sizes: Vec<(f32, f32)> = source
-        .pages()
-        .iter()
-        .map(|page| page.render_dimensions())
+    let targets: Vec<ObjectId> = pages
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| options.page.is_none_or(|wanted| wanted as usize == *index))
+        .map(|(_, (_, page_id))| page_id)
         .collect();
-    let embedded = PdfDocument::new(Arc::new(source));
 
-    let mut document = Authored::new();
-    for (index, (width, height)) in page_sizes.iter().enumerate() {
-        let page_size = Size::from_wh(*width, *height)
-            .ok_or_else(|| format!("page {} has no area", index + 1))?;
-        let mut page = document.start_page_with(PageSettings::new(page_size));
-        let mut surface = page.surface();
+    // The picture is written once and referenced from every page it appears
+    // on, rather than embedded again for each.
+    let Picture { image, mask, .. } = picture;
+    let mut image = image;
+    if let Some(mask) = mask {
+        let mask_id = document.add_object(Object::Stream(mask));
+        image.dict.set("SMask", Object::Reference(mask_id));
+    }
+    let image_id = document.add_object(Object::Stream(image));
 
-        surface.draw_pdf_page(&embedded, page_size, index);
+    let state_id = (options.opacity < 1.0).then(|| {
+        document.add_object(dictionary! {
+            "Type" => "ExtGState",
+            "ca" => Object::Real(options.opacity),
+        })
+    });
 
-        let stamped = options.page.is_none_or(|wanted| wanted as usize == index);
-        if stamped {
-            surface.push_transform(&Transform::from_translate(options.x, options.y));
-            surface.push_opacity(opacity);
-            surface.draw_image(image.clone(), size);
-            surface.pop();
-            surface.pop();
+    for page_id in targets {
+        // The y a caller gives is the TOP of the picture, measured down from
+        // the top of the page; PDF wants the bottom edge, measured up.
+        let bottom = page_height(&document, page_id) - options.y - height;
+
+        let mut content: Vec<u8> = Vec::new();
+        content.extend_from_slice(b"q\n");
+        if state_id.is_some() {
+            content.extend_from_slice(format!("/{STATE_KEY} gs\n").as_bytes());
         }
+        // An image is drawn into the unit square, so the transform carries the
+        // whole of its size and position.
+        content.extend_from_slice(
+            format!(
+                "{width} 0 0 {height} {} {bottom} cm\n/{IMAGE_KEY} Do\nQ\n",
+                options.x
+            )
+            .as_bytes(),
+        );
 
-        surface.finish();
-        page.finish();
+        register_resources(
+            &mut document,
+            page_id,
+            "XObject",
+            &[(IMAGE_KEY.to_string(), image_id)],
+        )?;
+        if let Some(state_id) = state_id {
+            register_resources(
+                &mut document,
+                page_id,
+                "ExtGState",
+                &[(STATE_KEY.to_string(), state_id)],
+            )?;
+        }
+        isolate_existing_contents(&mut document, page_id)?;
+        document
+            .add_page_contents(page_id, content)
+            .map_err(|error| format!("cannot write onto the page: {error}"))?;
     }
 
+    let mut out = Vec::new();
     document
-        .finish()
-        .map_err(|error| format!("cannot write PDF: {error}"))
+        .save_to(&mut out)
+        .map_err(|error| format!("cannot write PDF: {error}"))?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -375,6 +562,128 @@ mod tests {
             &StampOptions::default()
         )
         .is_ok());
+    }
+
+    /// The reason this module stopped going through the authoring path.
+    /// Re-authoring the document dropped every field it had, silently, and a
+    /// signature is stamped onto exactly the kind of document that has them.
+    #[test]
+    fn stamping_keeps_the_interactive_form() {
+        let source = crate::fill::tests::form_document();
+        let before = crate::form_fields(&source).expect("the fixture has a form");
+        assert!(!before.is_empty(), "the fixture has fields to lose");
+
+        let stamped = stamp_image(
+            &source,
+            &solid_png(4, 4, RED),
+            &StampOptions {
+                x: 10.0,
+                y: 10.0,
+                width: Some(20.0),
+                ..Default::default()
+            },
+        )
+        .expect("stamping should succeed");
+
+        let after = crate::form_fields(&stamped).expect("the result parses");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "the form must survive being stamped on"
+        );
+    }
+
+    /// And so must everything else the page structure carries.
+    #[test]
+    fn stamping_keeps_the_other_annotations() {
+        let source = crate::fill::tests::form_document();
+        let stamped = stamp_image(
+            &source,
+            &solid_png(4, 4, RED),
+            &StampOptions {
+                x: 10.0,
+                y: 10.0,
+                width: Some(20.0),
+                ..Default::default()
+            },
+        )
+        .expect("stamping should succeed");
+
+        let document = lopdf::Document::load_mem(&stamped).expect("the result parses");
+        let page_id = *document
+            .get_pages()
+            .values()
+            .next()
+            .expect("the document has a page");
+        let annotations = document
+            .get_dictionary(page_id)
+            .expect("the page reads")
+            .get(b"Annots")
+            .and_then(|annots| annots.as_array())
+            .expect("the page kept its annotations");
+        assert_eq!(annotations.len(), 5, "every widget is still on the page");
+    }
+
+    /// A signature drawn on a tablet is transparent everywhere but the stroke.
+    #[test]
+    fn a_transparent_png_lets_the_page_through() {
+        let mut pixmap = Pixmap::new(2, 1);
+        let transparent = PremulRgba8 {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        pixmap.data_mut()[0] = RED;
+        pixmap.data_mut()[1] = transparent;
+        let png = pixmap.into_png().expect("pixmap encodes to PNG");
+
+        let stamped = stamp_image(
+            &create_blank(&[A4]).unwrap(),
+            &png,
+            &StampOptions {
+                x: 100.0,
+                y: 100.0,
+                width: Some(40.0),
+                height: Some(20.0),
+                ..Default::default()
+            },
+        )
+        .expect("stamping should succeed");
+
+        assert!(is_red(pixel_at(&stamped, 0, 110, 110)), "the opaque half");
+        assert!(
+            is_white(pixel_at(&stamped, 0, 130, 110)),
+            "and the page showing through the transparent one"
+        );
+    }
+
+    /// A JPEG goes into the document untouched. Decoding and re-storing it as
+    /// raw samples would turn a photo report into something nobody can email.
+    #[test]
+    fn a_jpeg_is_not_inflated_on_the_way_in() {
+        let png = solid_png(400, 400, RED);
+        let decoded = image::load_from_memory(&png).expect("the fixture decodes");
+        let mut jpeg = Vec::new();
+        decoded
+            .write_to(&mut Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .expect("the fixture encodes as JPEG");
+
+        let blank = create_blank(&[A4]).unwrap();
+        let stamped =
+            stamp_image(&blank, &jpeg, &StampOptions::default()).expect("stamping should succeed");
+
+        let raw_samples = 400 * 400 * 3;
+        assert!(
+            stamped.len() < blank.len() + jpeg.len() + 4096,
+            "the JPEG should go in as it came, got {} bytes for a {} byte picture",
+            stamped.len(),
+            jpeg.len()
+        );
+        assert!(
+            stamped.len() < raw_samples,
+            "and certainly not as {raw_samples} bytes of samples"
+        );
     }
 
     #[test]

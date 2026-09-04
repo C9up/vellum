@@ -158,6 +158,23 @@ worse than failing. For `stampText`, `y` is the text's baseline.
 Text written onto a page is escaped, so a document title cannot inject content
 stream operators.
 
+## Stamping and the document underneath
+
+`stamp` and `stampText` write into the document that already exists: the
+picture becomes an image XObject named in the page's resources, the text a
+content stream appended to the page. Neither re-authors the file.
+
+That is the whole point. Re-authoring — drawing each page onto a fresh one —
+loses everything the page structure carries: the interactive form, the
+annotations, the links. A signature is stamped onto exactly the kind of
+document that has all three.
+
+A JPEG goes in untouched, as `DCTDecode`, so a photograph stays the size it
+arrived at. A PNG becomes raw samples, and its alpha channel becomes a soft
+mask — which is what makes a signature drawn on a tablet transparent
+everywhere but the stroke. A CMYK JPEG is refused rather than silently
+inverted.
+
 ## Interactive forms
 
 `formFields` lists a document's AcroForm fields in declaration order. `name` is

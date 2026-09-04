@@ -10,10 +10,10 @@
 //! and CJK are not, and are refused rather than mangled. Custom fonts are a
 //! separate piece of work, through krilla, whenever a caller needs one.
 
-use lopdf::{dictionary, Dictionary, Document, Object, ObjectId};
+use lopdf::{dictionary, Document, ObjectId};
 
 use crate::edit::flatten_inheritance;
-use crate::flatten::isolate_existing_contents;
+use crate::page::{isolate_existing_contents, page_height, register_resources};
 
 /// One of the 14 fonts every PDF reader is required to have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,73 +159,6 @@ pub(crate) fn escape_pdf_literal(bytes: &[u8]) -> Vec<u8> {
 const FONT_KEY: &str = "VellumStampFont";
 const STATE_KEY: &str = "VellumStampState";
 
-/// Ensure the page's `Resources` hold our font and graphics state.
-fn register_resources(
-    document: &mut Document,
-    page_id: ObjectId,
-    font_id: ObjectId,
-    state_id: Option<ObjectId>,
-) -> Result<(), String> {
-    // Resources may be an inline dictionary or a reference to one; both are
-    // legal, and the page may carry none at all.
-    let existing = document
-        .get_dictionary(page_id)
-        .ok()
-        .and_then(|page| page.get(b"Resources").ok().cloned());
-
-    let mut resources = match existing {
-        Some(Object::Reference(id)) => document
-            .get_dictionary(id)
-            .cloned()
-            .map_err(|error| format!("cannot read page resources: {error}"))?,
-        Some(Object::Dictionary(dictionary)) => dictionary,
-        _ => Dictionary::new(),
-    };
-
-    let mut fonts = match resources.get(b"Font") {
-        Ok(Object::Reference(id)) => document.get_dictionary(*id).cloned().unwrap_or_default(),
-        Ok(Object::Dictionary(dictionary)) => dictionary.clone(),
-        _ => Dictionary::new(),
-    };
-    fonts.set(FONT_KEY, Object::Reference(font_id));
-    resources.set("Font", Object::Dictionary(fonts));
-
-    if let Some(state_id) = state_id {
-        let mut states = match resources.get(b"ExtGState") {
-            Ok(Object::Reference(id)) => document.get_dictionary(*id).cloned().unwrap_or_default(),
-            Ok(Object::Dictionary(dictionary)) => dictionary.clone(),
-            _ => Dictionary::new(),
-        };
-        states.set(STATE_KEY, Object::Reference(state_id));
-        resources.set("ExtGState", Object::Dictionary(states));
-    }
-
-    // Written back inline so the page owns them, rather than mutating a
-    // resource dictionary that other pages may share.
-    let page = document
-        .get_object_mut(page_id)
-        .and_then(|object| object.as_dict_mut())
-        .map_err(|error| format!("cannot update page: {error}"))?;
-    page.set("Resources", Object::Dictionary(resources));
-    Ok(())
-}
-
-/// The height of a page, needed to turn a top-down y into PDF's bottom-up one.
-fn page_height(document: &Document, page_id: ObjectId) -> f32 {
-    document
-        .get_dictionary(page_id)
-        .ok()
-        .and_then(|page| page.get(b"MediaBox").ok())
-        .and_then(|media_box| media_box.as_array().ok())
-        .and_then(|values| {
-            let bottom = values.get(1)?.as_float().ok()?;
-            let top = values.get(3)?.as_float().ok()?;
-            Some((top - bottom).abs())
-        })
-        .unwrap_or(841.89)
-}
-
-/// Write `text` onto the document.
 pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<Vec<u8>, String> {
     if text.is_empty() {
         return Err("there is no text to write".to_string());
@@ -316,7 +249,20 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         content.extend_from_slice(&encoded);
         content.extend_from_slice(b") Tj\nET\nQ\n");
 
-        register_resources(&mut document, page_id, font_id, state_id)?;
+        register_resources(
+            &mut document,
+            page_id,
+            "Font",
+            &[(FONT_KEY.to_string(), font_id)],
+        )?;
+        if let Some(state_id) = state_id {
+            register_resources(
+                &mut document,
+                page_id,
+                "ExtGState",
+                &[(STATE_KEY.to_string(), state_id)],
+            )?;
+        }
         // The page is free to leave the graphics state transformed, so its own
         // content is balanced before ours is appended after it.
         isolate_existing_contents(&mut document, page_id)?;
