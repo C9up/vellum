@@ -188,3 +188,7 @@ export declare function fillForm(
 	pdf: Buffer,
 	values: Record<string, string>,
 ): Promise<Buffer>;
+
+/** Paint every field into the page and drop the interactive layer. */
+
+export declare function flattenForm(pdf: Buffer): Promise<Buffer>;

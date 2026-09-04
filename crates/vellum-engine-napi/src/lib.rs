@@ -646,3 +646,28 @@ pub fn fill_form(pdf: Buffer, values: HashMap<String, String>) -> AsyncTask<Fill
             .collect(),
     })
 }
+
+pub struct FlattenFormTask {
+    pdf: Vec<u8>,
+}
+
+impl Task for FlattenFormTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("flattening a form", || {
+            vellum_engine::flatten_form(&self.pdf)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+/// Paint every field into the page and drop the interactive layer.
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn flatten_form(pdf: Buffer) -> AsyncTask<FlattenFormTask> {
+    AsyncTask::new(FlattenFormTask { pdf: pdf.to_vec() })
+}

@@ -18,6 +18,7 @@ import {
 	extractTextAllNative,
 	extractTextNative,
 	fillFormNative,
+	flattenFormNative,
 	formFieldsNative,
 	inspectNative,
 	mergeNative,
@@ -377,6 +378,29 @@ export class Vellum {
 	 */
 	async fillForm(pdf: Buffer, values: Record<string, string>): Promise<Buffer> {
 		return fillFormNative(pdf, values);
+	}
+
+	/**
+	 * Paint the form into the page and remove it.
+	 *
+	 * ```ts
+	 * const signed = await vellum.flattenForm(
+	 *   await vellum.fillForm(mandate, { 'assure.nom': 'Amélie Durand' }),
+	 * )
+	 * ```
+	 *
+	 * The document keeps its look and loses its fields: every widget's
+	 * appearance becomes ordinary page content, the widget annotations go, and
+	 * the form itself is dropped. This is what turns a filled document into
+	 * one nobody can edit back.
+	 *
+	 * Annotations that are not form widgets — links, notes — are left where
+	 * they are. A field holding a value that ships no appearance to paint is
+	 * an error: the answer would vanish from a document that still looks
+	 * complete.
+	 */
+	async flattenForm(pdf: Buffer): Promise<Buffer> {
+		return flattenFormNative(pdf);
 	}
 
 	/** How many pages the document has. */

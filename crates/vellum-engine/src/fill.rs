@@ -119,7 +119,7 @@ fn default_appearance(document: &Document, field_id: ObjectId) -> Appearance {
 
 /// The widgets that draw a field: the field itself when they are merged, or
 /// its kids when they are not.
-fn widgets_of(document: &Document, field_id: ObjectId) -> Vec<ObjectId> {
+pub(crate) fn widgets_of(document: &Document, field_id: ObjectId) -> Vec<ObjectId> {
     let Ok(field) = document.get_dictionary(field_id) else {
         return Vec::new();
     };
@@ -425,7 +425,7 @@ fn set_need_appearances(document: &mut Document) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::Cursor;
 
     use hayro::vello_cpu::Pixmap;
@@ -444,7 +444,7 @@ mod tests {
     /// A form whose widgets carry a `/Rect` and hang off the page's `/Annots`,
     /// so the result can actually be RENDERED — which is the only way to prove
     /// an appearance stream was regenerated.
-    fn form_document() -> Vec<u8> {
+    pub(crate) fn form_document() -> Vec<u8> {
         let mut document = Document::with_version("1.7");
         let pages_id = document.new_object_id();
         let page_id = document.new_object_id();
@@ -559,7 +559,7 @@ mod tests {
 
     /// Count the dark pixels inside a rectangle of the rendered page, in
     /// top-left pixel coordinates at 72 DPI.
-    fn ink_in(pdf: &[u8], x0: u32, y0: u32, x1: u32, y1: u32) -> usize {
+    pub(crate) fn ink_in(pdf: &[u8], x0: u32, y0: u32, x1: u32, y1: u32) -> usize {
         let png = render_page(
             pdf,
             0,

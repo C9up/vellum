@@ -36,6 +36,7 @@ const filled = await vellum.fillForm(mandate, {
   'assure.nom': 'Amélie Durand',
   accepted: 'Yes',
 })
+const closed = await vellum.flattenForm(filled)
 
 // Its text
 const text = await vellum.extractText(pdf, { page: 1 })
@@ -187,13 +188,32 @@ checkbox state the document does not accept are all errors.
 
 Two current limits, both from having no glyph metrics: text is left-aligned
 regardless of the field's `/Q`, and a multiline field honours the line breaks
-you write but does not wrap. Flattening is the work ahead.
+you write but does not wrap.
+
+`flattenForm` closes the document: every widget's appearance becomes ordinary
+page content, the widget annotations go, and the form itself is dropped. What
+comes back looks the same and can no longer be edited back.
+
+The placement follows §12.5.5 — the appearance's `/BBox` transformed by its
+`/Matrix`, and the resulting box mapped onto the annotation's `/Rect`. Painting
+at the rectangle's corner instead would misplace every appearance whose form
+matrix is not the identity, which is most of the ones a real form ships. The
+page's own content is wrapped in `q`/`Q` first: a `cm` outside any pair is
+legal and never restored, so appended content would otherwise inherit a
+transform it never asked for.
+
+Annotations that are not form widgets — links, notes — are left where they are;
+flattening removes the form, not the document's other furniture. A hidden
+widget is dropped without being painted, since making visible what a document
+hid is not preservation. And a field holding a value that ships no appearance
+to paint is an error rather than a silent erasure: the answer would vanish from
+a document that still looks complete.
 
 ## Status
 
 Rendering to images, metadata, text extraction, document operations, stamping
-— image and text — and interactive forms, read and filled, are complete.
-Flattening a filled form and embedding custom fonts are the work ahead.
+— image and text — and interactive forms, read, filled and flattened, are
+complete. Embedding custom fonts and PAdES signing are the work ahead.
 
 ## Building the native engine
 

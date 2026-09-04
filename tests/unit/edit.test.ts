@@ -218,6 +218,20 @@ describe("Vellum — document operations", () => {
 		).rejects.toThrow(/no field named/);
 	});
 
+	it("flattens a document that has no form at all", async () => {
+		// Nothing to paint and nothing to remove: the document comes back
+		// intact rather than failing for want of a form.
+		const flat = await vellum.flattenForm(createBlank([A4, A4]));
+
+		await expect(vellum.pageCount(flat)).resolves.toBe(2);
+	});
+
+	it("refuses bytes that are not a PDF when flattening", async () => {
+		await expect(vellum.flattenForm(Buffer.from("not a PDF"))).rejects.toThrow(
+			VellumError,
+		);
+	});
+
 	it("refuses bytes that are not a PDF", async () => {
 		const notAPdf = Buffer.from("not a PDF");
 

@@ -271,3 +271,7 @@ export function fillFormNative(
 ): Promise<Buffer> {
 	return edit("FILL_FAILED", (loaded) => loaded.fillForm(pdf, values));
 }
+
+export function flattenFormNative(pdf: Buffer): Promise<Buffer> {
+	return edit("FLATTEN_FAILED", (loaded) => loaded.flattenForm(pdf));
+}
