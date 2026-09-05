@@ -58,28 +58,35 @@ export default defineConfig({
   // document, which is what makes a key you hold and a key held by a
   // certified provider the same interface.
   //
+  // Wrap a signer in timestamped() to add a trusted timestamp, without which
+  // a signature stops being verifiable once its certificate expires.
+  //
   // signers: {
   //   internal: pkcs8Signer({
   //     key: readFileSync(app.makePath('storage/signing.key.der')),
   //     certificate: readFileSync(app.makePath('storage/signing.crt.der')),
   //   }),
+  //   stamped: timestamped(pkcs8Signer({ ... }), {
+  //     url: 'https://freetsa.org/tsr',
+  //   }),
   //   qualified: myProviderAdapter({ ... }),
   // },
-  //
+
   // Certificates to trust when CHECKING a signature — typically the roots
   // your jurisdiction's supervisory body publishes as a trusted list. With
   // none, every signature comes back untrusted, which is the honest answer.
   //
   // trustedAnchors: [
   //   readFileSync(app.makePath('storage/anchors/authority.pem')),
+  // ],
+
+  // Which revocation responders may be contacted when checkRevocation is
+  // asked for. The address comes out of the certificate inside the document
+  // being checked, so by default only public hosts are asked — a document
+  // does not get to point this server at your own network. Name yours here
+  // when your authority answers somewhere that rule excludes.
   //
-  // Wrap any of them in timestamped() to add a trusted timestamp, without
-  // which a signature stops being verifiable once its certificate expires:
-  //
-  //   internal: timestamped(pkcs8Signer({ ... }), {
-  //     url: 'https://freetsa.org/tsr',
-  //   }),
-  // },
+  // allowedResponders: ['ocsp.internal.example'],
 })`,
 	);
 }
