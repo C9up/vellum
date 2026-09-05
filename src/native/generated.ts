@@ -33,6 +33,12 @@ export interface RenderOptions {
 	quality?: number;
 	/** `#rgb`, `#rrggbb`, `#rrggbbaa` or `"transparent"`. Default opaque white. */
 	background?: string;
+	/**
+	 * The most pixels one page may rasterise to. 50 million by default —
+	 * room for A4 at 600 DPI. A page declares its own size, so without a
+	 * ceiling a document alone could ask for gigabytes.
+	 */
+	maxPixels?: number;
 }
 
 export interface PageDimensions {

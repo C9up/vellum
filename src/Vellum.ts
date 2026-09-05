@@ -60,6 +60,16 @@ export interface VellumConfig {
 	/** Default background: `#rgb`, `#rrggbb`, `#rrggbbaa` or `"transparent"`. */
 	background?: string;
 	/**
+	 * The most pixels one page may rasterise to. 50 million by default — room
+	 * for A4 at 600 DPI, and A3 at 400.
+	 *
+	 * A page declares its own size, so without a ceiling a document alone was
+	 * enough to ask for gigabytes: bounding each side to 65535 still leaves 16
+	 * GiB of RGBA between two of them. Raise it knowingly when you render
+	 * something genuinely large.
+	 */
+	maxPixels?: number;
+	/**
 	 * Fonts to write text with, by the name a caller asks for them by. Values
 	 * are paths to TrueType or OpenType files.
 	 *
@@ -804,6 +814,7 @@ export class Vellum {
 		format?: string;
 		quality?: number;
 		background?: string;
+		maxPixels?: number;
 	} {
 		const merged = { ...this.#config, ...options };
 		return {
@@ -812,6 +823,7 @@ export class Vellum {
 			format: merged.format,
 			quality: merged.quality,
 			background: merged.background,
+			maxPixels: merged.maxPixels,
 		};
 	}
 }

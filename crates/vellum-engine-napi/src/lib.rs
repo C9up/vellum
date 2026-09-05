@@ -86,6 +86,10 @@ pub struct RenderOptions {
     pub quality: Option<u32>,
     /// `#rgb`, `#rrggbb`, `#rrggbbaa` or `"transparent"`. Default opaque white.
     pub background: Option<String>,
+    /// The most pixels one page may rasterise to. 50 million by default —
+    /// room for A4 at 600 DPI. A page declares its own size, so without a
+    /// ceiling a document alone could ask for gigabytes.
+    pub max_pixels: Option<u32>,
 }
 
 fn to_engine_options(
@@ -100,6 +104,12 @@ fn to_engine_options(
         engine.scale = scale as f32;
     }
     engine.width = options.width;
+    if let Some(max) = options.max_pixels {
+        if max == 0 {
+            return Err("maxPixels must be greater than zero".to_string());
+        }
+        engine.max_pixels = max;
+    }
 
     let quality = match options.quality {
         Some(value) => Some(

@@ -93,7 +93,18 @@ pub struct RenderOptions {
     /// background of its own, so rendering it transparent makes black text
     /// invisible over a dark viewer.
     pub background: [u8; 4],
+    /// The most pixels one page may rasterise to.
+    ///
+    /// Bounding each side separately is not the same as bounding the buffer:
+    /// two sides just inside a 65535 limit are 16 GiB of RGBA between them, and
+    /// a page can declare its own size, so a document alone was enough to ask
+    /// for that. The default leaves room for A4 at 600 DPI (35 Mpx) and A3 at
+    /// 400 (31 Mpx); a caller rendering something larger raises it knowingly.
+    pub max_pixels: u32,
 }
+
+/// 50 megapixels — 200 MiB of RGBA.
+pub const DEFAULT_MAX_PIXELS: u32 = 50_000_000;
 
 impl Default for RenderOptions {
     fn default() -> Self {
@@ -102,6 +113,7 @@ impl Default for RenderOptions {
             width: None,
             format: ImageFormat::Png,
             background: [255, 255, 255, 255],
+            max_pixels: DEFAULT_MAX_PIXELS,
         }
     }
 }
@@ -198,8 +210,7 @@ fn rasterise(
         return Err(format!("scale must be positive and finite, got {scale}"));
     }
 
-    // u16 is hayro's pixmap limit, and the product is what actually allocates:
-    // an unbounded scale is a memory-exhaustion vector on hostile input.
+    // u16 is hayro's pixmap limit, per side.
     let scaled_width = natural_width * scale;
     let scaled_height = natural_height * scale;
     if scaled_width > u16::MAX as f32 || scaled_height > u16::MAX as f32 {
@@ -208,6 +219,20 @@ fn rasterise(
             scaled_width.floor(),
             scaled_height.floor(),
             u16::MAX
+        ));
+    }
+    // And the product, which is what actually allocates. Bounding each side
+    // alone let two of them just inside the per-side limit ask for 16 GiB of
+    // RGBA between them — and a page declares its own size, so a document was
+    // enough to ask for it with the default options.
+    let pixels = (scaled_width as f64) * (scaled_height as f64);
+    if pixels > f64::from(options.max_pixels) {
+        return Err(format!(
+            "rendering this page at {}x{} needs {:.0} million pixels, over the {:.0} million allowed — lower the scale, or raise maxPixels if you meant it",
+            scaled_width.floor(),
+            scaled_height.floor(),
+            pixels / 1e6,
+            f64::from(options.max_pixels) / 1e6
         ));
     }
 
