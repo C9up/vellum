@@ -42,6 +42,7 @@ import {
 	stampTextNative,
 	verifySignaturesNative,
 } from "./native.js";
+import { mayAsk, type ResponderPolicy } from "./responder.js";
 
 /** Image encodings a page can be rasterised to. */
 export type ImageFormat = "png" | "jpeg";
@@ -95,6 +96,16 @@ export interface VellumConfig {
 	 * honest answer rather than a comfortable one.
 	 */
 	trustedAnchors?: ReadonlyArray<Buffer>;
+	/**
+	 * Which revocation responders may be contacted.
+	 *
+	 * The address comes out of the certificate inside the document being
+	 * checked — from whoever sent it. Left unset, only public hosts over
+	 * http/https are asked, which is what a real certificate authority is. Set
+	 * it to a list of hostnames, or a predicate, when your authority answers
+	 * somewhere those rules exclude.
+	 */
+	allowedResponders?: ResponderPolicy;
 }
 
 /**
@@ -128,6 +139,8 @@ export interface VerifyOptions {
 	 * `trustedAnchors` in `config/vellum.ts`.
 	 */
 	anchors?: ReadonlyArray<Buffer>;
+	/** Which responders may be contacted, overriding `config/vellum.ts`. */
+	allowedResponders?: ResponderPolicy;
 	/**
 	 * Ask each certificate's issuer whether it still stands.
 	 *
@@ -641,9 +654,15 @@ export class Vellum {
 	 * anything. `moment` says where that instant came from: a timestamp is
 	 * worth having because it makes it something other than the signer's word.
 	 *
-	 * **Revocation is not checked.** A certificate withdrawn after it was
-	 * issued still looks valid here; a caller who needs to know must ask OCSP
-	 * or a CRL.
+	 * **Revocation is not checked** unless `checkRevocation` asks for it. A
+	 * certificate withdrawn after it was issued otherwise still looks valid
+	 * here.
+	 *
+	 * When it is asked for, the responder's address comes out of the
+	 * certificate inside the document — from whoever sent it. Only public hosts
+	 * over http/https are contacted; a document does not get to point your
+	 * server at your own network. Name your authority in `allowedResponders`
+	 * when it answers somewhere that rule excludes.
 	 *
 	 * A document with no signatures reports none. That is an answer, not a
 	 * failure.
@@ -663,6 +682,7 @@ export class Vellum {
 				revocation: await this.#revocationOf(
 					report,
 					options.revocationTimeoutMs ?? 10_000,
+					options.allowedResponders ?? this.#config.allowedResponders,
 				),
 			})),
 		);
@@ -678,6 +698,7 @@ export class Vellum {
 	async #revocationOf(
 		report: SignatureReport,
 		timeoutMs: number,
+		policy: ResponderPolicy | undefined,
 	): Promise<RevocationAnswer> {
 		const { signerCertificate, issuerCertificate } = report;
 		if (signerCertificate === undefined || issuerCertificate === undefined) {
@@ -688,13 +709,23 @@ export class Vellum {
 			};
 		}
 
-		const url = responderUrlNative(signerCertificate);
-		if (url === null || url === undefined) {
+		const named = responderUrlNative(signerCertificate);
+		if (named === null || named === undefined) {
 			return {
 				status: "unknown",
 				detail: "the certificate names no responder to ask",
 			};
 		}
+
+		// The address is the document's, not ours. Asking it unconditionally
+		// turns this into "make my server issue a request wherever this stranger
+		// points" — the cloud metadata endpoint, a service on loopback, or a URL
+		// whose only purpose is to report that the document was opened.
+		const allowed = await mayAsk(named, policy);
+		if ("refused" in allowed) {
+			return { status: "unknown", detail: allowed.refused };
+		}
+		const url = allowed.href;
 
 		let answer: Response;
 		try {
