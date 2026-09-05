@@ -45,7 +45,7 @@ pub use trust::TrustOptions;
 pub use verify::{verify_signatures, SignatureReport};
 
 pub use render::{
-    page_dimensions, parse_color, render_all, render_page, ImageFormat, PageDimensions,
+    page_dimensions, parse_color, render_all, render_page, Band, ImageFormat, PageDimensions,
     RenderOptions, DEFAULT_JPEG_QUALITY,
 };
 

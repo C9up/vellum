@@ -17,6 +17,15 @@ export interface PageSize {
 	height: number;
 }
 
+/** A rectangle of a page, in points from the top-left corner. */
+
+export interface Band {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
 /** Rasterising options, as a plain JavaScript object. */
 
 export interface RenderOptions {
@@ -33,6 +42,12 @@ export interface RenderOptions {
 	quality?: number;
 	/** `#rgb`, `#rrggbb`, `#rrggbbaa` or `"transparent"`. Default opaque white. */
 	background?: string;
+	/**
+	 * Render only this rectangle, in points from the TOP-left corner — the
+	 * same corner `stampText` measures from. A band that does not fit the
+	 * page is an error, never a silent full page.
+	 */
+	band?: Band;
 	/**
 	 * The most pixels one page may rasterise to. 50 million by default —
 	 * room for A4 at 600 DPI. A page declares its own size, so without a

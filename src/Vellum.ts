@@ -258,7 +258,34 @@ export interface PageOptions {
 }
 
 /** Per-call rendering options. Anything omitted falls back to the config. */
-export interface RenderOptions extends VellumConfig, PageOptions {}
+/**
+ * A rectangle of a page, in points from the TOP-left corner — the same corner
+ * {@link Vellum.stampText} measures from, so a band and a stamp are placed in
+ * one coordinate system rather than two.
+ */
+export interface Band {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+export interface RenderOptions extends VellumConfig, PageOptions {
+	/**
+	 * Render only this rectangle of the page.
+	 *
+	 * A band that does not fit the page is an ERROR, never a silent full page.
+	 * A caller cropping a scan to keep a signature or an account number out of
+	 * it is relying on this, and quietly handing back the whole document would
+	 * leak precisely what the band exists to remove.
+	 *
+	 * ```ts
+	 * // The top two thirds of an A4 invoice, without the signature block.
+	 * await vellum.render(scan, { band: { x: 0, y: 0, width: 595, height: 560 } })
+	 * ```
+	 */
+	band?: Band;
+}
 
 export class Vellum {
 	readonly #config: VellumConfig;
@@ -814,6 +841,7 @@ export class Vellum {
 		format?: string;
 		quality?: number;
 		background?: string;
+		band?: Band;
 		maxPixels?: number;
 	} {
 		const merged = { ...this.#config, ...options };
@@ -823,6 +851,7 @@ export class Vellum {
 			format: merged.format,
 			quality: merged.quality,
 			background: merged.background,
+			band: merged.band,
 			maxPixels: merged.maxPixels,
 		};
 	}

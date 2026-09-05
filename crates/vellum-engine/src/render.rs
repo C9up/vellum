@@ -93,6 +93,15 @@ pub struct RenderOptions {
     /// background of its own, so rendering it transparent makes black text
     /// invisible over a dark viewer.
     pub background: [u8; 4],
+    /// Render only this rectangle of the page, in points from the TOP-left —
+    /// the same corner `stamp_text` measures from, so a band and a stamp are
+    /// placed in one coordinate system rather than two.
+    ///
+    /// A band that does not fit the page is an ERROR, never a silent full
+    /// page: a caller cropping a scan to keep a signature or an account number
+    /// out of it is relying on this, and quietly handing back the whole thing
+    /// would leak exactly what the band exists to remove.
+    pub band: Option<Band>,
     /// The most pixels one page may rasterise to.
     ///
     /// Bounding each side separately is not the same as bounding the buffer:
@@ -101,6 +110,15 @@ pub struct RenderOptions {
     /// for that. The default leaves room for A4 at 600 DPI (35 Mpx) and A3 at
     /// 400 (31 Mpx); a caller rendering something larger raises it knowingly.
     pub max_pixels: u32,
+}
+
+/// A rectangle of a page, in points from the top-left corner.
+#[derive(Debug, Clone, Copy)]
+pub struct Band {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// 50 megapixels — 200 MiB of RGBA.
@@ -113,6 +131,7 @@ impl Default for RenderOptions {
             width: None,
             format: ImageFormat::Png,
             background: [255, 255, 255, 255],
+            band: None,
             max_pixels: DEFAULT_MAX_PIXELS,
         }
     }
@@ -248,10 +267,71 @@ fn rasterise(
     let cache = RenderCache::new();
     let pixmap = render(page, &cache, &InterpreterSettings::default(), &settings);
 
-    Ok(Raster {
+    let raster = Raster {
         width: pixmap.width(),
         height: pixmap.height(),
         pixels: pixmap.data().to_vec(),
+    };
+    match options.band {
+        Some(band) => crop(&raster, band, scale),
+        None => Ok(raster),
+    }
+}
+
+/// Cut `band` out of a rendered page.
+///
+/// hayro's viewport crops from the origin and takes no offset, so the page is
+/// rasterised whole and the rectangle taken from the buffer. The band is given
+/// in POINTS and the buffer is in pixels, so it is scaled by the same factor
+/// the page was.
+fn crop(raster: &Raster, band: Band, scale: f32) -> Result<Raster, String> {
+    if !(band.width > 0.0 && band.height > 0.0) {
+        return Err(format!(
+            "the band is {}x{} points — it has no area",
+            band.width, band.height
+        ));
+    }
+    if band.x < 0.0 || band.y < 0.0 {
+        return Err(format!(
+            "the band starts at ({}, {}), outside the page",
+            band.x, band.y
+        ));
+    }
+
+    let left = (band.x * scale).round() as i64;
+    let top = (band.y * scale).round() as i64;
+    let right = ((band.x + band.width) * scale).round() as i64;
+    let bottom = ((band.y + band.height) * scale).round() as i64;
+    let page_width = i64::from(raster.width);
+    let page_height = i64::from(raster.height);
+
+    // Refused rather than clamped. A band that runs off the page is a caller
+    // working from dimensions that are not this document's, and handing back
+    // the part that happens to overlap would answer a question nobody asked.
+    if right > page_width || bottom > page_height {
+        return Err(format!(
+            "the band reaches {}x{} pixels of a {}x{} page — it does not fit",
+            right, bottom, page_width, page_height
+        ));
+    }
+    if right <= left || bottom <= top {
+        return Err("the band is smaller than one pixel at this scale".to_string());
+    }
+
+    let width = (right - left) as usize;
+    let height = (bottom - top) as usize;
+    // Counted in PIXELS, not bytes: the buffer is `PremulRgba8`, one entry per
+    // pixel, and treating it as four times as long is a panic one row in.
+    let stride = raster.width as usize;
+    let mut pixels = Vec::with_capacity(width * height);
+    for row in 0..height {
+        let start = (top as usize + row) * stride + left as usize;
+        pixels.extend_from_slice(&raster.pixels[start..start + width]);
+    }
+    Ok(Raster {
+        width: width as u16,
+        height: height as u16,
+        pixels,
     })
 }
 

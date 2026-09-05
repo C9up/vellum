@@ -72,6 +72,15 @@ pub fn create_blank(pages: Vec<PageSize>) -> Result<Buffer> {
     wrap(move || vellum_engine::create_blank(&sizes)).map(Buffer::from)
 }
 
+/// A rectangle of a page, in points from the top-left corner.
+#[napi(object)]
+pub struct Band {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// Rasterising options, as a plain JavaScript object.
 #[napi(object)]
 pub struct RenderOptions {
@@ -86,6 +95,10 @@ pub struct RenderOptions {
     pub quality: Option<u32>,
     /// `#rgb`, `#rrggbb`, `#rrggbbaa` or `"transparent"`. Default opaque white.
     pub background: Option<String>,
+    /// Render only this rectangle, in points from the TOP-left corner — the
+    /// same corner `stampText` measures from. A band that does not fit the
+    /// page is an error, never a silent full page.
+    pub band: Option<Band>,
     /// The most pixels one page may rasterise to. 50 million by default —
     /// room for A4 at 600 DPI. A page declares its own size, so without a
     /// ceiling a document alone could ask for gigabytes.
@@ -104,6 +117,12 @@ fn to_engine_options(
         engine.scale = scale as f32;
     }
     engine.width = options.width;
+    engine.band = options.band.map(|band| vellum_engine::Band {
+        x: band.x as f32,
+        y: band.y as f32,
+        width: band.width as f32,
+        height: band.height as f32,
+    });
     if let Some(max) = options.max_pixels {
         if max == 0 {
             return Err("maxPixels must be greater than zero".to_string());
