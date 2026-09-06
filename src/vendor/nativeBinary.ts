@@ -34,6 +34,16 @@ const TARGETS: Record<string, string> = {
 	"win32-x64": "win32-x64-msvc",
 };
 
+/**
+ * Every `platform-arch` a binary is built for.
+ *
+ * For the message a package raises when it refuses: "no binary for
+ * linux-riscv64" is only actionable next to the list of what there IS.
+ */
+export function supportedTargets(): readonly string[] {
+	return Object.keys(TARGETS);
+}
+
 /** The suffix a given `platform-arch` builds under, or `undefined`. */
 export function nativeTargetSuffix(target: string): string | undefined {
 	return TARGETS[target];
