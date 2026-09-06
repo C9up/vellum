@@ -165,3 +165,49 @@ describe("defineConfig", () => {
 		expect(config).toEqual({ format: "jpeg", quality: 82 });
 	});
 });
+
+describe("VellumProvider > shutdown", () => {
+	afterEach(() => {
+		clearVellum();
+	});
+
+	it("releases the services/main singleton it seated", async () => {
+		const { getVellum } = await import("../../src/services/main.js");
+		const provider = new VellumProvider({
+			container: new FakeContainer(),
+			config: new FakeConfigStore(),
+		});
+		provider.register();
+		await provider.boot();
+		expect(getVellum()).toBeInstanceOf(Vellum);
+
+		await provider.shutdown();
+
+		// A stopped application left a dead Vellum reachable through
+		// `import vellum from '@c9up/vellum/services/main'`.
+		expect(getVellum()).toBeUndefined();
+	});
+
+	it("leaves a service another application has since seated alone", async () => {
+		const { getVellum } = await import("../../src/services/main.js");
+		const provider = new VellumProvider({
+			container: new FakeContainer(),
+			config: new FakeConfigStore(),
+		});
+		provider.register();
+		await provider.boot();
+
+		const other = new VellumProvider({
+			container: new FakeContainer(),
+			config: new FakeConfigStore(),
+		});
+		other.register();
+		await other.boot();
+		const replacement = getVellum();
+		if (!replacement) throw new Error("expected the second boot to seat one");
+
+		await provider.shutdown();
+
+		expect(getVellum()).toBe(replacement);
+	});
+});

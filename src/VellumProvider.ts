@@ -6,7 +6,7 @@
  * usable from a host that is not Ream.
  */
 
-import { setVellum } from "./services/main.js";
+import { clearVellum, getVellum, setVellum } from "./services/main.js";
 import "./augmentations.js";
 import type { VellumConfig } from "./Vellum.js";
 import { Vellum } from "./Vellum.js";
@@ -26,6 +26,9 @@ export interface VellumAppContext {
 }
 
 export default class VellumProvider {
+	/** The service this provider seated, so shutdown only clears its own. */
+	#service: Vellum | undefined;
+
 	constructor(protected app: VellumAppContext) {}
 
 	register(): void {
@@ -44,8 +47,19 @@ export default class VellumProvider {
 	}
 
 	async boot(): Promise<void> {
-		setVellum(await this.app.container.resolve<Vellum>(Vellum));
+		const service = await this.app.container.resolve<Vellum>(Vellum);
+		this.#service = service;
+		setVellum(service);
 	}
 
-	async shutdown(): Promise<void> {}
+	async shutdown(): Promise<void> {
+		// Release the module-level singleton, while it is still ours: a stopped
+		// application left a dead Vellum reachable through `services/main`, and
+		// with two applications in one process the survivor's service must not
+		// be the one cleared.
+		if (this.#service !== undefined && getVellum() === this.#service) {
+			clearVellum();
+		}
+		this.#service = undefined;
+	}
 }

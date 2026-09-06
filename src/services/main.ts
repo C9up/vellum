@@ -15,7 +15,19 @@ export function setVellum(service: Vellum): void {
 	instance = service;
 }
 
-/** @internal Test helper — forget the service between cases. */
+/** @internal Read the seated service, if there is one. */
+export function getVellum(): Vellum | undefined {
+	return instance;
+}
+
+/**
+ * @internal Forget the service — called by the provider on shutdown, and by
+ * tests between cases.
+ *
+ * The caller checks ownership first (`getVellum() === mine`): two applications
+ * share this module in one process, and the one shutting down must not clear a
+ * service the other has since seated.
+ */
 export function clearVellum(): void {
 	instance = undefined;
 }
