@@ -24,6 +24,8 @@ use der::asn1::{OctetString, SetOfVec, UtcTime};
 use der::{Any, Decode, Encode, Sequence};
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
+use rsa::rand_core::{CryptoRngCore, OsRng};
+use rsa::signature::{Keypair, RandomizedSigner, Signer};
 use rsa::RsaPrivateKey;
 use sha2::{Digest, Sha256};
 use x509_cert::attr::Attribute;
@@ -155,6 +157,51 @@ fn parse_iso(iso: &str) -> Option<u64> {
     Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
+/// A `Signer` that BLINDS the private-key operation.
+///
+/// `cms` signs through `Signer::try_sign`, and `rsa`'s implementation of that
+/// trait passes no RNG — which is precisely the unblinded modular
+/// exponentiation RUSTSEC-2023-0071 describes: the timing of the private-key
+/// operation leaks information about the key, and here it runs on a digest a
+/// caller can influence and repeat. `RandomizedSigner` takes an RNG and blinds
+/// with it; `cms` 0.2 has no `add_signer_info_with_rng`, so the randomness is
+/// introduced here rather than waited for upstream.
+///
+/// The signature itself is unchanged — PKCS#1 v1.5 is deterministic, and
+/// blinding only masks the timing — so nothing downstream can tell, which is
+/// exactly why this is easy to lose again. The test counts the bytes drawn.
+struct BlindedSigningKey<R: CryptoRngCore + Clone> {
+    key: SigningKey<Sha256>,
+    rng: R,
+}
+
+impl<R: CryptoRngCore + Clone> Signer<rsa::pkcs1v15::Signature> for BlindedSigningKey<R> {
+    fn try_sign(&self, message: &[u8]) -> Result<rsa::pkcs1v15::Signature, rsa::signature::Error> {
+        // Cloned because `Signer` hands out `&self`. `OsRng` is a zero-sized
+        // handle on the operating system's generator, so this copies nothing.
+        let mut rng = self.rng.clone();
+        self.key.try_sign_with_rng(&mut rng, message)
+    }
+}
+
+impl<R: CryptoRngCore + Clone> Keypair for BlindedSigningKey<R> {
+    type VerifyingKey = <SigningKey<Sha256> as Keypair>::VerifyingKey;
+
+    fn verifying_key(&self) -> Self::VerifyingKey {
+        self.key.verifying_key()
+    }
+}
+
+impl<R: CryptoRngCore + Clone> x509_cert::spki::DynSignatureAlgorithmIdentifier
+    for BlindedSigningKey<R>
+{
+    fn signature_algorithm_identifier(
+        &self,
+    ) -> x509_cert::spki::Result<x509_cert::spki::AlgorithmIdentifierOwned> {
+        self.key.signature_algorithm_identifier()
+    }
+}
+
 /// Turn a digest into the CMS `SignedData` that goes into the document.
 ///
 /// `certificates` is the signer's certificate first, then any chain. The key
@@ -166,13 +213,27 @@ pub fn sign_cms(
     certificates: &[Vec<u8>],
     signed_at: &str,
 ) -> Result<Vec<u8>, String> {
+    sign_cms_with_rng(digest, key, certificates, signed_at, OsRng)
+}
+
+/// {@link sign_cms} with the generator named, so a test can watch it being used.
+pub(crate) fn sign_cms_with_rng<R: CryptoRngCore + Clone>(
+    digest: &[u8],
+    key: &[u8],
+    certificates: &[Vec<u8>],
+    signed_at: &str,
+    rng: R,
+) -> Result<Vec<u8>, String> {
     let Some((signer_der, chain)) = certificates.split_first() else {
         return Err("signing needs at least the signer's certificate".to_string());
     };
 
     let private_key = RsaPrivateKey::from_pkcs8_der(key)
         .map_err(|error| format!("cannot read the private key: {error}"))?;
-    let signing_key = SigningKey::<Sha256>::new(private_key);
+    let signing_key = BlindedSigningKey {
+        key: SigningKey::<Sha256>::new(private_key),
+        rng,
+    };
 
     let signer = Certificate::from_der(signer_der)
         .map_err(|error| format!("cannot read the signer's certificate: {error}"))?;
@@ -218,7 +279,7 @@ pub fn sign_cms(
             .map_err(|error| format!("cannot carry a chain certificate: {error}"))?;
     }
     builder
-        .add_signer_info::<SigningKey<Sha256>, rsa::pkcs1v15::Signature>(signer_info)
+        .add_signer_info::<BlindedSigningKey<R>, rsa::pkcs1v15::Signature>(signer_info)
         .map_err(|error| format!("cannot sign: {error}"))?;
 
     let signed: ContentInfo = builder
@@ -408,6 +469,77 @@ pub(crate) mod tests {
         )
         .expect("signing should succeed");
         (cms, digest, certificate)
+    }
+
+    /// A generator that counts what is drawn from it, delegating to a real one.
+    ///
+    /// Cloneable and SHARED: `Signer::try_sign` gets `&self`, so the signer
+    /// clones its generator — the count has to survive that.
+    #[derive(Clone)]
+    struct CountingRng {
+        draws: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        inner: rsa::rand_core::OsRng,
+    }
+
+    impl rsa::rand_core::RngCore for CountingRng {
+        fn next_u32(&mut self) -> u32 {
+            self.draws
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            rsa::rand_core::RngCore::next_u32(&mut self.inner)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.draws
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            rsa::rand_core::RngCore::next_u64(&mut self.inner)
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            self.draws
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            rsa::rand_core::RngCore::fill_bytes(&mut self.inner, dest);
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
+            self.draws
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            rsa::rand_core::RngCore::try_fill_bytes(&mut self.inner, dest)
+        }
+    }
+
+    impl rsa::rand_core::CryptoRng for CountingRng {}
+
+    /// The private-key operation must be BLINDED.
+    ///
+    /// RUSTSEC-2023-0071: `rsa`'s modular exponentiation is not constant-time,
+    /// and the timing of a private-key operation leaks information about the
+    /// key — here on a digest a caller can influence and repeat. Blinding is
+    /// what masks it, and `rsa` only blinds when it is handed a generator;
+    /// `Signer::try_sign`, which `cms` calls, hands it none.
+    ///
+    /// Nothing about the OUTPUT says whether it happened: PKCS#1 v1.5 is
+    /// deterministic and blinding cancels out. The only honest witness is that
+    /// randomness was actually drawn.
+    #[test]
+    fn the_private_key_operation_is_blinded() {
+        let draws = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (key, certificate) = key_and_certificate();
+
+        let cms = sign_cms_with_rng(
+            &[0x42; 32],
+            &key,
+            std::slice::from_ref(&certificate),
+            "2026-09-04T14:30:00Z",
+            CountingRng {
+                draws: std::sync::Arc::clone(&draws),
+                inner: rsa::rand_core::OsRng,
+            },
+        )
+        .expect("signing should succeed");
+
+        assert!(
+            draws.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the signature was produced without drawing any randomness, so the \
+             private-key operation was not blinded"
+        );
+        assert!(!cms.is_empty());
     }
 
     /// The signature has to verify — and it is verified here through the
