@@ -318,6 +318,19 @@ signers: {
 }
 ```
 
+**Where this signer's limits are.** It signs with `rsa`, whose modular
+exponentiation is not constant-time — RUSTSEC-2023-0071, which recognises no
+fixed release. Vellum blinds the operation, which is the mitigation the
+advisory itself points to, and that is enough for a key you hold and use on
+work your own application starts.
+
+It is not enough when the signer is reachable from remote input: an HTTP
+endpoint that signs on request, or a queue a client can feed, hands an
+attacker both the timing and the repetition the attack needs. That deployment
+wants an HSM, a remote signing service, or an audited constant-time backend —
+`Signer` is an interface, so one can be dropped in without touching the rest.
+
+
 It builds a CAdES `SignedData` whose signed attributes carry the content type,
 the document's digest, the signing time and — as PAdES requires —
 `signing-certificate-v2`. That last one is not decoration: without it a
