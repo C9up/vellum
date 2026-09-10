@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { arch, env, platform } from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -20,16 +20,24 @@ const hostSuffixMap = {
   'darwin-x64': 'darwin-x64', 'darwin-arm64': 'darwin-arm64', 'win32-x64': 'win32-x64-msvc',
 }
 
+// Cargo writes its artifacts under CARGO_TARGET_DIR when that is set — a
+// shared cache, a CI mount — so they are not under this package's `target/` at
+// all. A relative value is resolved against the directory cargo ran in, which
+// is this package root.
+const targetDir = env.CARGO_TARGET_DIR
+  ? resolve(root, env.CARGO_TARGET_DIR)
+  : join(root, 'target')
+
 const triple = env.CARGO_BUILD_TARGET ?? ''
 let suffix, os, releaseDir
 if (triple) {
   const entry = tripleMap[triple]
   if (!entry) throw new Error(`${TAG} unsupported CARGO_BUILD_TARGET: ${triple}`)
   suffix = entry.suffix; os = entry.os
-  releaseDir = join(root, 'target', triple, 'release')
+  releaseDir = join(targetDir, triple, 'release')
 } else {
   suffix = hostSuffixMap[`${platform}-${arch}`]; os = platform
-  releaseDir = join(root, 'target', 'release')
+  releaseDir = join(targetDir, 'release')
   if (!suffix) throw new Error(`${TAG} unsupported platform/arch: ${platform}-${arch}`)
 }
 
