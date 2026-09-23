@@ -1,6 +1,6 @@
 {
   "name": "@c9up/vellum",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "PDF toolkit — convert PDF pages to images, author and inspect documents",
   "type": "module",
   "main": "./src/index.ts",
@@ -9,6 +9,7 @@
     "LICENSE",
     "README.md",
     "dist",
+    "stubs",
     "index.*.node",
     "scripts",
     "src"
@@ -48,7 +49,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
-    "@c9up/ream": "^0.2.0",
+    "@c9up/ream": "^0.2.26",
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "4.1.11",
     "typescript": "^6.0.3",
@@ -82,7 +83,7 @@
     "url": "git+https://github.com/C9up/vellum.git"
   },
   "peerDependencies": {
-    "@c9up/ream": "^0.2.0"
+    "@c9up/ream": "^0.2.26"
   },
   "peerDependenciesMeta": {
     "@c9up/ream": {

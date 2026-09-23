@@ -6,6 +6,8 @@
  * Writing both together is what makes `ream add` mean installed AND working.
  */
 
+import { stubsRoot } from "./stubs.js";
+
 interface Codemods {
 	addProvider(importPath: string): Promise<void>;
 	addEnvVars(vars: Record<string, string>): Promise<void>;
@@ -14,6 +16,12 @@ interface Codemods {
 		content: string,
 		options?: { force?: boolean },
 	): Promise<void>;
+	makeUsingStub(
+		stubsRoot: string,
+		stubPath: string,
+		state?: Record<string, string | number | boolean>,
+		options?: { force?: boolean },
+	): Promise<{ path: string; contents: string }>;
 }
 
 export async function configure(codemods: Codemods): Promise<void> {
@@ -25,68 +33,5 @@ export async function configure(codemods: Codemods): Promise<void> {
 	});
 
 	await codemods.addProvider("@c9up/vellum/provider");
-	await codemods.writeFile(
-		"config/vellum.ts",
-		`import { defineConfig } from '@c9up/vellum'
-import env from '#start/env'
-
-export default defineConfig({
-  // Defaults for every render. Any call can override them.
-  format: env.get('VELLUM_FORMAT', 'png'),
-
-  // 1 is 72 DPI — the page's natural size. Raise it for print, or set
-  // \`width\` instead when what matters is the pixel width of a preview.
-  scale: 1,
-
-  // Only read when the format is 'jpeg'.
-  quality: 82,
-
-  // A PDF paints no background of its own, so rendering it transparent
-  // makes black text invisible over a dark viewer.
-  background: '#ffffff',
-
-  // Fonts to write text with, by the name you ask for them by. A font
-  // declared here is embedded in the document, subsetted to the characters
-  // written, which lifts the WinAnsi limit of the standard fonts.
-  //
-  // fonts: {
-  //   body: app.makePath('resources/fonts/Inter-Regular.ttf'),
-  // },
-
-  // Who may sign a document. A signer is handed the digest of what the
-  // signature covers and returns the CMS to embed — it never sees the
-  // document, which is what makes a key you hold and a key held by a
-  // certified provider the same interface.
-  //
-  // Wrap a signer in timestamped() to add a trusted timestamp, without which
-  // a signature stops being verifiable once its certificate expires.
-  //
-  // signers: {
-  //   internal: pkcs8Signer({
-  //     key: readFileSync(app.makePath('storage/signing.key.der')),
-  //     certificate: readFileSync(app.makePath('storage/signing.crt.der')),
-  //   }),
-  //   stamped: timestamped(pkcs8Signer({ ... }), {
-  //     url: 'https://freetsa.org/tsr',
-  //   }),
-  //   qualified: myProviderAdapter({ ... }),
-  // },
-
-  // Certificates to trust when CHECKING a signature — typically the roots
-  // your jurisdiction's supervisory body publishes as a trusted list. With
-  // none, every signature comes back untrusted, which is the honest answer.
-  //
-  // trustedAnchors: [
-  //   readFileSync(app.makePath('storage/anchors/authority.pem')),
-  // ],
-
-  // Which revocation responders may be contacted when checkRevocation is
-  // asked for. The address comes out of the certificate inside the document
-  // being checked, so by default only public hosts are asked — a document
-  // does not get to point this server at your own network. Name yours here
-  // when your authority answers somewhere that rule excludes.
-  //
-  // allowedResponders: ['ocsp.internal.example'],
-})`,
-	);
+	await codemods.makeUsingStub(stubsRoot, "config/vellum.stub");
 }

@@ -10,7 +10,7 @@
  * compiled here rather than read.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +28,27 @@ afterEach(() => {
 	scratch = undefined;
 });
 
+/**
+ * Read a stub the way `codemods.makeUsingStub` does.
+ *
+ * The real file, not a fixture: a test that stubbed this out would pass with
+ * a stub that does not exist.
+ */
+function renderStub(
+	stubsRoot: string,
+	stubPath: string,
+	state: Record<string, string | number | boolean>,
+): { to: string; body: string } {
+	const raw = readFileSync(path.resolve(stubsRoot, stubPath), "utf8");
+	const [, front = "", body = ""] = raw.split(/^---\r?\n/m, 3);
+	const declared = /^to:\s*(.+)$/m.exec(front)?.[1]?.trim() ?? "";
+	const render = (text: string): string =>
+		text.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (match, key: string) =>
+			state[key] === undefined ? match : String(state[key]),
+		);
+	return { to: render(declared), body: render(body) };
+}
+
 /** What `configure` writes, without touching a disk. */
 async function generated(): Promise<string> {
 	let written = "";
@@ -37,6 +58,17 @@ async function generated(): Promise<string> {
 		writeFile: vi.fn(async (_path: string, contents: string) => {
 			written = contents;
 		}),
+		makeUsingStub: vi.fn(
+			async (
+				stubsRoot: string,
+				stubPath: string,
+				state: Record<string, string | number | boolean> = {},
+			) => {
+				const { to, body } = renderStub(stubsRoot, stubPath, state);
+				written = body;
+				return { path: to, contents: body };
+			},
+		),
 	} as never);
 	return written;
 }
