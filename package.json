@@ -1,6 +1,6 @@
 {
   "name": "@c9up/vellum",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "PDF toolkit — convert PDF pages to images, author and inspect documents",
   "type": "module",
   "main": "./src/index.ts",
