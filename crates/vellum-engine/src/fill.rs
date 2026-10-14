@@ -306,7 +306,50 @@ fn line_start(quadding: i64, width: f32, line: &[u8], size: f32) -> f32 {
     start.max(PADDING)
 }
 
-/// Build the appearance stream that paints `text` inside a widget.
+/// The widget's own background and border, from its `/MK`: an appearance
+/// drawn without them loses the box the field was designed with.
+fn widget_frame(document: &Document, widget_id: ObjectId, width: f32, height: f32) -> Vec<u8> {
+    let Ok(widget) = document.get_dictionary(widget_id) else {
+        return Vec::new();
+    };
+    let characteristics = match widget.get(b"MK") {
+        Ok(Object::Dictionary(dictionary)) => dictionary.clone(),
+        Ok(Object::Reference(id)) => document.get_dictionary(*id).cloned().unwrap_or_default(),
+        _ => return Vec::new(),
+    };
+    let colour = |key: &[u8]| -> Option<String> {
+        let Ok(Object::Array(components)) = characteristics.get(key) else {
+            return None;
+        };
+        let numbers: Vec<f32> = components
+            .iter()
+            .filter_map(|value| value.as_float().ok())
+            .collect();
+        match numbers.as_slice() {
+            [grey] => Some(format!("{grey} {grey} {grey}")),
+            [red, green, blue] => Some(format!("{red} {green} {blue}")),
+            _ => None,
+        }
+    };
+    let mut content = Vec::new();
+    if let Some(background) = colour(b"BG") {
+        content.extend(format!("{background} rg 0 0 {width} {height} re f\n").bytes());
+    }
+    if let Some(border) = colour(b"BC") {
+        content.extend(
+            format!(
+                "{border} RG 1 w 0.5 0.5 {} {} re S\n",
+                width - 1.0,
+                height - 1.0
+            )
+            .bytes(),
+        );
+    }
+    content
+}
+
+/// Build the appearance stream that paints `text` inside a widget, over
+/// its `frame`.
 fn text_appearance(
     width: f32,
     height: f32,
@@ -314,6 +357,7 @@ fn text_appearance(
     appearance: Appearance,
     multiline: bool,
     quadding: i64,
+    frame: &[u8],
 ) -> Stream {
     let [red, green, blue] = appearance.color;
     let size = if appearance.auto_size {
@@ -324,7 +368,7 @@ fn text_appearance(
     let available = (width - 2.0 * PADDING).max(1.0);
     let lines = lay_out(text, size, available, multiline);
 
-    let mut content: Vec<u8> = Vec::new();
+    let mut content: Vec<u8> = frame.to_vec();
     // /Tx BMC ... EMC marks this as a form field's appearance, which is what
     // tells a reader it may replace it when the value changes.
     content.extend_from_slice(b"/Tx BMC\nq\nBT\n");
@@ -508,6 +552,7 @@ pub fn fill_form(bytes: &[u8], values: &[FieldValue]) -> Result<Vec<u8>, String>
                         appearance,
                         field.multiline,
                         quadding,
+                        &widget_frame(&document, widget_id, width, height),
                     );
                     let stream_id = document.add_object(Object::Stream(stream));
                     if let Ok(widget) = document

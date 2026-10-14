@@ -122,12 +122,110 @@ export interface PdfDocumentOptions
 	/** The largest file `file()` embeds, in bytes. Default 64 MiB. */
 	maxFileBytes?: number;
 	/**
+	 * Encrypt the document with AES-256 (PDF 2.0). pdfkit picks RC4 for the
+	 * versions it writes by default; that cipher is not offered.
+	 */
+	userPassword?: string;
+	ownerPassword?: string;
+	/** What the user password allows; everything else is denied. */
+	permissions?: Permissions;
+	/**
 	 * The standard the document is checked against as it is written; what
 	 * it forbids is refused at `end()`. pdfkit declares the standard and
 	 * checks nothing.
 	 */
 	subset?: Subset;
 }
+
+export interface Permissions {
+	printing?: "lowResolution" | "highResolution";
+	modifying?: boolean;
+	copying?: boolean;
+	annotating?: boolean;
+	fillingForms?: boolean;
+	contentAccessibility?: boolean;
+	documentAssembly?: boolean;
+}
+
+/** A form field, as `formField` and the form methods answer it. */
+export interface PdfFormField {
+	readonly name: string;
+}
+
+export interface FieldFormat {
+	type:
+		| "zip"
+		| "zipPlus4"
+		| "zip4"
+		| "phone"
+		| "ssn"
+		| "date"
+		| "time"
+		| "number"
+		| "percent";
+	/** A date's format (`dd.mm.yyyy`), a time's style (0 to 3). */
+	param?: string | number;
+	nDec?: number;
+	sepComma?: boolean;
+	negStyle?: "MinusBlack" | "Red" | "ParensBlack" | "ParensRed";
+	currency?: string;
+	currencyPrepend?: boolean;
+}
+
+export interface FieldOptions {
+	parent?: PdfFormField;
+	readOnly?: boolean;
+	required?: boolean;
+	noExport?: boolean;
+	multiline?: boolean;
+	password?: boolean;
+	toggleToOffButton?: boolean;
+	radioButton?: boolean;
+	pushButton?: boolean;
+	combo?: boolean;
+	edit?: boolean;
+	sort?: boolean;
+	multiSelect?: boolean;
+	noSpell?: boolean;
+	/** Raw field flags, combined with the named ones. */
+	Ff?: number;
+	align?: "left" | "center" | "right";
+	/** 0 sizes the text to its box. */
+	fontSize?: number;
+	/** A choice field's options. */
+	select?: readonly string[];
+	value?: string;
+	defaultValue?: string;
+	/** A push button's caption. */
+	label?: string;
+	MK?: { CA?: string };
+	backgroundColor?: ColourValue;
+	borderColor?: ColourValue;
+	/**
+	 * Acrobat's number, date, time and special formats. pdfkit writes the
+	 * parameters into the script as given; here they are checked first, and
+	 * a raw `AA` (any script) is not taken.
+	 */
+	format?: FieldFormat;
+	/** The state a checkbox or radio button is on in. Default `Yes`. */
+	onState?: string;
+}
+
+const FIELD_FLAGS = {
+	readOnly: 1,
+	required: 2,
+	noExport: 4,
+	multiline: 0x1000,
+	password: 0x2000,
+	toggleToOffButton: 0x4000,
+	radioButton: 0x8000,
+	pushButton: 0x10000,
+	combo: 0x20000,
+	edit: 0x40000,
+	sort: 0x80000,
+	multiSelect: 0x200000,
+	noSpell: 0x400000,
+} as const;
 
 export type Subset =
 	| "PDF/A-1"
@@ -594,6 +692,8 @@ export class PdfDocument extends Readable {
 	readonly #images = new Map<string, PdfImage>();
 	readonly #imageHandles = new WeakMap<PdfImage, number>();
 	readonly #fileHandles = new WeakMap<PdfFileSpec, number>();
+	readonly #fieldHandles = new WeakMap<PdfFormField, number>();
+	#formReady = false;
 	/** The document outline: its bookmarks, added with `addItem`. */
 	readonly outline: PdfOutline = new PdfOutline(() => {
 		const index = this.#native.currentPage();
@@ -639,6 +739,19 @@ export class PdfDocument extends Readable {
 			subset: options.subset,
 		});
 		this.#remSize = 12;
+		if (
+			options.userPassword !== undefined ||
+			options.ownerPassword !== undefined
+		) {
+			const permissions = options.permissions ?? {};
+			compose(() =>
+				this.#native.setEncryption({
+					userPassword: options.userPassword ?? options.ownerPassword,
+					ownerPassword: options.ownerPassword ?? options.userPassword,
+					permissions: { ...permissions },
+				}),
+			);
+		}
 		this.font(options.font ?? "Helvetica");
 		if (options.autoFirstPage !== false) this.addPage();
 	}
@@ -1642,6 +1755,186 @@ export class PdfDocument extends Readable {
 		const spec: PdfFileSpec = Object.freeze({ name });
 		this.#fileHandles.set(spec, handle);
 		return spec;
+	}
+
+	/** pdfkit's `initForm`: form fields may be added from here on. */
+	initForm(): this {
+		this.#formReady = true;
+		return this;
+	}
+
+	#field(
+		name: string,
+		type: string | undefined,
+		options: FieldOptions,
+		rect?: { x: number; y: number; width: number; height: number },
+	): PdfFormField {
+		if (!this.#formReady) {
+			throw new VellumError(
+				"NO_FORM",
+				"call initForm() before adding form fields",
+			);
+		}
+		let flags = options.Ff ?? 0;
+		for (const [key, bit] of Object.entries(FIELD_FLAGS)) {
+			if (Reflect.get(options, key) === true) flags |= bit;
+		}
+		const parent =
+			options.parent === undefined
+				? undefined
+				: this.#fieldHandles.get(options.parent);
+		if (options.parent !== undefined && parent === undefined) {
+			throw new VellumError(
+				"INVALID_OPTIONS",
+				"the field's parent belongs to another document",
+			);
+		}
+		const colour = (value: ColourValue | undefined) => {
+			if (value === undefined) return undefined;
+			const plain = plainColour(value);
+			if (plain.kind !== "rgb")
+				throw new VellumError("INVALID_COLOR", "a field's colour is RGB");
+			return plain.values;
+		};
+		const format = options.format;
+		const handle = compose(() =>
+			this.#native.formField(
+				{
+					name,
+					kind: type,
+					parent,
+					flags,
+					align: options.align,
+					value: options.value,
+					defaultValue: options.defaultValue,
+					choices:
+						options.select === undefined ? undefined : [...options.select],
+					label: options.label ?? options.MK?.CA,
+					background: colour(options.backgroundColor),
+					border: colour(options.borderColor),
+					fontSize: options.fontSize,
+					onState: options.onState,
+					format:
+						format === undefined
+							? undefined
+							: {
+									type: format.type,
+									param:
+										format.param === undefined
+											? undefined
+											: String(format.param),
+									nDec: format.nDec,
+									sepComma: format.sepComma,
+									negStyle: format.negStyle,
+									currency: format.currency,
+									currencyPrepend: format.currencyPrepend,
+								},
+				},
+				rect,
+			),
+		);
+		const field: PdfFormField = Object.freeze({ name });
+		this.#fieldHandles.set(field, handle);
+		return field;
+	}
+
+	/** A field that only groups others: `parent` of theirs. */
+	formField(name: string, options: FieldOptions = {}): PdfFormField {
+		return this.#field(name, undefined, options);
+	}
+
+	formAnnotation(
+		name: string,
+		type: "text" | "pushButton" | "radioButton" | "checkbox" | "combo" | "list",
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: FieldOptions = {},
+	): PdfFormField {
+		return this.#field(name, type, options, { x, y, width, height });
+	}
+
+	formText(
+		name: string,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: FieldOptions = {},
+	): PdfFormField {
+		return this.formAnnotation(name, "text", x, y, width, height, options);
+	}
+
+	formPushButton(
+		name: string,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: FieldOptions = {},
+	): PdfFormField {
+		return this.formAnnotation(
+			name,
+			"pushButton",
+			x,
+			y,
+			width,
+			height,
+			options,
+		);
+	}
+
+	formCombo(
+		name: string,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: FieldOptions = {},
+	): PdfFormField {
+		return this.formAnnotation(name, "combo", x, y, width, height, options);
+	}
+
+	formList(
+		name: string,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: FieldOptions = {},
+	): PdfFormField {
+		return this.formAnnotation(name, "list", x, y, width, height, options);
+	}
+
+	formRadioButton(
+		name: string,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: FieldOptions = {},
+	): PdfFormField {
+		return this.formAnnotation(
+			name,
+			"radioButton",
+			x,
+			y,
+			width,
+			height,
+			options,
+		);
+	}
+
+	formCheckbox(
+		name: string,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: FieldOptions = {},
+	): PdfFormField {
+		return this.formAnnotation(name, "checkbox", x, y, width, height, options);
 	}
 
 	#annotation(

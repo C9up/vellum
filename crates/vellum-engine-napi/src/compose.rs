@@ -9,6 +9,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use vellum_engine::compose::annotations::{AnnotationKind, Attachment, Fit, Relationship};
+use vellum_engine::compose::forms::{Encryption, FieldSpec, FieldType, Format, Rights};
 use vellum_engine::compose::graphics::{
     Colour, FillRule, Gradient, GradientShape, GradientStop, LineCap, LineJoin, Matrix, Paint,
     Segment,
@@ -157,6 +158,113 @@ pub struct AnnotationInput {
     pub y2: Option<f64>,
     /// A file annotation's file.
     pub file: Option<u32>,
+}
+
+/// pdfkit's `format` of a form field.
+#[napi(object)]
+pub struct FormatInput {
+    /// `zip`, `zipPlus4`, `zip4`, `phone`, `ssn`, `date`, `time`, `number`,
+    /// `percent`.
+    #[napi(js_name = "type")]
+    pub kind: String,
+    pub param: Option<String>,
+    pub n_dec: Option<u32>,
+    pub sep_comma: Option<bool>,
+    pub neg_style: Option<String>,
+    pub currency: Option<String>,
+    pub currency_prepend: Option<bool>,
+}
+
+#[napi(object)]
+pub struct FieldInput {
+    pub name: String,
+    /// `text`, `pushButton`, `radioButton`, `checkbox`, `combo`, `list`;
+    /// absent groups fields.
+    pub kind: Option<String>,
+    pub parent: Option<u32>,
+    pub flags: Option<u32>,
+    /// `left`, `center`, `right`.
+    pub align: Option<String>,
+    pub value: Option<String>,
+    pub default_value: Option<String>,
+    pub choices: Option<Vec<String>>,
+    pub label: Option<String>,
+    pub background: Option<Vec<f64>>,
+    pub border: Option<Vec<f64>>,
+    pub font_size: Option<f64>,
+    pub format: Option<FormatInput>,
+    pub on_state: Option<String>,
+}
+
+#[napi(object)]
+pub struct RectInput {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[napi(object)]
+pub struct PermissionsInput {
+    /// `lowResolution` or `highResolution`.
+    pub printing: Option<String>,
+    pub modifying: Option<bool>,
+    pub copying: Option<bool>,
+    pub annotating: Option<bool>,
+    pub filling_forms: Option<bool>,
+    pub content_accessibility: Option<bool>,
+    pub document_assembly: Option<bool>,
+}
+
+#[napi(object)]
+pub struct EncryptionInput {
+    pub user_password: Option<String>,
+    pub owner_password: Option<String>,
+    pub permissions: Option<PermissionsInput>,
+}
+
+fn rgb(values: Option<Vec<f64>>, name: &str) -> Result<Option<[u8; 3]>> {
+    match values.as_deref() {
+        None => Ok(None),
+        Some([red, green, blue]) => Ok(Some([
+            byte(*red, name)?,
+            byte(*green, name)?,
+            byte(*blue, name)?,
+        ])),
+        Some(_) => Err(options_error(format!("{name} is [r, g, b]"))),
+    }
+}
+
+fn format(input: FormatInput) -> Result<Format> {
+    Ok(match input.kind.as_str() {
+        "zip" => Format::Zip,
+        "zipPlus4" | "zip4" => Format::ZipPlus4,
+        "phone" => Format::Phone,
+        "ssn" => Format::Ssn,
+        "date" => Format::Date(input.param.unwrap_or_else(|| "dd/mm/yyyy".into())),
+        "time" => Format::Time(
+            input
+                .param
+                .as_deref()
+                .unwrap_or("0")
+                .parse()
+                .map_err(|_| options_error("a time format's param is 0 to 3"))?,
+        ),
+        "number" => Format::Number {
+            decimals: u8::try_from(input.n_dec.unwrap_or(0))
+                .map_err(|_| options_error("nDec is too large"))?,
+            separate_thousands: input.sep_comma.unwrap_or(false),
+            negative: input.neg_style.unwrap_or_else(|| "MinusBlack".into()),
+            currency: input.currency.unwrap_or_default(),
+            currency_first: input.currency_prepend.unwrap_or(true),
+        },
+        "percent" => Format::Percent {
+            decimals: u8::try_from(input.n_dec.unwrap_or(0))
+                .map_err(|_| options_error("nDec is too large"))?,
+            separate_thousands: input.sep_comma.unwrap_or(false),
+        },
+        other => return Err(options_error(format!("{other:?} is not a field format"))),
+    })
 }
 
 #[napi(object)]
@@ -1191,6 +1299,102 @@ impl NativeDocument {
             }
         };
         self.with(|document| document.set_destination_fit(&name, fit).map_err(failure))
+    }
+
+    /// A form field, shown on the current page when `rect` is given.
+    #[napi]
+    pub fn form_field(&mut self, input: FieldInput, rect: Option<RectInput>) -> Result<u32> {
+        let kind = match input.kind.as_deref() {
+            None => None,
+            Some("text") => Some(FieldType::Text),
+            Some("pushButton") => Some(FieldType::PushButton),
+            Some("radioButton") => Some(FieldType::RadioButton),
+            Some("checkbox") => Some(FieldType::Checkbox),
+            Some("combo") => Some(FieldType::Combo),
+            Some("list") => Some(FieldType::List),
+            Some(other) => {
+                return Err(options_error(format!(
+                    "Invalid form annotation type '{other}'"
+                )))
+            }
+        };
+        let align = match input.align.as_deref() {
+            None | Some("left") => 0,
+            Some("center") => 1,
+            Some("right") => 2,
+            Some(other) => {
+                return Err(options_error(format!("{other:?} is not a field alignment")))
+            }
+        };
+        let spec = FieldSpec {
+            name: input.name,
+            kind,
+            parent: input.parent.map(|parent| parent as usize),
+            flags: input.flags.unwrap_or(0),
+            align,
+            value: input.value,
+            default_value: input.default_value,
+            choices: input.choices.unwrap_or_default(),
+            label: input.label,
+            background: rgb(input.background, "backgroundColor")?,
+            border: rgb(input.border, "borderColor")?,
+            font_size: optional(input.font_size, "fontSize")?.unwrap_or(0.0),
+            format: input.format.map(format).transpose()?,
+            on_state: input.on_state,
+            widget: None,
+        };
+        let rect = match rect {
+            None => None,
+            Some(rect) => Some((
+                finite(rect.x, "x")?,
+                finite(rect.y, "y")?,
+                finite(rect.width, "width")?,
+                finite(rect.height, "height")?,
+            )),
+        };
+        self.with(|document| {
+            document
+                .form_field(spec, rect)
+                .map(|id| id as u32)
+                .map_err(failure)
+        })
+    }
+
+    #[napi]
+    pub fn set_encryption(&mut self, input: EncryptionInput) -> Result<()> {
+        let permissions = input.permissions.unwrap_or(PermissionsInput {
+            printing: None,
+            modifying: None,
+            copying: None,
+            annotating: None,
+            filling_forms: None,
+            content_accessibility: None,
+            document_assembly: None,
+        });
+        let printing = match permissions.printing.as_deref() {
+            None => None,
+            Some("lowResolution") => Some(false),
+            Some("highResolution") => Some(true),
+            Some(other) => {
+                return Err(options_error(format!(
+                    "printing {other:?} is lowResolution or highResolution"
+                )))
+            }
+        };
+        let encryption = Encryption {
+            user_password: input.user_password.unwrap_or_default(),
+            owner_password: input.owner_password.unwrap_or_default(),
+            rights: Rights {
+                printing,
+                modifying: permissions.modifying.unwrap_or(false),
+                copying: permissions.copying.unwrap_or(false),
+                annotating: permissions.annotating.unwrap_or(false),
+                filling_forms: permissions.filling_forms.unwrap_or(false),
+                content_accessibility: permissions.content_accessibility.unwrap_or(false),
+                document_assembly: permissions.document_assembly.unwrap_or(false),
+            },
+        };
+        self.with(|document| document.set_encryption(encryption).map_err(failure))
     }
 
     /// Write the document. Nothing can be added afterwards.

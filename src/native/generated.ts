@@ -149,6 +149,68 @@ export interface AnnotationInput {
 	file?: number;
 }
 
+/** pdfkit's `format` of a form field. */
+
+export interface FormatInput {
+	/**
+	 * `zip`, `zipPlus4`, `zip4`, `phone`, `ssn`, `date`, `time`, `number`,
+	 * `percent`.
+	 */
+	type: string;
+	param?: string;
+	nDec?: number;
+	sepComma?: boolean;
+	negStyle?: string;
+	currency?: string;
+	currencyPrepend?: boolean;
+}
+
+export interface FieldInput {
+	name: string;
+	/**
+	 * `text`, `pushButton`, `radioButton`, `checkbox`, `combo`, `list`;
+	 * absent groups fields.
+	 */
+	kind?: string;
+	parent?: number;
+	flags?: number;
+	/** `left`, `center`, `right`. */
+	align?: string;
+	value?: string;
+	defaultValue?: string;
+	choices?: Array<string>;
+	label?: string;
+	background?: Array<number>;
+	border?: Array<number>;
+	fontSize?: number;
+	format?: FormatInput;
+	onState?: string;
+}
+
+export interface RectInput {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+export interface PermissionsInput {
+	/** `lowResolution` or `highResolution`. */
+	printing?: string;
+	modifying?: boolean;
+	copying?: boolean;
+	annotating?: boolean;
+	fillingForms?: boolean;
+	contentAccessibility?: boolean;
+	documentAssembly?: boolean;
+}
+
+export interface EncryptionInput {
+	userPassword?: string;
+	ownerPassword?: string;
+	permissions?: PermissionsInput;
+}
+
 export interface ImageInfo {
 	handle: number;
 	/** Pixels, as stored. */
@@ -619,6 +681,9 @@ export declare class NativeDocument {
 		fit: string,
 		values: Array<number | undefined | null>,
 	): void;
+	/** A form field, shown on the current page when `rect` is given. */
+	formField(input: FieldInput, rect?: RectInput | undefined | null): number;
+	setEncryption(input: EncryptionInput): void;
 	/** Write the document. Nothing can be added afterwards. */
 	end(): Buffer;
 }

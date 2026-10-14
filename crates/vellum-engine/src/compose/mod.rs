@@ -9,6 +9,7 @@
 pub mod annotations;
 pub mod drawing;
 pub mod fonts;
+pub mod forms;
 pub mod graphics;
 pub mod images;
 pub mod links;
@@ -373,6 +374,8 @@ pub struct Composer {
     pub(crate) attachments: Vec<annotations::Attachment>,
     pub(crate) extra_annotations: Vec<(usize, annotations::PageAnnotation)>,
     pub(crate) fits: Vec<(String, annotations::Fit)>,
+    pub(crate) fields: Vec<forms::FieldSpec>,
+    pub(crate) encryption: Option<forms::Encryption>,
     /// The document's `lineGap(n)`.
     pub line_gap: f32,
     /// Word widths in thousandths of an em, by font.
@@ -418,6 +421,8 @@ impl Composer {
             attachments: Vec::new(),
             extra_annotations: Vec::new(),
             fits: Vec::new(),
+            fields: Vec::new(),
+            encryption: None,
             line_gap: 0.0,
             width_cache: HashMap::new(),
             wrapper: None,
@@ -609,6 +614,7 @@ impl Composer {
         }
         self.check_subset()?;
         self.check_extras()?;
+        self.check_forms()?;
         self.ended = true;
 
         let mut builder = ConfigurationBuilder::new();
@@ -799,6 +805,7 @@ impl Composer {
             && mod_date.is_none()
             && info.custom.is_empty()
             && !self.needs_annotation_pass()
+            && !self.needs_form_pass()
         {
             return Ok(bytes);
         }
@@ -851,10 +858,25 @@ impl Composer {
             }
         }
         self.write_extras(&mut document)?;
+        let values = self.write_fields(&mut document)?;
         let mut out = Vec::new();
         document
             .save_to(&mut out)
             .map_err(|error| ComposeError::new("WRITE_FAILED", error.to_string()))?;
+        // Fields with a value are drawn as filling an existing form draws
+        // them, then everything is encrypted, last.
+        if !values.is_empty() {
+            out = crate::fill_form(&out, &values)
+                .map_err(|error| ComposeError::new("WRITE_FAILED", error))?;
+        }
+        if self.encryption.is_some() {
+            let mut document = lopdf::Document::load_mem(&out).map_err(failed)?;
+            self.encrypt(&mut document)?;
+            out.clear();
+            document
+                .save_to(&mut out)
+                .map_err(|error| ComposeError::new("WRITE_FAILED", error.to_string()))?;
+        }
         Ok(out)
     }
 }
