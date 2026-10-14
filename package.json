@@ -50,7 +50,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
-    "@c9up/prism": "^0.1.4",
+    "@c9up/prism": "^0.1.5",
     "@c9up/ream": "^0.2.25",
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "4.1.11",
