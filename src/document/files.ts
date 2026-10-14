@@ -32,10 +32,18 @@ export function registerFile(
 	registered.set(key(path), Buffer.from(data));
 }
 
-/** The bytes of a source. */
+const DATA_URL = /^data:[^,;]*(?:;[^,;]*)*;base64,/;
+
+/** The bytes of a source: bytes, a `data:` URL in base64, or a path. */
 export function readSource(source: FileSource): Buffer {
 	if (source instanceof Uint8Array) return Buffer.from(source);
 	if (source instanceof ArrayBuffer) return Buffer.from(new Uint8Array(source));
+	if (typeof source === "string") {
+		const header = DATA_URL.exec(source)?.[0];
+		if (header !== undefined) {
+			return Buffer.from(source.slice(header.length), "base64");
+		}
+	}
 	const path = key(source);
 	const fromMemory = registered.get(path);
 	if (fromMemory !== undefined) return fromMemory;

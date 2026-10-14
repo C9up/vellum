@@ -9,6 +9,7 @@
 pub mod drawing;
 pub mod fonts;
 pub mod graphics;
+pub mod images;
 pub mod links;
 pub mod ops;
 pub mod standard;
@@ -279,6 +280,7 @@ pub struct Composer {
     pub(crate) saved: Vec<GraphicsState>,
     pub(crate) paints: PaintBook,
     pub(crate) destinations: Vec<links::NamedPoint>,
+    pub(crate) images: Vec<images::LoadedImage>,
     /// The document's `lineGap(n)`.
     pub line_gap: f32,
     /// Word widths in thousandths of an em, by font.
@@ -314,6 +316,7 @@ impl Composer {
             saved: Vec::new(),
             paints: PaintBook::default(),
             destinations: Vec::new(),
+            images: Vec::new(),
             line_gap: 0.0,
             width_cache: HashMap::new(),
             wrapper: None,
@@ -515,7 +518,15 @@ impl Composer {
                 .ok_or_else(|| invalid_options("page size out of range"))?;
             let mut writer = document.start_page_with(page_settings);
             let mut surface = writer.surface();
-            ops::replay(&mut surface, &page.ops, &self.fonts, &self.paints);
+            ops::replay(
+                &mut surface,
+                &page.ops,
+                &ops::Resources {
+                    fonts: &self.fonts,
+                    images: &self.images,
+                    paints: &self.paints,
+                },
+            );
             surface.finish();
             for annotation in annotations {
                 writer.add_annotation(annotation);

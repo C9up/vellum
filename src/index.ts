@@ -17,20 +17,33 @@
 import "./augmentations.js";
 
 export { defineConfig } from "./config.js";
+export type { ColourValue } from "./document/colours.js";
 export type { FileSource } from "./document/files.js";
 export { registerFile } from "./document/files.js";
 export type {
+	Colour,
 	DocumentInfo as PdfDocumentInfo,
+	FillRule,
 	FontSource,
+	ImageOptions,
+	ImageSource,
 	PageLayout,
 	PageOptions as PdfPageOptions,
 	PdfDocumentOptions,
+	PdfImage,
 	TextAlign,
 	TextBaseline,
 	TextOptions,
 	WidthOptions,
 } from "./document/PdfDocument.js";
-export { PdfDocument, PdfPage, toBytes } from "./document/PdfDocument.js";
+export {
+	PdfDocument,
+	PdfGradient,
+	PdfLinearGradient,
+	PdfPage,
+	PdfRadialGradient,
+	toBytes,
+} from "./document/PdfDocument.js";
 export type { PageSizeName, SideDefinition, Size } from "./document/sizes.js";
 export { PAGE_SIZES } from "./document/sizes.js";
 export { VellumError } from "./errors.js";

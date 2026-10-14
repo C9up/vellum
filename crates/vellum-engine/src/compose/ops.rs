@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use krilla::geom::Point;
+use krilla::geom::{Point, Size};
 use krilla::num::NormalizedF32;
 use krilla::paint::{Fill, FillRule, Stroke};
 use krilla::surface::Surface;
@@ -18,6 +18,7 @@ use super::fonts::LoadedFont;
 use super::graphics::{
     build_path, krilla_transform, Clip, Matrix, Paint, PaintBook, Segment, StrokeStyle,
 };
+use super::images::LoadedImage;
 
 /// One glyph of a run, as shaping placed it, in thousandths of an em.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -64,6 +65,14 @@ pub enum Op {
         ctm: Matrix,
         clips: Arc<Vec<Clip>>,
     },
+    /// An image, drawn into `[0, size]` of the user space `ctm` maps.
+    Image {
+        image: usize,
+        size: Size,
+        ctm: Matrix,
+        opacity: f32,
+        clips: Arc<Vec<Clip>>,
+    },
     /// A path in user space, filled, stroked or both.
     Path {
         segments: Arc<[Segment]>,
@@ -77,7 +86,7 @@ pub enum Op {
 impl Op {
     fn clips(&self) -> &Arc<Vec<Clip>> {
         match self {
-            Op::Glyphs { clips, .. } | Op::Path { clips, .. } => clips,
+            Op::Glyphs { clips, .. } | Op::Path { clips, .. } | Op::Image { clips, .. } => clips,
         }
     }
 }
@@ -102,7 +111,14 @@ fn stroke(spec: &StrokeSpec, paints: &PaintBook) -> Stroke {
     }
 }
 
-pub fn replay(surface: &mut Surface, ops: &[Op], fonts: &[LoadedFont], paints: &PaintBook) {
+/// What the operations of a page refer to.
+pub struct Resources<'a> {
+    pub fonts: &'a [LoadedFont],
+    pub images: &'a [LoadedImage],
+    pub paints: &'a PaintBook,
+}
+
+pub fn replay(surface: &mut Surface, ops: &[Op], resources: &Resources<'_>) {
     let mut index = 0;
     while index < ops.len() {
         // Operations under the same clips share one push of them.
@@ -130,7 +146,7 @@ pub fn replay(surface: &mut Surface, ops: &[Op], fonts: &[LoadedFont], paints: &
             }
         }
         for op in &ops[index..end] {
-            draw(surface, op, fonts, paints);
+            draw(surface, op, resources);
         }
         for _ in 0..pushed {
             surface.pop();
@@ -139,8 +155,30 @@ pub fn replay(surface: &mut Surface, ops: &[Op], fonts: &[LoadedFont], paints: &
     }
 }
 
-fn draw(surface: &mut Surface, op: &Op, fonts: &[LoadedFont], paints: &PaintBook) {
+fn draw(surface: &mut Surface, op: &Op, resources: &Resources<'_>) {
+    let (fonts, paints) = (resources.fonts, resources.paints);
     match op {
+        Op::Image {
+            image,
+            size,
+            ctm,
+            opacity,
+            ..
+        } => {
+            let Some(image) = resources.images.get(*image) else {
+                return;
+            };
+            surface.push_transform(&krilla_transform(*ctm));
+            let translucent = *opacity < 1.0;
+            if translucent {
+                surface.push_opacity(NormalizedF32::new(*opacity).unwrap_or(NormalizedF32::ONE));
+            }
+            surface.draw_image(image.krilla.clone(), *size);
+            if translucent {
+                surface.pop();
+            }
+            surface.pop();
+        }
         Op::Glyphs {
             font,
             size,

@@ -100,6 +100,8 @@ export interface PdfDocumentOptions
 	lang?: string;
 	displayTitle?: boolean;
 	pageLayout?: PageLayout;
+	/** Draw JPEGs as stored, not turned by their EXIF orientation. */
+	ignoreOrientation?: boolean;
 }
 
 export type TextAlign = "left" | "center" | "right" | "justify";
@@ -258,6 +260,39 @@ export class PdfRadialGradient extends PdfGradient {
 	}
 }
 
+/** An image opened with {@link PdfDocument.openImage}: its size in pixels. */
+export interface PdfImage {
+	readonly width: number;
+	readonly height: number;
+	/** EXIF orientation of a JPEG, 1 to 8. */
+	readonly orientation: number;
+}
+
+/** An image: a path, a `data:` URL, its bytes, or one already opened. */
+export type ImageSource = FileSource | PdfImage;
+
+export interface ImageOptions {
+	x?: number;
+	y?: number;
+	width?: number;
+	height?: number;
+	scale?: number;
+	/** Fit inside `[width, height]`, keeping the proportions. */
+	fit?: readonly [number, number];
+	/**
+	 * Cover `[width, height]`, keeping the proportions. What overflows is
+	 * cut off; pdfkit draws it past the box.
+	 */
+	cover?: readonly [number, number];
+	align?: "left" | "center" | "right";
+	valign?: "top" | "center" | "bottom";
+	link?: string | number;
+	goTo?: string;
+	destination?: string;
+	opacity?: number;
+	ignoreOrientation?: boolean;
+}
+
 /** A colour, or a gradient. */
 export type Colour = ColourValue | PdfGradient;
 
@@ -375,6 +410,8 @@ export class PdfDocument extends Readable {
 	#textOptions: TextOptions | undefined;
 	readonly #path = new PathRecorder();
 	readonly #spots = new Map<string, number>();
+	readonly #images = new Map<string, PdfImage>();
+	readonly #imageHandles = new WeakMap<PdfImage, number>();
 	#ended = false;
 
 	constructor(options: PdfDocumentOptions = {}) {
@@ -1163,6 +1200,131 @@ export class PdfDocument extends Readable {
 		return this;
 	}
 
+	/** Open an image once, to draw it several times or read its size. */
+	openImage(src: ImageSource): PdfImage {
+		if (typeof src === "string") {
+			const known = this.#images.get(src);
+			if (known !== undefined) return known;
+		}
+		if (isOpenedImage(src)) {
+			if (!this.#imageHandles.has(src)) {
+				throw new VellumError(
+					"INVALID_IMAGE",
+					"this image was opened by another document",
+				);
+			}
+			return src;
+		}
+		const bytes = readSource(src);
+		const info = compose(() => this.#native.loadImage(bytes));
+		const image: PdfImage = Object.freeze({
+			width: info.width,
+			height: info.height,
+			orientation: info.orientation,
+		});
+		this.#imageHandles.set(image, info.handle);
+		if (typeof src === "string") this.#images.set(src, image);
+		return image;
+	}
+
+	/** pdfkit's `image`: sized, fitted or covered, turned by its EXIF orientation. */
+	image(
+		src: ImageSource,
+		x?: number | ImageOptions,
+		y?: number,
+		options: ImageOptions = {},
+	): this {
+		this.#open();
+		const given = typeof x === "object" ? x : options;
+		const ignoreOrientation =
+			given.ignoreOrientation ||
+			(given.ignoreOrientation !== false &&
+				this.options.ignoreOrientation === true);
+		const inDocumentFlow = typeof y !== "number";
+		let left = (typeof x === "number" ? x : undefined) ?? given.x ?? this.x;
+		let top = y ?? given.y ?? this.y;
+
+		const image = this.openImage(src);
+		const handle = this.#imageHandles.get(image);
+		if (handle === undefined) {
+			throw new VellumError(
+				"INVALID_IMAGE",
+				"this image was not opened by this document",
+			);
+		}
+		let { width, height } = image;
+		if (!ignoreOrientation && image.orientation > 4)
+			[width, height] = [height, width];
+
+		let w = given.width || width;
+		let h = given.height || height;
+		let box: readonly [number, number] | undefined;
+		if (given.width && !given.height) {
+			h = height * (w / width);
+		} else if (given.height && !given.width) {
+			w = width * (h / height);
+		} else if (given.scale) {
+			w = width * given.scale;
+			h = height * given.scale;
+		} else if (given.fit) {
+			box = given.fit;
+			const [bw, bh] = box;
+			if (width / height > bw / bh) {
+				w = bw;
+				h = bw / (width / height);
+			} else {
+				h = bh;
+				w = bh * (width / height);
+			}
+		} else if (given.cover) {
+			box = given.cover;
+			const [bw, bh] = box;
+			if (width / height > bw / bh) {
+				h = bh;
+				w = bh * (width / height);
+			} else {
+				w = bw;
+				h = bw / (width / height);
+			}
+		}
+		const boxLeft = left;
+		const boxTop = top;
+		if (box !== undefined) {
+			const [bw, bh] = box;
+			if (given.align === "center") left += bw / 2 - w / 2;
+			else if (given.align === "right") left += bw - w;
+			if (given.valign === "center") top += bh / 2 - h / 2;
+			else if (given.valign === "bottom") top += bh - h;
+		}
+
+		if (given.link !== undefined) this.link(left, top, w, h, given.link);
+		if (given.goTo !== undefined) this.goTo(left, top, w, h, given.goTo);
+		if (given.destination !== undefined) {
+			this.addNamedDestination(given.destination, "XYZ", left, top);
+		}
+		if (inDocumentFlow) this.y += h;
+
+		// Only `cover` chose the box; `fit` keeps the image inside it.
+		const clip = given.fit === undefined ? box : undefined;
+		if (clip !== undefined) {
+			this.save();
+			this.rect(boxLeft, boxTop, clip[0], clip[1]).clip();
+		}
+		compose(() =>
+			this.#native.drawImage(
+				handle,
+				left,
+				top,
+				w,
+				h,
+				ignoreOrientation ? 1 : image.orientation,
+				given.opacity,
+			),
+		);
+		if (clip !== undefined) this.restore();
+		return this;
+	}
+
 	#open(): void {
 		if (this.#ended) {
 			throw new VellumError(
@@ -1183,6 +1345,15 @@ export class PdfDocument extends Readable {
 		this.push(null);
 		return this;
 	}
+}
+
+function isOpenedImage(source: ImageSource): source is PdfImage {
+	return (
+		typeof source === "object" &&
+		!(source instanceof Uint8Array) &&
+		!(source instanceof ArrayBuffer) &&
+		!(source instanceof URL)
+	);
 }
 
 /** Degrees brought into [0, 360), as pdfkit does. */

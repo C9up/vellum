@@ -32,8 +32,10 @@ subsetter = "0.2"
 # carries its own copy for encryption, which we do not touch.
 sha2 = { version = "0.10", features = ["oid"] }
 # JPEG encoding for page previews, and PNG decoding for stamping: a PNG has
-# to become raw samples to enter a PDF, while a JPEG goes in untouched.
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+# to become raw samples to enter a PDF, while a JPEG goes in untouched. GIF
+# and WebP decode an authored document's images once, under limits, before
+# krilla does: the same decoders krilla carries, so nothing more is built.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 # The signature value itself: a CMS SignedData, its certificates, the RSA
 # signature and the ASN.1 they are all written in. These sit on the older
 # RustCrypto generation, which costs a second copy of `digest` next to the one

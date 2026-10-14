@@ -37,6 +37,15 @@ export interface PageSetupInput {
 	userUnit?: number;
 }
 
+export interface ImageInfo {
+	handle: number;
+	/** Pixels, as stored. */
+	width: number;
+	height: number;
+	/** EXIF orientation, 1 to 8. */
+	orientation: number;
+}
+
 export interface TextBounds {
 	width: number;
 	height: number;
@@ -454,6 +463,17 @@ export declare class NativeDocument {
 		name?: string | undefined | null,
 	): void;
 	addNamedDestination(name: string, x: number, y: number): void;
+	loadImage(bytes: Buffer): ImageInfo;
+	/** Draw a loaded image into a box, turned by an EXIF orientation. */
+	drawImage(
+		handle: number,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		orientation: number,
+		opacity?: number | undefined | null,
+	): void;
 	/** Write the document. Nothing can be added afterwards. */
 	end(): Buffer;
 }

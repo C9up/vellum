@@ -1868,7 +1868,7 @@ mod tests {
             .iter()
             .filter_map(|op| match op {
                 Op::Glyphs { ctm, .. } => Some(*ctm),
-                Op::Path { .. } => None,
+                Op::Path { .. } | Op::Image { .. } => None,
             })
             .collect()
     }
@@ -1938,7 +1938,7 @@ mod tests {
             .iter()
             .filter_map(|op| match op {
                 Op::Path { segments, .. } => Some(&segments[..]),
-                Op::Glyphs { .. } => None,
+                Op::Glyphs { .. } | Op::Image { .. } => None,
             })
             .collect();
         assert_eq!(lines.len(), 2, "an underline and a strike-through");

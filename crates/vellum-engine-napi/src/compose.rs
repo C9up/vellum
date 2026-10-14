@@ -55,6 +55,16 @@ pub struct PageSetupInput {
 }
 
 #[napi(object)]
+pub struct ImageInfo {
+    pub handle: u32,
+    /// Pixels, as stored.
+    pub width: u32,
+    pub height: u32,
+    /// EXIF orientation, 1 to 8.
+    pub orientation: u32,
+}
+
+#[napi(object)]
 pub struct TextBounds {
     pub width: f64,
     pub height: f64,
@@ -738,6 +748,48 @@ impl NativeDocument {
     pub fn add_named_destination(&mut self, name: String, x: f64, y: f64) -> Result<()> {
         let (x, y) = (finite(x, "x")?, finite(y, "y")?);
         self.with(|document| document.add_named_destination(&name, x, y).map_err(failure))
+    }
+
+    #[napi]
+    pub fn load_image(&mut self, bytes: Buffer) -> Result<ImageInfo> {
+        let bytes = bytes.to_vec();
+        self.with(|document| {
+            let handle = document.load_image(bytes).map_err(failure)?;
+            let image = document.image(handle).map_err(failure)?;
+            Ok(ImageInfo {
+                handle: handle as u32,
+                width: image.width,
+                height: image.height,
+                orientation: u32::from(image.orientation),
+            })
+        })
+    }
+
+    /// Draw a loaded image into a box, turned by an EXIF orientation.
+    #[napi]
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_image(
+        &mut self,
+        handle: u32,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        orientation: u32,
+        opacity: Option<f64>,
+    ) -> Result<()> {
+        let (x, y) = (finite(x, "x")?, finite(y, "y")?);
+        let (width, height) = (finite(width, "width")?, finite(height, "height")?);
+        let opacity = optional(opacity, "opacity")?.unwrap_or(1.0);
+        let orientation = u8::try_from(orientation)
+            .ok()
+            .filter(|value| (1..=8).contains(value))
+            .ok_or_else(|| options_error("an orientation is 1 to 8"))?;
+        self.with(|document| {
+            document
+                .draw_image(handle as usize, x, y, width, height, orientation, opacity)
+                .map_err(failure)
+        })
     }
 
     /// Write the document. Nothing can be added afterwards.
