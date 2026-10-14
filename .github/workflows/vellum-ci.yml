@@ -213,6 +213,78 @@ jobs:
       # something runs them.
       - run: pnpm exec vitest run --coverage
 
+  # PDF/A and PDF/UA: krilla checks a document against its standard as it
+  # writes it; this job checks what came out, with veraPDF, the reference
+  # validator. The documents are the conformance tests' own, one per profile.
+  # veraPDF is pinned to the version these documents were first validated
+  # with, by the SHA-256 of its installer.
+  conformance:
+    name: PDF/A and PDF/UA (veraPDF)
+    runs-on: ubuntu-latest
+    env:
+      VERAPDF_URL: https://software.verapdf.org/releases/1.30/verapdf-greenfield-1.30.3-installer.zip
+      VERAPDF_SHA256: b512bf24945503a33fc10738ecffc1f2dccaaf8593a448e94ee9ac86a9559a59
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with: { version: 9 }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build:napi
+      - name: Write one document per profile
+        run: VELLUM_CONFORMANCE_DIR="$RUNNER_TEMP/conformance" pnpm exec vitest run tests/unit/conformance.test.ts
+      - name: Install veraPDF
+        shell: bash
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/verapdf.zip" "$VERAPDF_URL"
+          echo "$VERAPDF_SHA256  $RUNNER_TEMP/verapdf.zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/verapdf.zip" -d "$RUNNER_TEMP/verapdf-installer"
+          cat > "$RUNNER_TEMP/verapdf-auto.xml" <<XML
+          <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+          <AutomatedInstallation langpack="eng">
+          <com.izforge.izpack.panels.htmlhello.HTMLHelloPanel id="welcome"/>
+          <com.izforge.izpack.panels.target.TargetPanel id="install_dir">
+          <installpath>$RUNNER_TEMP/verapdf</installpath>
+          </com.izforge.izpack.panels.target.TargetPanel>
+          <com.izforge.izpack.panels.packs.PacksPanel id="sdk_pack_select">
+          <pack index="0" name="veraPDF GUI" selected="true"/>
+          <pack index="1" name="veraPDF Batch files" selected="true"/>
+          <pack index="2" name="veraPDF Validation model" selected="false"/>
+          <pack index="3" name="veraPDF Documentation" selected="false"/>
+          <pack index="4" name="veraPDF Sample Plugins" selected="false"/>
+          </com.izforge.izpack.panels.packs.PacksPanel>
+          <com.izforge.izpack.panels.install.InstallPanel id="install"/>
+          <com.izforge.izpack.panels.finish.FinishPanel id="finish"/>
+          </AutomatedInstallation>
+          XML
+          java -jar "$RUNNER_TEMP"/verapdf-installer/verapdf-greenfield-*/verapdf-izpack-installer-*.jar "$RUNNER_TEMP/verapdf-auto.xml"
+      - name: Validate
+        shell: bash
+        run: |
+          status=0
+          for file in "$RUNNER_TEMP"/conformance/*.pdf; do
+            name=$(basename "$file" .pdf)
+            case "$name" in
+              PDF_UA) flavour=ua1 ;;
+              *) flavour=${name#PDF_A-} ;;
+            esac
+            result=$("$RUNNER_TEMP/verapdf/verapdf" --flavour "$flavour" --format text "$file")
+            echo "$result"
+            case "$result" in
+              PASS*) ;;
+              *) status=1 ;;
+            esac
+          done
+          ls "$RUNNER_TEMP"/conformance/*.pdf | wc -l | grep -qx 5 || { echo "::error::expected 5 documents"; status=1; }
+          exit $status
+
   # Publish job — gated on workflow_dispatch (manual maintainer trigger).
   # Requires NPM_TOKEN secret + a v<MAJOR>.<MINOR>.<PATCH> tag at HEAD matching
   # package.json. Drift gate refuses to overwrite a published version (or roll
@@ -224,7 +296,7 @@ jobs:
       # Creating the release needs write; the workflow default is read.
       contents: write
     timeout-minutes: 15
-    needs: [quality, build-and-test, cargo-tests, ts-tests]
+    needs: [quality, build-and-test, cargo-tests, ts-tests, conformance]
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6

@@ -12,10 +12,11 @@ use vellum_engine::compose::graphics::{
     Colour, FillRule, Gradient, GradientShape, GradientStop, LineCap, LineJoin, Matrix, Paint,
     Segment,
 };
-use vellum_engine::compose::links::LinkTarget;
+use vellum_engine::compose::links::{LinkTarget, OutlineItem};
+use vellum_engine::compose::tagging::{ArtifactKind, Child, Element, Mark};
 use vellum_engine::compose::text::{Align, Baseline, ListItem, ListMarker, Step, TextOptions};
 use vellum_engine::compose::{
-    ComposeError, Composer, DocumentSettings, Info, Instant, PageSetup, Sides,
+    ComposeError, Composer, DocumentSettings, Info, Instant, PageSetup, Sides, Subset,
 };
 
 #[napi(object)]
@@ -35,6 +36,9 @@ pub struct DocumentInfoInput {
 
 #[napi(object)]
 pub struct DocumentSettingsInput {
+    pub tagged: Option<bool>,
+    /// `PDF/A-1b`, `PDF/A-2a`, `PDF/UA`…
+    pub subset: Option<String>,
     pub lang: Option<String>,
     pub display_title: Option<bool>,
     pub page_layout: Option<String>,
@@ -63,6 +67,57 @@ pub struct ListItemInput {
     pub label: Option<String>,
     pub indent: f64,
     pub item_indent: f64,
+}
+
+/// What a marked sequence is: `artifact` (with `type`), `span`, or
+/// `structure`.
+#[napi(object)]
+pub struct MarkInput {
+    pub kind: String,
+    /// An artifact's type: `Pagination`, `Layout`, `Page`, `Header`…
+    #[napi(js_name = "type")]
+    pub artifact: Option<String>,
+    pub lang: Option<String>,
+    pub alt: Option<String>,
+    pub expanded: Option<String>,
+    pub actual: Option<String>,
+}
+
+/// An outline entry; `parent` is the index of its parent entry, absent at
+/// the top.
+#[napi(object)]
+pub struct OutlineInput {
+    pub title: String,
+    pub page: u32,
+    pub x: f64,
+    pub y: f64,
+    pub open: bool,
+    pub parent: Option<u32>,
+}
+
+/// One structure element; `parent` is the index of its parent among the
+/// elements, or absent for a root.
+#[napi(object)]
+pub struct StructureNodeInput {
+    pub kind: String,
+    pub title: Option<String>,
+    pub lang: Option<String>,
+    pub alt: Option<String>,
+    pub expanded: Option<String>,
+    pub actual: Option<String>,
+    pub scope: Option<String>,
+    pub row_span: Option<u32>,
+    pub col_span: Option<u32>,
+}
+
+/// A child of element `parent`, in order: an element, marked content, or a
+/// link.
+#[napi(object)]
+pub struct StructureChildInput {
+    pub parent: u32,
+    pub node: Option<u32>,
+    pub content: Option<u32>,
+    pub annotation: Option<u32>,
 }
 
 #[napi(object)]
@@ -125,6 +180,8 @@ pub struct TextOptionsInput {
     pub link_page: Option<u32>,
     pub go_to: Option<String>,
     pub destination: Option<String>,
+    /// Mark each paragraph as structure content.
+    pub structure: Option<bool>,
 }
 
 fn failure(error: ComposeError) -> Error {
@@ -250,6 +307,7 @@ impl TryFrom<TextOptionsInput> for TextOptions {
             },
             go_to: input.go_to,
             destination: input.destination,
+            structure: input.structure.unwrap_or(false),
         })
     }
 }
@@ -302,6 +360,13 @@ impl NativeDocument {
             pdf_version: settings.pdf_version,
             compress: settings.compress.unwrap_or(defaults.compress),
             buffer_pages: settings.buffer_pages.unwrap_or(false),
+            tagged: settings.tagged.unwrap_or(false),
+            subset: settings
+                .subset
+                .as_deref()
+                .map(Subset::parse)
+                .transpose()
+                .map_err(failure)?,
         })
         .map_err(failure)?;
         Ok(Self {
@@ -777,7 +842,7 @@ impl NativeDocument {
         url: Option<String>,
         page: Option<u32>,
         name: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<u32> {
         let target = match (url, page, name) {
             (Some(url), None, None) => LinkTarget::Uri(url),
             (None, Some(page), None) => LinkTarget::Page(page as usize),
@@ -786,7 +851,12 @@ impl NativeDocument {
         };
         let (x, y) = (finite(x, "x")?, finite(y, "y")?);
         let (width, height) = (finite(width, "width")?, finite(height, "height")?);
-        self.with(|document| document.link(x, y, width, height, target).map_err(failure))
+        self.with(|document| {
+            document
+                .link(x, y, width, height, target)
+                .map(|id| id as u32)
+                .map_err(failure)
+        })
     }
 
     #[napi]
@@ -835,6 +905,113 @@ impl NativeDocument {
                 .draw_image(handle as usize, x, y, width, height, orientation, opacity)
                 .map_err(failure)
         })
+    }
+
+    /// Begin a marked sequence and answer its handle.
+    #[napi]
+    pub fn begin_mark(&mut self, input: MarkInput) -> Result<u32> {
+        let mark = match input.kind.as_str() {
+            "artifact" => Mark::Artifact(match input.artifact.as_deref() {
+                None => None,
+                Some("Pagination") => Some(ArtifactKind::Pagination),
+                Some("Layout") => Some(ArtifactKind::Layout),
+                Some("Page") => Some(ArtifactKind::Page),
+                Some("Header") => Some(ArtifactKind::Header),
+                Some("Footer") => Some(ArtifactKind::Footer),
+                Some("Watermark") => Some(ArtifactKind::Watermark),
+                Some("PageNumber") => Some(ArtifactKind::PageNumber),
+                Some(other) => {
+                    return Err(options_error(format!("{other:?} is not an artifact type")))
+                }
+            }),
+            "span" => Mark::Span {
+                lang: input.lang,
+                alt: input.alt,
+                expanded: input.expanded,
+                actual: input.actual,
+            },
+            "structure" => Mark::Structure,
+            other => {
+                return Err(options_error(format!(
+                    "{other:?} is not a kind of marked content"
+                )))
+            }
+        };
+        self.with(|document| {
+            document
+                .begin_mark(mark)
+                .map(|id| id as u32)
+                .map_err(failure)
+        })
+    }
+
+    #[napi]
+    pub fn continue_mark(&mut self, id: u32) -> Result<()> {
+        self.with(|document| document.continue_mark(id as usize).map_err(failure))
+    }
+
+    #[napi]
+    pub fn end_mark(&mut self) -> Result<()> {
+        self.with(|document| document.end_mark().map_err(failure))
+    }
+
+    #[napi]
+    pub fn get_open_mark(&self) -> Option<u32> {
+        self.inner.open_mark().map(|id| id as u32)
+    }
+
+    #[napi]
+    pub fn take_marked_contents(&mut self) -> Vec<u32> {
+        self.inner
+            .take_marked_contents()
+            .into_iter()
+            .map(|id| id as u32)
+            .collect()
+    }
+
+    /// The structure tree, as elements and their children in order.
+    #[napi]
+    pub fn set_structure(
+        &mut self,
+        nodes: Vec<StructureNodeInput>,
+        children: Vec<StructureChildInput>,
+    ) -> Result<()> {
+        let roots = structure(nodes, children)?;
+        self.with(|document| document.set_structure(roots).map_err(failure))
+    }
+
+    /// The outline, entries in order, each after its parent.
+    #[napi]
+    pub fn set_outline(&mut self, entries: Vec<OutlineInput>) -> Result<()> {
+        let mut items: Vec<OutlineItem> = Vec::with_capacity(entries.len());
+        let mut parents: Vec<Option<usize>> = Vec::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            let parent = entry.parent.map(|parent| parent as usize);
+            if parent.is_some_and(|parent| parent >= index) {
+                return Err(options_error("an outline entry comes after its parent"));
+            }
+            items.push(OutlineItem {
+                title: entry.title.clone(),
+                page: entry.page as usize,
+                x: finite(entry.x, "outline x")?,
+                y: finite(entry.y, "outline y")?,
+                open: entry.open,
+                children: Vec::new(),
+            });
+            parents.push(parent);
+        }
+        // Children last to first, so each lands in its parent before the
+        // parent itself moves into its own.
+        let mut roots = Vec::new();
+        for index in (0..items.len()).rev() {
+            let item = items[index].clone();
+            let taken = items_take(&mut items, index, item);
+            match parents[index] {
+                Some(parent) => items[parent].children.insert(0, taken),
+                None => roots.insert(0, taken),
+            }
+        }
+        self.with(|document| document.set_outline(roots).map_err(failure))
     }
 
     /// Write the document. Nothing can be added afterwards.
@@ -976,4 +1153,83 @@ fn fill_rule(rule: Option<&str>) -> Result<FillRule> {
         Some("even-odd") | Some("evenodd") => Ok(FillRule::EvenOdd),
         Some(other) => Err(options_error(format!("{other:?} is not a fill rule"))),
     }
+}
+
+/// The tree from its flat description: elements, then each element's
+/// children in order. An element listed as no one's child is a root.
+fn structure(
+    nodes: Vec<StructureNodeInput>,
+    children: Vec<StructureChildInput>,
+) -> Result<Vec<Element>> {
+    let count = nodes.len();
+    let mut lists: Vec<Vec<&StructureChildInput>> = vec![Vec::new(); count];
+    let mut parent_of: Vec<Option<usize>> = vec![None; count];
+    for child in &children {
+        let parent = child.parent as usize;
+        let list = lists
+            .get_mut(parent)
+            .ok_or_else(|| options_error("a structure child names no element"))?;
+        if let Some(node) = child.node {
+            let node = node as usize;
+            if node >= count || node == parent {
+                return Err(options_error("a structure child names no element"));
+            }
+            if parent_of[node].replace(parent).is_some() {
+                return Err(options_error(
+                    "a structure element has more than one parent",
+                ));
+            }
+        }
+        list.push(child);
+    }
+    fn build(
+        index: usize,
+        nodes: &[StructureNodeInput],
+        lists: &[Vec<&StructureChildInput>],
+        depth: usize,
+    ) -> Result<Element> {
+        if depth > vellum_engine::compose::tagging::MAX_DEPTH {
+            return Err(options_error("the structure tree is too deep, or loops"));
+        }
+        let node = &nodes[index];
+        let mut element = Element {
+            kind: node.kind.clone(),
+            title: node.title.clone(),
+            lang: node.lang.clone(),
+            alt: node.alt.clone(),
+            expanded: node.expanded.clone(),
+            actual: node.actual.clone(),
+            scope: node.scope.clone(),
+            row_span: node.row_span,
+            col_span: node.col_span,
+            children: Vec::new(),
+        };
+        for child in &lists[index] {
+            element
+                .children
+                .push(match (child.node, child.content, child.annotation) {
+                    (Some(node), None, None) => {
+                        Child::Element(build(node as usize, nodes, lists, depth + 1)?)
+                    }
+                    (None, Some(content), None) => Child::Content(content as usize),
+                    (None, None, Some(annotation)) => Child::Annotation(annotation as usize),
+                    _ => {
+                        return Err(options_error(
+                            "a structure child is one element, content or link",
+                        ))
+                    }
+                });
+        }
+        Ok(element)
+    }
+    (0..count)
+        .filter(|index| parent_of[*index].is_none())
+        .map(|index| build(index, &nodes, &lists, 0))
+        .collect()
+}
+
+/// The entry at `index` with its children gathered so far.
+fn items_take(items: &mut [OutlineItem], index: usize, mut item: OutlineItem) -> OutlineItem {
+    item.children = std::mem::take(&mut items[index].children);
+    item
 }

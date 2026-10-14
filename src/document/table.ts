@@ -9,8 +9,13 @@
  */
 
 import type { ColourValue } from "./colours.js";
-import type { FontSource, TextOptions } from "./PdfDocument.js";
+import type { FontSource, MarkOptions, TextOptions } from "./PdfDocument.js";
 import type { Side, SideDefinition, Sides, Size } from "./sizes.js";
+import type {
+	PdfStructureContent,
+	PdfStructureElement,
+	StructureOptions,
+} from "./structure.js";
 
 /** The parts of the document a table draws with. */
 export interface TableHost {
@@ -53,6 +58,10 @@ export interface TableHost {
 	/** The font in use, to put back after a cell drew in its own. */
 	fontState(): FontState;
 	useFont(state: TableFont): void;
+	struct(type: string, options?: StructureOptions): PdfStructureElement;
+	markContent(tag: string, options?: MarkOptions): unknown;
+	markStructureContent(tag: string): PdfStructureContent;
+	endMarkedContent(): unknown;
 }
 
 export interface FontState {
@@ -138,6 +147,8 @@ export interface TableOptions {
 	data?: Iterable<Iterable<TableCell>>;
 	/** The first rows, repeated at the top of each page the table runs onto. */
 	headerRows?: number;
+	/** Tag the table: a `Table` of `TR`s of `TH` and `TD` cells, added to this element. */
+	structParent?: PdfStructureElement;
 	id?: string;
 	debug?: boolean;
 }
@@ -163,6 +174,8 @@ interface ResolvedCell {
 	customFont: boolean;
 	textOptions: TextOptions;
 	debug: boolean;
+	type: "TH" | "TD";
+	scope: "Row" | "Column" | "Both" | undefined;
 }
 
 interface PlacedCell extends ResolvedCell {
@@ -289,6 +302,19 @@ function last<T>(values: ReadonlyArray<T | undefined>): T | undefined {
 	return found;
 }
 
+function scopeOf(value: string | undefined): ResolvedCell["scope"] {
+	switch (value?.toLowerCase()) {
+		case "row":
+			return "Row";
+		case "column":
+			return "Column";
+		case "both":
+			return "Both";
+		default:
+			return undefined;
+	}
+}
+
 function horizontal(value: string | undefined): ResolvedCell["align"]["x"] {
 	return value === "center" || value === "right" || value === "justify"
 		? value
@@ -376,6 +402,8 @@ export class PdfTable<Document> {
 	readonly #header: PlacedCell[] = [];
 	#headerTop = 0;
 	#headerHeight = 0;
+	/** The `Table` element, when the table is tagged. */
+	readonly #structure: PdfStructureElement | undefined;
 
 	constructor(host: TableHost, document: Document, options: TableOptions = {}) {
 		this.#host = host;
@@ -394,6 +422,10 @@ export class PdfTable<Document> {
 		const defaults = options.defaultStyle ?? {};
 		this.#columnStyle = (index) => this.#column(defaults, column(index));
 		this.#rowStyle = (index) => this.#row(defaults, row(index));
+		if (options.structParent !== undefined) {
+			this.#structure = host.struct("Table");
+			options.structParent.add(this.#structure);
+		}
 		if (options.data !== undefined) {
 			for (const cells of options.data) this.row(cells);
 			this.end();
@@ -516,6 +548,11 @@ export class PdfTable<Document> {
 				this.#options.debug ??
 				last(levels.map((level) => level.debug)) ??
 				false,
+			type:
+				last(levels.map((level) => level.type))?.toUpperCase() === "TH"
+					? "TH"
+					: "TD",
+			scope: scopeOf(last(levels.map((level) => level.scope))),
 		};
 		if (customFont) host.useFont(saved);
 		return resolved;
@@ -541,7 +578,22 @@ export class PdfTable<Document> {
 		});
 		if (rowIndex === 0) this.#ensure(row);
 		const placed = this.#measure(row, rowIndex);
-		for (const cell of placed) this.#render(cell);
+		const tr =
+			this.#structure === undefined ? undefined : this.#host.struct("TR");
+		if (tr !== undefined) this.#structure?.add(tr);
+		for (const cell of placed) {
+			const element =
+				tr === undefined
+					? undefined
+					: this.#host.struct(cell.type, {
+							scope: cell.scope,
+							rowSpan: cell.rowSpan > 1 ? cell.rowSpan : undefined,
+							colSpan: cell.colSpan > 1 ? cell.colSpan : undefined,
+						});
+			if (element !== undefined) tr?.add(element);
+			this.#render(cell, element);
+		}
+		tr?.end();
 		if (rowIndex < (this.#options.headerRows ?? 0)) {
 			if (rowIndex === 0) this.#headerTop = this.#rowY[0] ?? this.#position.y;
 			this.#header.push(...placed);
@@ -561,6 +613,7 @@ export class PdfTable<Document> {
 	/** Draw what row spans still hold back; the document answers. */
 	end(): Document {
 		while (this.#buffer.size > 0) this.row([]);
+		this.#structure?.end();
 		this.#ended = true;
 		return this.#document;
 	}
@@ -654,13 +707,18 @@ export class PdfTable<Document> {
 				rowIndex >= (this.#options.headerRows ?? 0)
 			) {
 				const shift = start - this.#headerTop;
-				for (const cell of this.#header) {
-					this.#render({
-						...cell,
-						y: cell.y + shift,
-						textY: cell.textY + shift,
-					});
+				// Drawn again, the header is pagination: an artifact when tagged.
+				const tagged = this.#structure !== undefined;
+				if (tagged) {
+					this.#host.markContent("Artifact", { type: "Pagination" });
 				}
+				for (const cell of this.#header) {
+					this.#render(
+						{ ...cell, y: cell.y + shift, textY: cell.textY + shift },
+						undefined,
+					);
+				}
+				if (tagged) this.#host.endMarkedContent();
 				start += this.#headerHeight;
 			}
 			this.#rowY[rowIndex] = start;
@@ -727,8 +785,13 @@ export class PdfTable<Document> {
 		};
 	}
 
-	#render(cell: PlacedCell): void {
+	/**
+	 * `element`: the cell's structure element when the table is tagged; its
+	 * background and borders are then decoration, marked as artifacts.
+	 */
+	#render(cell: PlacedCell, element?: PdfStructureElement): void {
 		const host = this.#host;
+		if (element !== undefined) host.markContent("Artifact", { type: "Layout" });
 		if (cell.backgroundColor !== undefined) {
 			host.save();
 			host.fillColor(cell.backgroundColor);
@@ -747,7 +810,14 @@ export class PdfTable<Document> {
 			host.stroke();
 			host.restore();
 		}
-		if (cell.text) this.#text(cell);
+		if (element !== undefined) host.endMarkedContent();
+		if (cell.text) {
+			if (element !== undefined) {
+				element.add(host.markStructureContent(cell.type));
+			}
+			this.#text(cell);
+			if (element !== undefined) host.endMarkedContent();
+		}
 	}
 
 	#text(cell: PlacedCell): void {

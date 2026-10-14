@@ -13,12 +13,13 @@ pub mod images;
 pub mod links;
 pub mod ops;
 pub mod standard;
+pub mod tagging;
 pub mod text;
 
 use std::collections::HashMap;
 use std::fmt;
 
-use krilla::configure::{ConfigurationBuilder, PdfVersion};
+use krilla::configure::{Accessibility, Archival, ConfigurationBuilder, PdfVersion};
 use krilla::metadata::{DateTime, Metadata, PageLayout};
 use krilla::page::PageSettings;
 use krilla::SerializeSettings;
@@ -217,6 +218,59 @@ pub struct DocumentSettings {
     pub compress: bool,
     /// Whether pages stay open to [`Composer::switch_to_page`] until the end.
     pub buffer_pages: bool,
+    /// Write a structure tree.
+    pub tagged: bool,
+    /// The standard the document is checked against as it is written.
+    pub subset: Option<Subset>,
+}
+
+/// pdfkit's `subset`: PDF/A parts and levels, and PDF/UA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subset {
+    PdfA1A,
+    PdfA1B,
+    PdfA2A,
+    PdfA2B,
+    PdfA2U,
+    PdfA3A,
+    PdfA3B,
+    PdfA3U,
+    PdfUa1,
+}
+
+impl Subset {
+    /// pdfkit's spelling: `PDF/A-1`, `PDF/A-1a`, `PDF/A-2b`…, `PDF/UA`. A
+    /// part without a level is level B, as in pdfkit.
+    pub fn parse(name: &str) -> Result<Self, ComposeError> {
+        Ok(match name {
+            "PDF/A-1" | "PDF/A-1b" => Self::PdfA1B,
+            "PDF/A-1a" => Self::PdfA1A,
+            "PDF/A-2" | "PDF/A-2b" => Self::PdfA2B,
+            "PDF/A-2a" => Self::PdfA2A,
+            "PDF/A-2u" => Self::PdfA2U,
+            "PDF/A-3" | "PDF/A-3b" => Self::PdfA3B,
+            "PDF/A-3a" => Self::PdfA3A,
+            "PDF/A-3u" => Self::PdfA3U,
+            "PDF/UA" | "PDF/UA-1" => Self::PdfUa1,
+            other => {
+                return Err(invalid_options(format!(
+                    "subset {other:?} is not one of PDF/A-1, 1a, 1b, 2, 2a, 2b, 2u, 3, 3a, 3b, 3u, PDF/UA"
+                )))
+            }
+        })
+    }
+
+    fn is_archival(self) -> bool {
+        self != Self::PdfUa1
+    }
+
+    /// Levels A and PDF/UA require a structure tree.
+    fn needs_tags(self) -> bool {
+        matches!(
+            self,
+            Self::PdfA1A | Self::PdfA2A | Self::PdfA3A | Self::PdfUa1
+        )
+    }
 }
 
 impl Default for DocumentSettings {
@@ -229,21 +283,45 @@ impl Default for DocumentSettings {
             pdf_version: None,
             compress: true,
             buffer_pages: false,
+            tagged: false,
+            subset: None,
         }
     }
 }
 
-fn pdf_version(version: Option<&str>) -> Result<PdfVersion, ComposeError> {
-    match version {
-        None | Some("1.7") => Ok(PdfVersion::Pdf17),
-        Some("1.4") => Ok(PdfVersion::Pdf14),
-        Some("1.5") => Ok(PdfVersion::Pdf15),
-        Some("1.6") => Ok(PdfVersion::Pdf16),
-        Some("2.0") => Ok(PdfVersion::Pdf20),
-        Some(other) => Err(invalid_options(format!(
-            "pdfVersion {other:?} is not one of 1.4, 1.5, 1.6, 1.7, 2.0"
-        ))),
-    }
+/// `None` lets the standard a document is written to choose: PDF/A-1 is
+/// PDF 1.4, PDF/A-2 and 3 are 1.7.
+fn pdf_version(version: Option<&str>) -> Result<Option<PdfVersion>, ComposeError> {
+    let Some(version) = version else {
+        return Ok(None);
+    };
+    let version = match version {
+        "1.4" => PdfVersion::Pdf14,
+        "1.5" => PdfVersion::Pdf15,
+        "1.6" => PdfVersion::Pdf16,
+        "1.7" => PdfVersion::Pdf17,
+        "2.0" => PdfVersion::Pdf20,
+        other => {
+            return Err(invalid_options(format!(
+                "pdfVersion {other:?} is not one of 1.4, 1.5, 1.6, 1.7, 2.0"
+            )))
+        }
+    };
+    Ok(Some(version))
+}
+
+fn archival(subset: Subset) -> Option<Archival> {
+    Some(match subset {
+        Subset::PdfA1A => Archival::A1_A,
+        Subset::PdfA1B => Archival::A1_B,
+        Subset::PdfA2A => Archival::A2_A,
+        Subset::PdfA2B => Archival::A2_B,
+        Subset::PdfA2U => Archival::A2_U,
+        Subset::PdfA3A => Archival::A3_A,
+        Subset::PdfA3B => Archival::A3_B,
+        Subset::PdfA3U => Archival::A3_U,
+        Subset::PdfUa1 => return None,
+    })
 }
 
 fn page_layout(name: &str) -> Result<PageLayout, ComposeError> {
@@ -264,7 +342,7 @@ fn page_layout(name: &str) -> Result<PageLayout, ComposeError> {
 /// A document being written.
 pub struct Composer {
     settings: DocumentSettings,
-    version: PdfVersion,
+    version: Option<PdfVersion>,
     layout: Option<PageLayout>,
     pages: Vec<Page>,
     current: Option<usize>,
@@ -281,6 +359,13 @@ pub struct Composer {
     pub(crate) paints: PaintBook,
     pub(crate) destinations: Vec<links::NamedPoint>,
     pub(crate) images: Vec<images::LoadedImage>,
+    pub(crate) link_count: usize,
+    pub(crate) marks: Vec<tagging::Mark>,
+    pub(crate) open_mark: Option<usize>,
+    pub(crate) structure: Vec<tagging::Element>,
+    /// What `text()` and `list()` marked, for the caller's structure tree.
+    pub(crate) marked_contents: Vec<usize>,
+    pub(crate) outline: Vec<links::OutlineItem>,
     /// The document's `lineGap(n)`.
     pub line_gap: f32,
     /// Word widths in thousandths of an em, by font.
@@ -317,6 +402,12 @@ impl Composer {
             paints: PaintBook::default(),
             destinations: Vec::new(),
             images: Vec::new(),
+            link_count: 0,
+            marks: Vec::new(),
+            open_mark: None,
+            structure: Vec::new(),
+            marked_contents: Vec::new(),
+            outline: Vec::new(),
             line_gap: 0.0,
             width_cache: HashMap::new(),
             wrapper: None,
@@ -341,6 +432,11 @@ impl Composer {
         setup.check()?;
         if !self.settings.buffer_pages {
             self.flushed = self.pages.len();
+        }
+        // A marked sequence ends with its page; the caller carries it on
+        // with `continue_mark` on the next, as pdfkit does.
+        if self.open_mark.is_some() && self.current.is_some() {
+            self.end_mark()?;
         }
         self.pages.push(Page {
             setup,
@@ -498,27 +594,52 @@ impl Composer {
                 "a document needs at least one page",
             ));
         }
+        if self.open_mark.is_some() {
+            self.end_mark()?;
+        }
+        self.check_subset()?;
         self.ended = true;
 
-        let configuration = ConfigurationBuilder::new()
-            .with_version(self.version)
-            .finish()
-            .map_err(|error| ComposeError::new("WRITE_FAILED", format!("{error:?}")))?;
+        let mut builder = ConfigurationBuilder::new();
+        if let Some(version) = self.version {
+            builder = builder.with_version(version);
+        }
+        let subset = self.settings.subset;
+        if let Some(archival) = subset.and_then(archival) {
+            builder = builder.with_archival_validator(archival);
+        }
+        if subset == Some(Subset::PdfUa1) {
+            builder = builder.with_accessibility_validator(Accessibility::UA1);
+        }
+        let configuration = builder.finish().map_err(|error| {
+            invalid_options(format!(
+                "pdfVersion cannot be written as {}: {error:?}",
+                self.settings
+                    .subset
+                    .map_or("asked", |_| "the subset requires")
+            ))
+        })?;
+        let tagged = self.settings.tagged || subset.is_some_and(Subset::needs_tags);
         let settings = SerializeSettings {
             compress_content_streams: self.settings.compress,
             configuration,
+            enable_tagging: tagged,
             ..SerializeSettings::default()
         };
         let annotations = (0..self.pages.len())
             .map(|index| self.annotations(index))
             .collect::<Result<Vec<_>, _>>()?;
+        let mut identifiers = tagging::Identifiers {
+            marks: vec![Vec::new(); self.marks.len()],
+            links: vec![None; self.link_count],
+        };
         let mut document = krilla::Document::new_with(settings);
         for (page, annotations) in self.pages.iter().zip(annotations) {
             let page_settings = PageSettings::from_wh(page.setup.width, page.setup.height)
                 .ok_or_else(|| invalid_options("page size out of range"))?;
             let mut writer = document.start_page_with(page_settings);
             let mut surface = writer.surface();
-            ops::replay(
+            let marked = ops::replay(
                 &mut surface,
                 &page.ops,
                 &ops::Resources {
@@ -526,12 +647,30 @@ impl Composer {
                     images: &self.images,
                     paints: &self.paints,
                 },
+                &self.marks,
             );
             surface.finish();
-            for annotation in annotations {
-                writer.add_annotation(annotation);
+            for (id, identifier) in marked {
+                if let Some(sequences) = identifiers.marks.get_mut(id) {
+                    sequences.push(identifier);
+                }
+            }
+            for (id, annotation) in annotations {
+                if tagged {
+                    let identifier = writer.add_tagged_annotation(annotation);
+                    if let Some(slot) = identifiers.links.get_mut(id) {
+                        *slot = Some(identifier);
+                    }
+                } else {
+                    writer.add_annotation(annotation);
+                }
             }
             writer.finish();
+        }
+        if tagged {
+            let tree =
+                tagging::tag_tree(&self.structure, &identifiers, self.settings.lang.clone())?;
+            document.set_tag_tree(tree);
         }
         for destination in self.named_destinations() {
             document
@@ -540,11 +679,58 @@ impl Composer {
                     ComposeError::new("WRITE_FAILED", "a destination name is used twice")
                 })?;
         }
+        if let Some(outline) = self.krilla_outline()? {
+            document.set_outline(outline);
+        }
         document.set_metadata(self.metadata());
-        let bytes = document
-            .finish()
-            .map_err(|error| ComposeError::new("WRITE_FAILED", format!("{error:?}")))?;
+        let bytes = document.finish().map_err(|error| match error {
+            krilla::error::KrillaError::Validation(errors) => ComposeError::new(
+                "VALIDATION",
+                format!(
+                    "the document does not meet its subset: {}",
+                    errors
+                        .iter()
+                        .map(|(error, _)| format!("{error:?}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ),
+            other => ComposeError::new("WRITE_FAILED", other.to_string()),
+        })?;
         self.finishing_pass(bytes)
+    }
+
+    /// What PDF/A forbids that krilla does not check: the information this
+    /// pass would add to the Info dictionary has no XMP counterpart, and the
+    /// two must agree.
+    fn check_subset(&self) -> Result<(), ComposeError> {
+        let Some(subset) = self.settings.subset else {
+            return Ok(());
+        };
+        if !subset.is_archival() {
+            return Ok(());
+        }
+        let info = &self.settings.info;
+        if !info.custom.is_empty() {
+            return Err(ComposeError::new(
+                "VALIDATION",
+                "PDF/A keeps the information dictionary and the XMP metadata in step; information keys of your own cannot be written",
+            ));
+        }
+        if info.mod_date.is_some() {
+            return Err(ComposeError::new(
+                "VALIDATION",
+                "PDF/A keeps the information dictionary and the XMP metadata in step; a modification date of its own cannot be written",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether images may be smoothed when scaled: PDF/A forbids it.
+    pub(crate) fn interpolate_images(&self) -> bool {
+        self.settings
+            .subset
+            .is_none_or(|subset| !subset.is_archival())
     }
 
     fn metadata(&self) -> Metadata {
@@ -589,8 +775,10 @@ impl Composer {
             .map(|(index, page)| (index, page.setup.user_unit))
             .collect();
         let mod_date = info.mod_date.and_then(Instant::pdf_string);
+        let outlined = !self.outline.is_empty();
         if units.is_empty()
             && !self.settings.display_title
+            && !outlined
             && mod_date.is_none()
             && info.custom.is_empty()
         {
@@ -616,6 +804,13 @@ impl Composer {
             let mut preferences = Dictionary::new();
             preferences.set("DisplayDocTitle", Object::Boolean(true));
             catalog.set("ViewerPreferences", Object::Dictionary(preferences));
+        }
+        // As pdfkit does: a document with bookmarks opens showing them.
+        if outlined {
+            let catalog = document.catalog_mut().map_err(failed)?;
+            if catalog.get(b"PageMode").is_err() {
+                catalog.set("PageMode", Object::Name(b"UseOutlines".to_vec()));
+            }
         }
         if mod_date.is_some() || !info.custom.is_empty() {
             let info_id = match document.trailer.get(b"Info") {

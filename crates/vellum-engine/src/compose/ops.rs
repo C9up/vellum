@@ -73,6 +73,9 @@ pub enum Op {
         opacity: f32,
         clips: Arc<Vec<Clip>>,
     },
+    /// The start of a marked sequence, by its handle (see `tagging`).
+    BeginMark(usize),
+    EndMark,
     /// A path in user space, filled, stroked or both.
     Path {
         segments: Arc<[Segment]>,
@@ -84,9 +87,14 @@ pub enum Op {
 }
 
 impl Op {
-    fn clips(&self) -> &Arc<Vec<Clip>> {
+    /// The clips a drawing operation is under; `None` for a mark, which
+    /// stands outside every clip so marked content and clips never overlap.
+    fn clips(&self) -> Option<&Arc<Vec<Clip>>> {
         match self {
-            Op::Glyphs { clips, .. } | Op::Path { clips, .. } | Op::Image { clips, .. } => clips,
+            Op::Glyphs { clips, .. } | Op::Path { clips, .. } | Op::Image { clips, .. } => {
+                Some(clips)
+            }
+            Op::BeginMark(_) | Op::EndMark => None,
         }
     }
 }
@@ -118,13 +126,44 @@ pub struct Resources<'a> {
     pub paints: &'a PaintBook,
 }
 
-pub fn replay(surface: &mut Surface, ops: &[Op], resources: &Resources<'_>) {
+/// What a page's marks answered, by mark handle, in the order drawn.
+pub type Marked = Vec<(usize, krilla::tagging::Identifier)>;
+
+pub fn replay(
+    surface: &mut Surface,
+    ops: &[Op],
+    resources: &Resources<'_>,
+    marks: &[super::tagging::Mark],
+) -> Marked {
+    let mut marked = Vec::new();
+    let mut open = false;
     let mut index = 0;
     while index < ops.len() {
+        let Some(clips) = ops[index].clips().cloned() else {
+            match ops[index] {
+                Op::BeginMark(id) if !open => {
+                    if let Some(mark) = marks.get(id) {
+                        let identifier = surface.start_tagged(super::tagging::content_tag(mark));
+                        marked.push((id, identifier));
+                        open = true;
+                    }
+                }
+                Op::EndMark if open => {
+                    surface.end_tagged();
+                    open = false;
+                }
+                _ => {}
+            }
+            index += 1;
+            continue;
+        };
         // Operations under the same clips share one push of them.
-        let clips = ops[index].clips().clone();
         let mut end = index + 1;
-        while end < ops.len() && Arc::ptr_eq(ops[end].clips(), &clips) {
+        while end < ops.len()
+            && ops[end]
+                .clips()
+                .is_some_and(|next| Arc::ptr_eq(next, &clips))
+        {
             end += 1;
         }
         let mut pushed = 0;
@@ -153,11 +192,17 @@ pub fn replay(surface: &mut Surface, ops: &[Op], resources: &Resources<'_>) {
         }
         index = end;
     }
+    // krilla panics on a page left with a sequence open.
+    if open {
+        surface.end_tagged();
+    }
+    marked
 }
 
 fn draw(surface: &mut Surface, op: &Op, resources: &Resources<'_>) {
     let (fonts, paints) = (resources.fonts, resources.paints);
     match op {
+        Op::BeginMark(_) | Op::EndMark => {}
         Op::Image {
             image,
             size,

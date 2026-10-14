@@ -100,6 +100,9 @@ pub struct TextOptions {
     pub go_to: Option<String>,
     /// Name the place each line starts as a destination.
     pub destination: Option<String>,
+    /// Mark each paragraph (each list item's label and body) as structure
+    /// content, for the caller to hang in its structure tree.
+    pub structure: bool,
 }
 
 /// What marks an item of a list.
@@ -840,6 +843,9 @@ impl Composer {
     ) -> Result<Flow, ComposeError> {
         if last.is_none_or(|last| last.required) {
             self.first_line(run);
+            if run.list.is_none() {
+                self.mark_paragraph(run)?;
+            }
             self.mark_list_item(run)?;
             run.wrapper.space_left = run.wrapper.line_width;
         }
@@ -937,6 +943,20 @@ impl Composer {
         Ok(())
     }
 
+    /// pdfkit's structure for a paragraph: its content marked from its first
+    /// line, the paragraph before it closed.
+    fn mark_paragraph(&mut self, run: &mut TextRun) -> Result<(), ComposeError> {
+        if !run.options.structure || run.sink != Sink::Draw {
+            return Ok(());
+        }
+        if self.open_mark.is_some() {
+            self.end_mark()?;
+        }
+        let id = self.begin_mark(super::tagging::Mark::Structure)?;
+        self.marked_contents.push(id);
+        Ok(())
+    }
+
     /// pdfkit's list `sectionStart`: the item's text starts past its marker
     /// and its level's indent.
     fn section_start(&mut self, run: &mut TextRun) {
@@ -986,6 +1006,14 @@ impl Composer {
         if run.sink != Sink::Draw {
             return Ok(());
         }
+        let structure = run.options.structure;
+        if structure {
+            if self.open_mark.is_some() {
+                self.end_mark()?;
+            }
+            let label = self.begin_mark(super::tagging::Mark::Structure)?;
+            self.marked_contents.push(label);
+        }
         match marker {
             ListMarker::Bullet { radius, mid_line } => {
                 let (cx, cy) = (self.x - indent + radius, self.y + mid_line);
@@ -1011,7 +1039,18 @@ impl Composer {
                 self.fragment(&label, self.x - indent, self.y, run, &info)?;
             }
         }
+        if structure {
+            self.end_mark()?;
+            let body = self.begin_mark(super::tagging::Mark::Structure)?;
+            self.marked_contents.push(body);
+        }
         Ok(())
+    }
+
+    /// The structure content the last texts marked, in order; handed over
+    /// once.
+    pub fn take_marked_contents(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.marked_contents)
     }
 
     /// Start one item of a list at the cursor; [`Step::NeedPage`] as for
@@ -1354,10 +1393,24 @@ impl Composer {
         self.state.ctm = outer;
         let placed = (|| {
             if let Some(target) = &options.link {
-                self.link(x, y, width, line_height, target.clone())?;
+                self.link_with_alt(
+                    x,
+                    y,
+                    width,
+                    line_height,
+                    target.clone(),
+                    Some(text.trim().to_string()),
+                )?;
             }
             if let Some(name) = &options.go_to {
-                self.link(x, y, width, line_height, LinkTarget::Named(name.clone()))?;
+                self.link_with_alt(
+                    x,
+                    y,
+                    width,
+                    line_height,
+                    LinkTarget::Named(name.clone()),
+                    Some(text.trim().to_string()),
+                )?;
             }
             if let Some(name) = &options.destination {
                 self.add_named_destination(name, x, y)?;
@@ -2014,7 +2067,7 @@ mod tests {
             .iter()
             .filter_map(|op| match op {
                 Op::Glyphs { ctm, .. } => Some(*ctm),
-                Op::Path { .. } | Op::Image { .. } => None,
+                Op::Path { .. } | Op::Image { .. } | Op::BeginMark(_) | Op::EndMark => None,
             })
             .collect()
     }
@@ -2084,7 +2137,7 @@ mod tests {
             .iter()
             .filter_map(|op| match op {
                 Op::Path { segments, .. } => Some(&segments[..]),
-                Op::Glyphs { .. } | Op::Image { .. } => None,
+                Op::Glyphs { .. } | Op::Image { .. } | Op::BeginMark(_) | Op::EndMark => None,
             })
             .collect();
         assert_eq!(lines.len(), 2, "an underline and a strike-through");
@@ -2282,7 +2335,7 @@ mod tests {
                     Some(Segment::Move(x, y)) => Some((*x, *y)),
                     _ => None,
                 },
-                Op::Glyphs { .. } | Op::Image { .. } => None,
+                Op::Glyphs { .. } | Op::Image { .. } | Op::BeginMark(_) | Op::EndMark => None,
             })
             .collect()
     }

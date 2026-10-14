@@ -157,7 +157,9 @@ pub fn orientation_matrix(orientation: u8, width: f32, height: f32) -> Matrix {
 }
 
 impl LoadedImage {
-    pub fn load(bytes: Vec<u8>) -> Result<Self, ComposeError> {
+    /// `interpolate`: whether a reader may smooth the image when it scales
+    /// it — PDF/A forbids it.
+    pub fn load(bytes: Vec<u8>, interpolate: bool) -> Result<Self, ComposeError> {
         if bytes.len() > MAX_IMAGE_BYTES {
             return Err(invalid(format!(
                 "an image of {} bytes is over the limit of {MAX_IMAGE_BYTES}",
@@ -178,10 +180,10 @@ impl LoadedImage {
         }
         let data = Arc::new(bytes);
         let krilla = match kind {
-            ImageKind::Png => Image::from_png(data.clone().into(), true),
-            ImageKind::Jpeg => Image::from_jpeg(data.clone().into(), true),
-            ImageKind::Gif => Image::from_gif(data.clone().into(), true),
-            ImageKind::WebP => Image::from_webp(data.clone().into(), true),
+            ImageKind::Png => Image::from_png(data.clone().into(), interpolate),
+            ImageKind::Jpeg => Image::from_jpeg(data.clone().into(), interpolate),
+            ImageKind::Gif => Image::from_gif(data.clone().into(), interpolate),
+            ImageKind::WebP => Image::from_webp(data.clone().into(), interpolate),
         }
         .map_err(|error| invalid(format!("the image cannot be read: {error}")))?;
         let (width, height) = krilla.size();
@@ -220,7 +222,7 @@ impl Composer {
                 "a document takes at most {MAX_IMAGES} images"
             )));
         }
-        let image = LoadedImage::load(bytes)?;
+        let image = LoadedImage::load(bytes, self.interpolate_images())?;
         self.images.push(image);
         Ok(self.images.len() - 1)
     }
@@ -291,13 +293,13 @@ mod tests {
 
     #[test]
     fn reads_the_formats_it_names() {
-        let image = LoadedImage::load(png(3, 2)).unwrap();
+        let image = LoadedImage::load(png(3, 2), true).unwrap();
         assert_eq!((image.width, image.height, image.orientation), (3, 2, 1));
         assert!(
-            LoadedImage::load(b"GIF89a....".to_vec()).is_err(),
+            LoadedImage::load(b"GIF89a....".to_vec(), true).is_err(),
             "a broken GIF"
         );
-        assert!(LoadedImage::load(b"BM not supported".to_vec()).is_err());
+        assert!(LoadedImage::load(b"BM not supported".to_vec(), true).is_err());
     }
 
     #[test]
@@ -305,7 +307,7 @@ mod tests {
         let mut bytes = png(64, 64);
         bytes.truncate(bytes.len() - 30);
         assert_eq!(
-            LoadedImage::load(bytes).err().map(|e| e.code),
+            LoadedImage::load(bytes, true).err().map(|e| e.code),
             Some("INVALID_IMAGE")
         );
     }
@@ -335,7 +337,9 @@ mod tests {
         // The chunk's CRC covers its type and data, bytes 12 to 29.
         let crc = crc32(&bytes[12..29]);
         bytes[29..33].copy_from_slice(&crc.to_be_bytes());
-        let error = LoadedImage::load(bytes).err().map(|error| error.message);
+        let error = LoadedImage::load(bytes, true)
+            .err()
+            .map(|error| error.message);
         assert!(error.is_some_and(|message| message.contains("over the limit")));
     }
 

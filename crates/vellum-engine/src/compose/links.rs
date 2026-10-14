@@ -8,6 +8,7 @@ use krilla::action::{Action, LinkAction};
 use krilla::annotation::{Annotation, LinkAnnotation, Target};
 use krilla::destination::{Destination, NamedDestination, XyzDestination};
 use krilla::geom::{Point, Rect};
+use krilla::outline::{Outline, OutlineNode};
 
 use super::graphics::Matrix;
 use super::{ComposeError, Composer};
@@ -25,6 +26,10 @@ pub enum LinkTarget {
 /// A link on a page, its rectangle in page space.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkRecord {
+    /// The document-wide handle a structure tree names the link by.
+    pub id: usize,
+    /// What a screen reader says for the link.
+    pub alt: Option<String>,
     pub left: f32,
     pub top: f32,
     pub right: f32,
@@ -81,11 +86,60 @@ fn bounding_box(matrix: Matrix, x: f32, y: f32, width: f32, height: f32) -> (f32
     (left, top, right, bottom)
 }
 
+/// An entry of the document outline (its bookmarks).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineItem {
+    pub title: String,
+    /// From zero.
+    pub page: usize,
+    /// Where the entry opens the page, in page space.
+    pub x: f32,
+    pub y: f32,
+    /// Shown with its children unfolded.
+    pub open: bool,
+    pub children: Vec<OutlineItem>,
+}
+
+/// Entries an outline may hold, all levels together.
+pub const MAX_OUTLINE: usize = 100_000;
+
+fn outline_node(
+    item: &OutlineItem,
+    pages: usize,
+    depth: usize,
+) -> Result<OutlineNode, ComposeError> {
+    if depth > 64 {
+        return Err(ComposeError::new(
+            "INVALID_OUTLINE",
+            "an outline nests at most 64 deep",
+        ));
+    }
+    if item.page >= pages {
+        return Err(ComposeError::new(
+            "INVALID_OUTLINE",
+            format!(
+                "an outline entry goes to page {}, and the document has {pages}",
+                item.page
+            ),
+        ));
+    }
+    let mut node = OutlineNode::new(
+        item.title.clone(),
+        XyzDestination::new(item.page, Point::from_xy(item.x, item.y)),
+    )
+    .with_open(item.open);
+    for child in &item.children {
+        node.push_child(outline_node(child, pages, depth + 1)?);
+    }
+    Ok(node)
+}
+
 /// At most this many links on one page, and named destinations in all.
 pub const MAX_LINKS: usize = 100_000;
 
 impl Composer {
     /// A link over a rectangle of the current page, in user space.
+    /// A link over a rectangle; its handle names it in a structure tree.
     pub fn link(
         &mut self,
         x: f32,
@@ -93,7 +147,19 @@ impl Composer {
         width: f32,
         height: f32,
         target: LinkTarget,
-    ) -> Result<(), ComposeError> {
+    ) -> Result<usize, ComposeError> {
+        self.link_with_alt(x, y, width, height, target, None)
+    }
+
+    pub fn link_with_alt(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        target: LinkTarget,
+        alt: Option<String>,
+    ) -> Result<usize, ComposeError> {
         if let LinkTarget::Uri(uri) = &target {
             check_uri(uri)?;
         }
@@ -108,6 +174,14 @@ impl Composer {
         }
         let ctm = self.state.ctm;
         let (left, top, right, bottom) = bounding_box(ctm, x, y, width, height);
+        let id = self.link_count;
+        // A screen reader names a link by its alternate text; the URL is the
+        // least it can say.
+        let alt = alt.or_else(|| match &target {
+            LinkTarget::Uri(uri) => Some(uri.clone()),
+            LinkTarget::Page(page) => Some(format!("Page {}", page + 1)),
+            LinkTarget::Named(name) => Some(name.clone()),
+        });
         let page = self.page_mut()?;
         if page.links.len() >= MAX_LINKS {
             return Err(ComposeError::new(
@@ -116,13 +190,16 @@ impl Composer {
             ));
         }
         page.links.push(LinkRecord {
+            id,
+            alt,
             left,
             top,
             right,
             bottom,
             target,
         });
-        Ok(())
+        self.link_count += 1;
+        Ok(id)
     }
 
     /// pdfkit's `addNamedDestination(name, 'XYZ', x, y)`: a place a link can
@@ -181,7 +258,11 @@ impl Composer {
 
     /// The annotations of page `index`, checked against the whole document:
     /// krilla panics on a page index out of range.
-    pub(crate) fn annotations(&self, index: usize) -> Result<Vec<Annotation>, ComposeError> {
+    /// The links of a page as krilla annotations, each with its handle.
+    pub(crate) fn annotations(
+        &self,
+        index: usize,
+    ) -> Result<Vec<(usize, Annotation)>, ComposeError> {
         let Some(page) = self.pages.get(index) else {
             return Ok(Vec::new());
         };
@@ -221,12 +302,38 @@ impl Composer {
                         Target::Destination(Destination::Named(named))
                     }
                 };
-                Ok(Annotation::new_link(
-                    LinkAnnotation::new(rect, target),
-                    None,
+                Ok((
+                    link.id,
+                    Annotation::new_link(LinkAnnotation::new(rect, target), link.alt.clone()),
                 ))
             })
             .collect()
+    }
+
+    /// The document's outline, replacing any set before.
+    pub fn set_outline(&mut self, items: Vec<OutlineItem>) -> Result<(), ComposeError> {
+        fn count(items: &[OutlineItem]) -> usize {
+            items.iter().map(|item| 1 + count(&item.children)).sum()
+        }
+        if count(&items) > MAX_OUTLINE {
+            return Err(ComposeError::new(
+                "INVALID_OUTLINE",
+                format!("an outline holds at most {MAX_OUTLINE} entries"),
+            ));
+        }
+        self.outline = items;
+        Ok(())
+    }
+
+    pub(crate) fn krilla_outline(&self) -> Result<Option<Outline>, ComposeError> {
+        if self.outline.is_empty() {
+            return Ok(None);
+        }
+        let mut outline = Outline::new();
+        for item in &self.outline {
+            outline.push_child(outline_node(item, self.pages.len(), 0)?);
+        }
+        Ok(Some(outline))
     }
 
     pub(crate) fn named_destinations(&self) -> Vec<NamedDestination> {

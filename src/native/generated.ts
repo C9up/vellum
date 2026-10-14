@@ -19,6 +19,9 @@ export interface DocumentInfoInput {
 }
 
 export interface DocumentSettingsInput {
+	tagged?: boolean;
+	/** `PDF/A-1b`, `PDF/A-2a`, `PDF/UA`… */
+	subset?: string;
 	lang?: string;
 	displayTitle?: boolean;
 	pageLayout?: string;
@@ -46,6 +49,64 @@ export interface ListItemInput {
 	label?: string;
 	indent: number;
 	itemIndent: number;
+}
+
+/**
+ * What a marked sequence is: `artifact` (with `type`), `span`, or
+ * `structure`.
+ */
+
+export interface MarkInput {
+	kind: string;
+	/** An artifact's type: `Pagination`, `Layout`, `Page`, `Header`… */
+	type?: string;
+	lang?: string;
+	alt?: string;
+	expanded?: string;
+	actual?: string;
+}
+
+/**
+ * An outline entry; `parent` is the index of its parent entry, absent at
+ * the top.
+ */
+
+export interface OutlineInput {
+	title: string;
+	page: number;
+	x: number;
+	y: number;
+	open: boolean;
+	parent?: number;
+}
+
+/**
+ * One structure element; `parent` is the index of its parent among the
+ * elements, or absent for a root.
+ */
+
+export interface StructureNodeInput {
+	kind: string;
+	title?: string;
+	lang?: string;
+	alt?: string;
+	expanded?: string;
+	actual?: string;
+	scope?: string;
+	rowSpan?: number;
+	colSpan?: number;
+}
+
+/**
+ * A child of element `parent`, in order: an element, marked content, or a
+ * link.
+ */
+
+export interface StructureChildInput {
+	parent: number;
+	node?: number;
+	content?: number;
+	annotation?: number;
 }
 
 export interface ImageInfo {
@@ -107,6 +168,8 @@ export interface TextOptionsInput {
 	linkPage?: number;
 	goTo?: string;
 	destination?: string;
+	/** Mark each paragraph as structure content. */
+	structure?: boolean;
 }
 
 /**
@@ -478,7 +541,7 @@ export declare class NativeDocument {
 		url?: string | undefined | null,
 		page?: number | undefined | null,
 		name?: string | undefined | null,
-	): void;
+	): number;
 	addNamedDestination(name: string, x: number, y: number): void;
 	loadImage(bytes: Buffer): ImageInfo;
 	/** Draw a loaded image into a box, turned by an EXIF orientation. */
@@ -491,6 +554,19 @@ export declare class NativeDocument {
 		orientation: number,
 		opacity?: number | undefined | null,
 	): void;
+	/** Begin a marked sequence and answer its handle. */
+	beginMark(input: MarkInput): number;
+	continueMark(id: number): void;
+	endMark(): void;
+	getOpenMark(): number | null;
+	takeMarkedContents(): Array<number>;
+	/** The structure tree, as elements and their children in order. */
+	setStructure(
+		nodes: Array<StructureNodeInput>,
+		children: Array<StructureChildInput>,
+	): void;
+	/** The outline, entries in order, each after its parent. */
+	setOutline(entries: Array<OutlineInput>): void;
 	/** Write the document. Nothing can be added afterwards. */
 	end(): Buffer;
 }

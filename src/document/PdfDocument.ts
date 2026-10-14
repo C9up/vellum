@@ -41,6 +41,15 @@ import {
 	type Size,
 	sizeToPoint,
 } from "./sizes.js";
+import {
+	flattenStructure,
+	PdfAnnotationReference,
+	PdfStructureContent,
+	PdfStructureElement,
+	type StructureChild,
+	type StructureHost,
+	type StructureOptions,
+} from "./structure.js";
 import { PdfTable, type TableHost, type TableOptions } from "./table.js";
 import {
 	arc,
@@ -103,6 +112,47 @@ export interface PdfDocumentOptions
 	pageLayout?: PageLayout;
 	/** Draw JPEGs as stored, not turned by their EXIF orientation. */
 	ignoreOrientation?: boolean;
+	/** Write a structure tree (`struct()`, `addStructure()`). */
+	tagged?: boolean;
+	/**
+	 * The standard the document is checked against as it is written; what
+	 * it forbids is refused at `end()`. pdfkit declares the standard and
+	 * checks nothing.
+	 */
+	subset?: Subset;
+}
+
+export type Subset =
+	| "PDF/A-1"
+	| "PDF/A-1a"
+	| "PDF/A-1b"
+	| "PDF/A-2"
+	| "PDF/A-2a"
+	| "PDF/A-2b"
+	| "PDF/A-2u"
+	| "PDF/A-3"
+	| "PDF/A-3a"
+	| "PDF/A-3b"
+	| "PDF/A-3u"
+	| "PDF/UA";
+
+export type ArtifactType =
+	| "Pagination"
+	| "Layout"
+	| "Page"
+	| "Header"
+	| "Footer"
+	| "Watermark"
+	| "PageNumber";
+
+export interface MarkOptions {
+	/** For an `Artifact`. */
+	type?: ArtifactType;
+	/** For a `Span`. */
+	lang?: string;
+	alt?: string;
+	expanded?: string;
+	actual?: string;
 }
 
 export type TextAlign = "left" | "center" | "right" | "justify";
@@ -159,6 +209,10 @@ export interface TextOptions {
 	goTo?: string;
 	/** Name where each line starts as a destination. */
 	destination?: string;
+	/** A structure element each paragraph is added to, as a `structType` element. */
+	structParent?: PdfStructureElement;
+	/** Default `P`. */
+	structType?: string;
 }
 
 export interface ListOptions extends TextOptions {
@@ -168,6 +222,8 @@ export interface ListOptions extends TextOptions {
 	textIndent?: number;
 	/** What each nested level adds. */
 	bulletIndent?: number;
+	/** Default `["LI", "Lbl", "LBody"]`. */
+	structTypes?: readonly [string, string, string];
 }
 
 /** A list's items: nested arrays are sub-lists. */
@@ -317,6 +373,56 @@ function isFillRule(value: unknown): value is FillRule {
 	return typeof value === "string" && FILL_RULE.test(value);
 }
 
+export interface OutlineOptions {
+	/** The page the entry opens, from zero. Default: the current page. */
+	pageNumber?: number;
+	/**
+	 * Where on the page, from its top-left corner. pdfkit opens the whole
+	 * page (`fit`) by default and measures `left` from the right edge; here
+	 * the entry opens at `left`, `top`.
+	 */
+	top?: number;
+	left?: number;
+	/** Show the entry's children unfolded. */
+	expanded?: boolean;
+}
+
+/** An entry of the document outline, and the entries under it. */
+export class PdfOutline {
+	readonly title: string | undefined;
+	readonly page: number;
+	readonly left: number;
+	readonly top: number;
+	readonly expanded: boolean;
+	readonly children: PdfOutline[] = [];
+	readonly #currentPage: () => number;
+
+	constructor(
+		currentPage: () => number,
+		title?: string,
+		options: OutlineOptions = {},
+		page = 0,
+	) {
+		this.#currentPage = currentPage;
+		this.title = title;
+		this.page = page;
+		this.left = options.left ?? 0;
+		this.top = options.top ?? 0;
+		this.expanded = options.expanded ?? false;
+	}
+
+	addItem(title: string, options: OutlineOptions = {}): PdfOutline {
+		const item = new PdfOutline(
+			this.#currentPage,
+			title,
+			options,
+			options.pageNumber ?? this.#currentPage(),
+		);
+		this.children.push(item);
+		return item;
+	}
+}
+
 /** A page of the document: its size and margins, in points. */
 export class PdfPage {
 	readonly width: number;
@@ -425,6 +531,31 @@ export class PdfDocument extends Readable {
 	readonly #spots = new Map<string, number>();
 	readonly #images = new Map<string, PdfImage>();
 	readonly #imageHandles = new WeakMap<PdfImage, number>();
+	/** The document outline: its bookmarks, added with `addItem`. */
+	readonly outline: PdfOutline = new PdfOutline(() => {
+		const index = this.#native.currentPage();
+		if (index === null) {
+			throw new VellumError(
+				"NO_PAGE",
+				"there is no current page: call addPage() first",
+			);
+		}
+		return index;
+	});
+	readonly #structureRoots: PdfStructureElement[] = [];
+	#currentStructure: PdfStructureElement | undefined;
+	readonly #structureHost: StructureHost = {
+		markStructureContent: (type) => this.markStructureContent(type),
+		endMarkedContent: () => this.endMarkedContent(),
+		enter: (element) => {
+			const previous = this.#currentStructure;
+			this.#currentStructure = element;
+			return previous;
+		},
+		leave: (previous) => {
+			this.#currentStructure = previous;
+		},
+	};
 	#fontSource: FontSource = "Helvetica";
 	#fontFamily: string | undefined;
 	#ended = false;
@@ -440,6 +571,8 @@ export class PdfDocument extends Readable {
 			pdfVersion: options.pdfVersion,
 			compress: options.compress,
 			bufferPages: options.bufferPages,
+			tagged: options.tagged,
+			subset: options.subset,
 		});
 		this.#remSize = 12;
 		this.font(options.font ?? "Helvetica");
@@ -562,9 +695,15 @@ export class PdfDocument extends Readable {
 		return merged;
 	}
 
-	/** A new page like the current one: what text does when it runs out of page. */
+	/**
+	 * A new page like the current one: what text does when it runs out of
+	 * page. Content being marked carries on onto it, as in pdfkit.
+	 */
 	continueOnNewPage(options?: PageOptions): this {
-		return this.addPage(options ?? this.page.options);
+		const open = this.#native.getOpenMark();
+		this.addPage(options ?? this.page.options);
+		if (open !== null) compose(() => this.#native.continueMark(open));
+		return this;
 	}
 
 	bufferedPageRange(): { start: number; count: number } {
@@ -689,6 +828,19 @@ export class PdfDocument extends Readable {
 			this.continueOnNewPage();
 			step = compose(() => this.#native.resumeText());
 		}
+		const parent = resolved.options.structParent;
+		if (parent !== undefined) {
+			const type = resolved.options.structType ?? "P";
+			// A heading's title is what it says: PDF/UA asks for it.
+			const options = /^H[1-6]?$/.test(type) ? { title: value.trim() } : {};
+			for (const id of this.#native.takeMarkedContents()) {
+				parent.add(this.struct(type, options, [new PdfStructureContent(id)]));
+			}
+			// pdfkit leaves the last paragraph's content open; it ends here.
+			if (!resolved.options.continued && this.#native.getOpenMark() !== null) {
+				this.endMarkedContent();
+			}
+		}
 		return this;
 	}
 
@@ -748,6 +900,24 @@ export class PdfDocument extends Readable {
 			while (step === "needPage") {
 				this.continueOnNewPage();
 				step = compose(() => this.#native.resumeText());
+			}
+			const parent = given.structParent;
+			if (parent !== undefined) {
+				const [itemType, labelType, bodyType] = given.structTypes ?? [
+					"LI",
+					"Lbl",
+					"LBody",
+				];
+				const [label, body] = this.#native.takeMarkedContents();
+				const parts: PdfStructureElement[] = [];
+				if (label !== undefined) {
+					parts.push(this.struct(labelType, [new PdfStructureContent(label)]));
+				}
+				if (body !== undefined) {
+					parts.push(this.struct(bodyType, [new PdfStructureContent(body)]));
+				}
+				parent.add(this.struct(itemType, parts));
+				if (this.#native.getOpenMark() !== null) this.endMarkedContent();
 			}
 		}
 		return this;
@@ -880,6 +1050,7 @@ export class PdfDocument extends Readable {
 				linkPage: typeof options.link === "number" ? options.link : undefined,
 				goTo: options.goTo,
 				destination: options.destination,
+				structure: options.structParent !== undefined,
 			},
 		};
 	}
@@ -1243,11 +1414,12 @@ export class PdfDocument extends Readable {
 		height: number,
 		target: string | number,
 	): this {
-		compose(() =>
+		const id = compose(() =>
 			typeof target === "number"
 				? this.#native.link(x, y, width, height, undefined, target, undefined)
 				: this.#native.link(x, y, width, height, target, undefined, undefined),
 		);
+		this.#claimLink(id);
 		return this;
 	}
 
@@ -1259,10 +1431,84 @@ export class PdfDocument extends Readable {
 		height: number,
 		name: string,
 	): this {
-		compose(() =>
+		const id = compose(() =>
 			this.#native.link(x, y, width, height, undefined, undefined, name),
 		);
+		this.#claimLink(id);
 		return this;
+	}
+
+	/** Inside a `Link` element, a link belongs to it, as in pdfkit. */
+	#claimLink(id: number): void {
+		if (this.#currentStructure?.type === "Link") {
+			this.#currentStructure.add(new PdfAnnotationReference(id));
+		}
+	}
+
+	/** pdfkit's `struct`: a structure element, with its options and children. */
+	struct(
+		type: string,
+		options?: StructureOptions | StructureChild | readonly StructureChild[],
+		children?: StructureChild | readonly StructureChild[],
+	): PdfStructureElement {
+		return new PdfStructureElement(
+			this.#structureHost,
+			type,
+			options,
+			children,
+		);
+	}
+
+	/** Attach an element to the structure tree's root. */
+	addStructure(element: PdfStructureElement): this {
+		this.#structureRoots.push(element);
+		element.attach();
+		return this;
+	}
+
+	/**
+	 * Mark the content drawn next: an `Artifact` (with its `type`), a
+	 * `Span` with its properties, or any tag. Marked content does not nest
+	 * here — the engine cannot write it nested — so an open one ends first.
+	 */
+	markContent(tag: string, options?: MarkOptions): this {
+		this.#endOpenMark();
+		const kind =
+			tag === "Artifact" ? "artifact" : tag === "Span" ? "span" : "structure";
+		compose(() => this.#native.beginMark({ kind, ...options }));
+		return this;
+	}
+
+	/**
+	 * Mark the content drawn next as belonging to a structure element. A
+	 * `Span` keeps its properties.
+	 */
+	markStructureContent(
+		tag: string,
+		options?: MarkOptions,
+	): PdfStructureContent {
+		this.#endOpenMark();
+		const kind = tag === "Span" ? "span" : "structure";
+		return new PdfStructureContent(
+			compose(() => this.#native.beginMark({ kind, ...options })),
+		);
+	}
+
+	endMarkedContent(): this {
+		compose(() => this.#native.endMark());
+		if (this.#textOptions !== undefined) {
+			delete this.#textOptions.link;
+			delete this.#textOptions.goTo;
+			delete this.#textOptions.destination;
+			delete this.#textOptions.underline;
+			delete this.#textOptions.strike;
+		}
+		return this;
+	}
+
+	#endOpenMark(): void {
+		if (this.#native.getOpenMark() !== null)
+			compose(() => this.#native.endMark());
 	}
 
 	/**
@@ -1338,6 +1584,10 @@ export class PdfDocument extends Readable {
 				if (font.src !== undefined) this.font(font.src, font.family);
 				if (font.size !== undefined) this.fontSize(font.size);
 			},
+			struct: (type, options) => document.struct(type, options),
+			markContent: (tag, options) => document.markContent(tag, options),
+			markStructureContent: (tag) => document.markStructureContent(tag),
+			endMarkedContent: () => document.endMarkedContent(),
 		};
 	}
 
@@ -1480,6 +1730,34 @@ export class PdfDocument extends Readable {
 		this.#open();
 		const info = infoInput(this.info);
 		compose(() => this.#native.setInfo(info));
+		if (this.#structureRoots.length > 0) {
+			const { nodes, children } = flattenStructure(this.#structureRoots);
+			compose(() => this.#native.setStructure(nodes, children));
+		}
+		if (this.outline.children.length > 0) {
+			const entries: Array<{
+				title: string;
+				page: number;
+				x: number;
+				y: number;
+				open: boolean;
+				parent?: number;
+			}> = [];
+			const visit = (item: PdfOutline, parent: number | undefined) => {
+				const index = entries.length;
+				entries.push({
+					title: item.title ?? "",
+					page: item.page,
+					x: item.left,
+					y: item.top,
+					open: item.expanded,
+					parent,
+				});
+				for (const child of item.children) visit(child, index);
+			};
+			for (const item of this.outline.children) visit(item, undefined);
+			compose(() => this.#native.setOutline(entries));
+		}
 		const bytes = compose(() => this.#native.end());
 		this.#ended = true;
 		this.push(bytes);
