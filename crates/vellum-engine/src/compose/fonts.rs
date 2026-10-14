@@ -12,6 +12,7 @@ use rustybuzz::{Face, Feature, UnicodeBuffer};
 
 use super::standard::StandardFace;
 use super::ComposeError;
+use crate::stamp_text::win_ansi;
 
 /// Larger than any font a document has a use for: a full CJK family is about
 /// 20 MiB.
@@ -45,6 +46,8 @@ pub struct LoadedFont {
     pub vertical: Vertical,
     /// The name the file gives itself, to tell two loads of one font apart.
     pub postscript_name: Option<String>,
+    /// The standard font the file stands in for, laid out with its metrics.
+    standard: Option<&'static StandardFace>,
 }
 
 fn invalid(reason: impl Into<String>) -> ComposeError {
@@ -73,11 +76,11 @@ fn postscript_name(face: &Face) -> Option<String> {
 impl LoadedFont {
     /// `family` picks a face of a collection (TTC) by PostScript name, as
     /// it does for pdfkit; a single font ignores it. `standard` replaces the
-    /// vertical metrics with a standard face's.
+    /// metrics with a standard face's.
     pub fn load(
         bytes: Vec<u8>,
         family: Option<&str>,
-        standard: Option<&StandardFace>,
+        standard: Option<&'static StandardFace>,
     ) -> Result<Self, ComposeError> {
         if bytes.len() > MAX_FONT_BYTES {
             return Err(invalid(format!(
@@ -148,7 +151,14 @@ impl LoadedFont {
             krilla,
             vertical,
             postscript_name,
+            standard,
         })
+    }
+
+    /// Whether the font stands in for a standard one, which pdfkit measures
+    /// and draws a whole string at a time rather than word by word.
+    pub fn is_standard(&self) -> bool {
+        self.standard.is_some()
     }
 
     fn face(&self) -> Result<Face<'_>, ComposeError> {
@@ -177,6 +187,11 @@ impl LoadedFont {
             return Ok(Vec::new());
         }
         let face = self.face()?;
+        if let Some(standard) = self.standard.filter(|_| !rtl) {
+            if let Some(shaped) = standard_layout(&face, standard, text) {
+                return Ok(shaped);
+            }
+        }
         let scale = 1000.0 / face.units_per_em() as f32;
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
@@ -222,6 +237,44 @@ impl LoadedFont {
         self.index == other.index
             && (Arc::ptr_eq(&self.data, &other.data) || self.data == other.data)
     }
+}
+
+/// pdfkit's layout of a standard font: one glyph per character, each as wide
+/// as the AFM says plus the pair it makes with the next, features ignored.
+/// `None` when a character has no WinAnsi byte: pdfkit cannot draw it, and
+/// the stand-in shapes the text instead.
+fn standard_layout(face: &Face, standard: &StandardFace, text: &str) -> Option<Vec<Shaped>> {
+    const SOFT_HYPHEN: u8 = 0xAD;
+    let bytes = text.chars().map(win_ansi).collect::<Option<Vec<u8>>>()?;
+    let glyph = |character: char| {
+        face.glyph_index(character)
+            .map_or(0, |glyph| u32::from(glyph.0))
+    };
+    Some(
+        text.char_indices()
+            .zip(&bytes)
+            .enumerate()
+            .map(|(index, ((cluster, character), &byte))| {
+                // Invisible unless the line breaks there, as shaping leaves it.
+                let (glyph, advance) = if byte == SOFT_HYPHEN {
+                    (glyph(' '), 0.0)
+                } else {
+                    let next = bytes
+                        .get(index + 1)
+                        .copied()
+                        .filter(|&next| next != SOFT_HYPHEN);
+                    (glyph(character), standard.advance(byte, next))
+                };
+                Shaped {
+                    glyph,
+                    cluster,
+                    advance,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Hebrew, Arabic and the scripts around them, which run right to left.
@@ -286,6 +339,37 @@ pub(crate) mod tests {
             (width - (722.0 + 556.0 + 222.0 + 222.0 + 556.0)).abs() < 1.0,
             "got {width}"
         );
+    }
+
+    #[test]
+    fn a_standard_font_measures_and_kerns_as_pdfkit_does() {
+        let font = LoadedFont::load(liberation_sans(), None, standard("Helvetica")).unwrap();
+        // pdfkit's widthOfString("valables") at 10pt: AFM widths, less the
+        // v-a pair.
+        let width = font.width("valables", 10.0, &[]).unwrap();
+        assert!((width - 36.23).abs() < 1e-4, "got {width}");
+        // A and V, 667 each, kerned by 70.
+        assert_eq!(font.width("AV", 1000.0, &[]).unwrap(), 1264.0);
+        // pdfkit's standard fonts have no ligatures, asked for or not.
+        let liga = parse_features(&["liga".into()]).unwrap();
+        assert_eq!(font.shape("fi", &liga, false).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_standard_font_draws_what_win_ansi_lacks_with_its_stand_in() {
+        let font = LoadedFont::load(liberation_sans(), None, standard("Helvetica")).unwrap();
+        // pdfkit has no glyph for Ω in Helvetica; Liberation Sans has one.
+        let omega = font.shape("Ω", &[], false).unwrap();
+        assert_eq!(omega.len(), 1);
+        assert_ne!(omega[0].glyph, 0, "not .notdef");
+        assert!(omega[0].advance > 0.0);
+    }
+
+    #[test]
+    fn a_soft_hyphen_in_a_standard_font_takes_no_room() {
+        let font = LoadedFont::load(liberation_sans(), None, standard("Helvetica")).unwrap();
+        let split = font.width("in", 1000.0, &[]).unwrap() + font.width("to", 1000.0, &[]).unwrap();
+        assert_eq!(font.width("in\u{AD}to", 1000.0, &[]).unwrap(), split);
     }
 
     #[test]

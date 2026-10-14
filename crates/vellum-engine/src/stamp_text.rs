@@ -119,41 +119,48 @@ impl Default for TextStampOptions {
 /// failing.
 pub(crate) fn to_win_ansi(text: &str) -> Result<Vec<u8>, String> {
     text.chars()
-        .map(|character| match character {
-            '\u{20ac}' => Ok(0x80),
-            '\u{201a}' => Ok(0x82),
-            '\u{201e}' => Ok(0x84),
-            '\u{0192}' => Ok(0x83),
-            '\u{2026}' => Ok(0x85),
-            '\u{2020}' => Ok(0x86),
-            '\u{2021}' => Ok(0x87),
-            '\u{02c6}' => Ok(0x88),
-            '\u{2030}' => Ok(0x89),
-            '\u{0160}' => Ok(0x8a),
-            '\u{2039}' => Ok(0x8b),
-            '\u{0152}' => Ok(0x8c),
-            '\u{017d}' => Ok(0x8e),
-            '\u{2018}' => Ok(0x91),
-            '\u{2019}' => Ok(0x92),
-            '\u{201c}' => Ok(0x93),
-            '\u{201d}' => Ok(0x94),
-            '\u{2022}' => Ok(0x95),
-            '\u{2013}' => Ok(0x96),
-            '\u{2014}' => Ok(0x97),
-            '\u{02dc}' => Ok(0x98),
-            '\u{2122}' => Ok(0x99),
-            '\u{0161}' => Ok(0x9a),
-            '\u{203a}' => Ok(0x9b),
-            '\u{0153}' => Ok(0x9c),
-            '\u{017e}' => Ok(0x9e),
-            '\u{0178}' => Ok(0x9f),
-            other => u8::try_from(other as u32).map_err(|_| {
+        .map(|character| {
+            win_ansi(character).ok_or_else(|| {
                 format!(
-                    "{other:?} cannot be written with a standard font — WinAnsi covers Western European text only"
+                    "{character:?} cannot be written with a standard font — WinAnsi covers Western European text only"
                 )
-            }),
+            })
         })
         .collect()
+}
+
+/// The WinAnsi byte of one character, if it has one.
+pub(crate) fn win_ansi(character: char) -> Option<u8> {
+    match character {
+        '\u{20ac}' => Some(0x80),
+        '\u{201a}' => Some(0x82),
+        '\u{201e}' => Some(0x84),
+        '\u{0192}' => Some(0x83),
+        '\u{2026}' => Some(0x85),
+        '\u{2020}' => Some(0x86),
+        '\u{2021}' => Some(0x87),
+        '\u{02c6}' => Some(0x88),
+        '\u{2030}' => Some(0x89),
+        '\u{0160}' => Some(0x8a),
+        '\u{2039}' => Some(0x8b),
+        '\u{0152}' => Some(0x8c),
+        '\u{017d}' => Some(0x8e),
+        '\u{2018}' => Some(0x91),
+        '\u{2019}' => Some(0x92),
+        '\u{201c}' => Some(0x93),
+        '\u{201d}' => Some(0x94),
+        '\u{2022}' => Some(0x95),
+        '\u{2013}' => Some(0x96),
+        '\u{2014}' => Some(0x97),
+        '\u{02dc}' => Some(0x98),
+        '\u{2122}' => Some(0x99),
+        '\u{0161}' => Some(0x9a),
+        '\u{203a}' => Some(0x9b),
+        '\u{0153}' => Some(0x9c),
+        '\u{017e}' => Some(0x9e),
+        '\u{0178}' => Some(0x9f),
+        other => u8::try_from(other as u32).ok(),
+    }
 }
 
 /// Escape a PDF literal string.

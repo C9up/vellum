@@ -190,6 +190,18 @@ pub(crate) struct Wrapper {
     align_override: Option<Align>,
 }
 
+impl Wrapper {
+    /// Whether a word of `width` fits in the space left, give or take a few
+    /// roundings. pdfkit counts in doubles and this engine in floats: a table
+    /// measures a cell, then lays it out again at that width, and the words'
+    /// widths taken off the line one by one can leave the last of them a
+    /// rounding short. The slack is a few floats of the line's width, far
+    /// below anything a reader shows.
+    fn fits(&self, width: f32) -> bool {
+        width <= self.space_left + self.line_width.abs().max(1.0) * f32::EPSILON * 32.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum AfterLine {
     /// Take the first-line indent back off.
@@ -316,12 +328,12 @@ impl Composer {
 
     /// The advance of `text` at the current font and size, in thousandths
     /// of an em, shaped word by word as pdfkit does unless features are
-    /// asked for.
+    /// asked for. A standard font is measured whole, as pdfkit measures it.
     fn advance(&mut self, text: &str, features: &[Feature]) -> Result<f32, ComposeError> {
         let index = self.font.ok_or_else(|| {
             ComposeError::new("NO_FONT", "no font is selected: call font() first")
         })?;
-        if !features.is_empty() {
+        if !features.is_empty() || self.current_font()?.is_standard() {
             return self.current_font()?.width(text, 1000.0, features);
         }
         let mut total = 0.0;
@@ -653,9 +665,9 @@ impl Composer {
 
     fn can_fit(&mut self, run: &TextRun, word: &str, width: f32) -> Result<bool, ComposeError> {
         if !word.ends_with(SOFT_HYPHEN) {
-            return Ok(width <= run.wrapper.space_left);
+            return Ok(run.wrapper.fits(width));
         }
-        Ok(width + self.word_width(run, HYPHEN)? <= run.wrapper.space_left)
+        Ok(run.wrapper.fits(width + self.word_width(run, HYPHEN)?))
     }
 
     /// pdfkit's `wrap`, resumable.
@@ -784,24 +796,24 @@ impl Composer {
         let prefix = |count: usize| -> String { graphemes[..count].concat() };
         let mut count;
         let mut might_grow = false;
-        if width > run.wrapper.space_left {
+        if !run.wrapper.fits(width) {
             count = ((run.wrapper.space_left / (width / total as f32)).ceil() as usize).min(total);
             width = self.word_width(run, &prefix(count))?;
-            might_grow = width <= run.wrapper.space_left && count < total;
+            might_grow = run.wrapper.fits(width) && count < total;
         } else {
             count = total;
         }
-        let mut must_shrink = width > run.wrapper.space_left && count > 0;
+        let mut must_shrink = !run.wrapper.fits(width) && count > 0;
         while must_shrink || might_grow {
             if must_shrink {
                 count -= 1;
                 width = self.word_width(run, &prefix(count))?;
-                must_shrink = width > run.wrapper.space_left && count > 0;
+                must_shrink = !run.wrapper.fits(width) && count > 0;
             } else {
                 count += 1;
                 width = self.word_width(run, &prefix(count))?;
-                must_shrink = width > run.wrapper.space_left && count > 0;
-                might_grow = width <= run.wrapper.space_left && count < total;
+                must_shrink = !run.wrapper.fits(width) && count > 0;
+                might_grow = run.wrapper.fits(width) && count < total;
             }
         }
         if count == 0 && run.wrapper.space_left == run.wrapper.line_width {
@@ -872,7 +884,7 @@ impl Composer {
         }
 
         if end.required {
-            if width > run.wrapper.space_left {
+            if !run.wrapper.fits(width) {
                 self.emit_line(run)?;
                 run.buffer = word.to_string();
                 run.text_width = width;
@@ -1458,7 +1470,7 @@ impl Composer {
             for (chunk, offset) in chunks(
                 text,
                 range.clone(),
-                features.is_empty(),
+                features.is_empty() && !font.is_standard(),
                 word_spacing != 0.0,
                 rtl,
             ) {
@@ -1496,7 +1508,8 @@ fn rotation_about(angle: f32, x: f32, y: f32) -> Matrix {
 /// The pieces a run of a line is shaped in, in visual order, with their
 /// byte offset in the line. pdfkit shapes word by word (a word carrying its
 /// trailing space), and word by word without the spaces when word spacing
-/// is set; with OpenType features it shapes the whole run.
+/// is set; with OpenType features, or a standard font, it shapes the whole
+/// run.
 fn chunks(
     text: &str,
     range: Range<usize>,
@@ -1835,6 +1848,42 @@ mod tests {
             },
         );
         assert_layout("helvetica", &document);
+    }
+
+    #[test]
+    fn a_text_laid_out_at_its_own_width_keeps_its_lines() {
+        // A table measures a cell, then lays it out at the width measured:
+        // the last word has to fit again, however the floats round.
+        let mut document = document();
+        let helvetica = document
+            .load_font(liberation_sans(), None, Some("Helvetica"))
+            .unwrap();
+        document.set_font(helvetica).unwrap();
+        document.set_font_size(9.0).unwrap();
+        for text in [
+            "1 190,00",
+            "Évacuation des déchets et nettoyage de fin de chantier",
+        ] {
+            let measured = document
+                .bounds_of_string(
+                    text,
+                    &TextOptions {
+                        width: Some(193.28),
+                        ..defaults()
+                    },
+                )
+                .unwrap();
+            let again = document
+                .bounds_of_string(
+                    text,
+                    &TextOptions {
+                        width: Some(measured.0),
+                        ..defaults()
+                    },
+                )
+                .unwrap();
+            assert_eq!(again, measured, "{text}");
+        }
     }
 
     #[test]

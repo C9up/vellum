@@ -17,6 +17,7 @@ mod fill;
 mod flatten;
 mod font;
 mod form;
+mod kerning;
 mod metadata;
 mod metrics;
 mod page;

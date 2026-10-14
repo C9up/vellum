@@ -8,7 +8,11 @@
 //! The vertical metrics are the standard font's own, taken from its AFM, not
 //! the stand-in's: line height is ascender minus descender, and Liberation's
 //! is a fifth taller than Helvetica's. With its own metrics every line of a
-//! document would move down.
+//! document would move down. So are the advances: the AFM's widths and
+//! kerning pairs, as pdfkit lays the text out, so a line breaks where it
+//! breaks there.
+
+use crate::{kerning, metrics};
 
 /// One of the twelve standard faces that have a stand-in.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,15 +28,34 @@ pub struct StandardFace {
     pub bbox: [f32; 4],
     pub cap_height: f32,
     pub x_height: f32,
+    /// By WinAnsi byte, in thousandths of an em.
+    pub(crate) widths: &'static [u16; 256],
+    /// `(left, right, amount)` by WinAnsi byte, sorted.
+    pub(crate) kerning: &'static [(u8, u8, i16)],
 }
 
 impl StandardFace {
+    /// The advance of `byte` followed by `next`, in thousandths of an em:
+    /// its width plus the pair the two make, as pdfkit's `advancesForGlyphs`.
+    pub(crate) fn advance(&self, byte: u8, next: Option<u8>) -> f32 {
+        let kern = next
+            .and_then(|next| {
+                self.kerning
+                    .binary_search_by_key(&(byte, next), |&(left, right, _)| (left, right))
+                    .ok()
+            })
+            .map_or(0, |index| self.kerning[index].2);
+        f32::from(self.widths[usize::from(byte)]) + f32::from(kern)
+    }
+
     /// What the AFM leaves between lines beyond ascender and descender.
     pub fn line_gap(&self) -> f32 {
         self.bbox[3] - self.bbox[1] - (self.ascender - self.descender)
     }
 }
 
+// The AFM's numbers, in the order it gives them.
+#[allow(clippy::too_many_arguments)]
 const fn face(
     name: &'static str,
     file: &'static str,
@@ -41,6 +64,7 @@ const fn face(
     bbox: [f32; 4],
     cap_height: f32,
     x_height: f32,
+    (widths, kerning): (&'static [u16; 256], &'static [(u8, u8, i16)]),
 ) -> StandardFace {
     StandardFace {
         name,
@@ -50,8 +74,17 @@ const fn face(
         bbox,
         cap_height,
         x_height,
+        widths,
+        kerning,
     }
 }
+
+/// An oblique measures and kerns as its upright: it is the upright slanted.
+const HELVETICA: (&[u16; 256], &[(u8, u8, i16)]) = (&metrics::HELVETICA, kerning::HELVETICA);
+const HELVETICA_BOLD: (&[u16; 256], &[(u8, u8, i16)]) =
+    (&metrics::HELVETICA_BOLD, kerning::HELVETICA_BOLD);
+/// Courier is monospace: one width, no pairs.
+const COURIER: (&[u16; 256], &[(u8, u8, i16)]) = (&metrics::COURIER, &[]);
 
 /// Symbol and ZapfDingbats have no stand-in with the same glyphs at the same
 /// code points, so they are not offered: a font that carries the characters
@@ -65,6 +98,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-166.0, -225.0, 1000.0, 931.0],
         718.0,
         523.0,
+        HELVETICA,
     ),
     face(
         "Helvetica-Bold",
@@ -74,6 +108,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-170.0, -228.0, 1003.0, 962.0],
         718.0,
         532.0,
+        HELVETICA_BOLD,
     ),
     face(
         "Helvetica-Oblique",
@@ -83,6 +118,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-170.0, -225.0, 1116.0, 931.0],
         718.0,
         523.0,
+        HELVETICA,
     ),
     face(
         "Helvetica-BoldOblique",
@@ -92,6 +128,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-174.0, -228.0, 1114.0, 962.0],
         718.0,
         532.0,
+        HELVETICA_BOLD,
     ),
     face(
         "Times-Roman",
@@ -101,6 +138,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-168.0, -218.0, 1000.0, 898.0],
         662.0,
         450.0,
+        (&metrics::TIMES_ROMAN, kerning::TIMES_ROMAN),
     ),
     face(
         "Times-Bold",
@@ -110,6 +148,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-168.0, -218.0, 1000.0, 935.0],
         676.0,
         461.0,
+        (&metrics::TIMES_BOLD, kerning::TIMES_BOLD),
     ),
     face(
         "Times-Italic",
@@ -119,6 +158,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-169.0, -217.0, 1010.0, 883.0],
         653.0,
         441.0,
+        (&metrics::TIMES_ITALIC, kerning::TIMES_ITALIC),
     ),
     face(
         "Times-BoldItalic",
@@ -128,6 +168,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-200.0, -218.0, 996.0, 921.0],
         669.0,
         462.0,
+        (&metrics::TIMES_BOLD_ITALIC, kerning::TIMES_BOLD_ITALIC),
     ),
     face(
         "Courier",
@@ -137,6 +178,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-23.0, -250.0, 715.0, 805.0],
         562.0,
         426.0,
+        COURIER,
     ),
     face(
         "Courier-Bold",
@@ -146,6 +188,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-113.0, -250.0, 749.0, 801.0],
         562.0,
         439.0,
+        COURIER,
     ),
     face(
         "Courier-Oblique",
@@ -155,6 +198,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-27.0, -250.0, 849.0, 805.0],
         562.0,
         426.0,
+        COURIER,
     ),
     face(
         "Courier-BoldOblique",
@@ -164,6 +208,7 @@ pub const STANDARD: [StandardFace; 12] = [
         [-57.0, -250.0, 869.0, 801.0],
         562.0,
         439.0,
+        COURIER,
     ),
 ];
 
