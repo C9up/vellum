@@ -109,13 +109,7 @@ export function normalizeSides(
 	fallback: SideDefinition<Side>,
 	transform: (value: Side) => number,
 ): Sides<number> {
-	const given =
-		sides === undefined ||
-		(typeof sides === "object" &&
-			!isTuple(sides) &&
-			Object.keys(sides).length === 0)
-			? fallback
-			: sides;
+	const given = sides ?? fallback;
 	let expanded: Sides<Side>;
 	if (isSide(given)) {
 		expanded = { top: given, right: given, bottom: given, left: given };

@@ -346,7 +346,12 @@ describe("PdfDocument — lengths, sides and sources", () => {
 			bottom: 3,
 			left: 4,
 		});
-		expect(page({})).toEqual({ top: 72, right: 72, bottom: 72, left: 72 });
+		expect(page(undefined)).toEqual({
+			top: 72,
+			right: 72,
+			bottom: 72,
+			left: 72,
+		});
 		const doc = new PdfDocument({ margin: 50 });
 		expect(doc.page.contentHeight).toBe(792 - 100);
 	});
