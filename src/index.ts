@@ -48,6 +48,17 @@ export {
 } from "./document/PdfDocument.js";
 export type { PageSizeName, SideDefinition, Size } from "./document/sizes.js";
 export { PAGE_SIZES } from "./document/sizes.js";
+export type {
+	Cell as TableCellStyle,
+	CellStyle,
+	ColumnStyle,
+	RowStyle,
+	TableAlign,
+	TableCell,
+	TableFont,
+	TableOptions,
+} from "./document/table.js";
+export { PdfTable } from "./document/table.js";
 export { VellumError } from "./errors.js";
 export type {
 	DocumentInfo,

@@ -41,6 +41,7 @@ import {
 	type Size,
 	sizeToPoint,
 } from "./sizes.js";
+import { PdfTable, type TableHost, type TableOptions } from "./table.js";
 import {
 	arc,
 	ellipse,
@@ -424,6 +425,8 @@ export class PdfDocument extends Readable {
 	readonly #spots = new Map<string, number>();
 	readonly #images = new Map<string, PdfImage>();
 	readonly #imageHandles = new WeakMap<PdfImage, number>();
+	#fontSource: FontSource = "Helvetica";
+	#fontFamily: string | undefined;
 	#ended = false;
 
 	constructor(options: PdfDocumentOptions = {}) {
@@ -600,6 +603,8 @@ export class PdfDocument extends Readable {
 			cacheKey = typeof named === "string" ? named : undefined;
 		}
 		if (fontSize !== undefined) this.fontSize(fontSize);
+		this.#fontSource = source;
+		this.#fontFamily = face;
 
 		const known =
 			cacheKey === undefined ? undefined : this.#fonts.get(cacheKey);
@@ -1271,6 +1276,69 @@ export class PdfDocument extends Readable {
 		const [, left, top] = position;
 		compose(() => this.#native.addNamedDestination(name, left ?? 0, top ?? 0));
 		return this;
+	}
+
+	/**
+	 * pdfkit's `table`. With `data`, every row is drawn and the document
+	 * answers; without, the table does, for `row()` and `end()`.
+	 */
+	table(
+		options: TableOptions & { data: NonNullable<TableOptions["data"]> },
+	): this;
+	table(options?: TableOptions): PdfTable<this>;
+	table(options: TableOptions = {}): this | PdfTable<this> {
+		this.#open();
+		const table = new PdfTable(this.#tableHost(), this, options);
+		return options.data === undefined ? table : this;
+	}
+
+	#tableHost(): TableHost {
+		const document = this;
+		return {
+			get x() {
+				return document.x;
+			},
+			set x(value: number) {
+				document.x = value;
+			},
+			get y() {
+				return document.y;
+			},
+			set y(value: number) {
+				document.y = value;
+			},
+			get page() {
+				return document.page;
+			},
+			sizeToPoint: (size, fallback, page, percentageOf) =>
+				document.sizeToPoint(size, fallback, page, percentageOf),
+			boundsOfString: (text, x, y, options) =>
+				document.boundsOfString(text, x, y, options),
+			text: (text, x, y, options) => document.text(text, x, y, options),
+			save: () => document.save(),
+			restore: () => document.restore(),
+			rect: (x, y, width, height) => document.rect(x, y, width, height),
+			fill: () => document.fill(),
+			stroke: () => document.stroke(),
+			clip: () => document.clip(),
+			moveTo: (x, y) => document.moveTo(x, y),
+			lineTo: (x, y) => document.lineTo(x, y),
+			fillColor: (colour) => document.fillColor(colour),
+			strokeColor: (colour) => document.strokeColor(colour),
+			lineWidth: (width) => document.lineWidth(width),
+			dash: (length, options) => document.dash(length, options),
+			strokeOpacity: (opacity) => document.strokeOpacity(opacity),
+			continueOnNewPage: () => document.continueOnNewPage(),
+			fontState: () => ({
+				src: this.#fontSource,
+				family: this.#fontFamily,
+				size: this.#native.getFontSize(),
+			}),
+			useFont: (font) => {
+				if (font.src !== undefined) this.font(font.src, font.family);
+				if (font.size !== undefined) this.fontSize(font.size);
+			},
+		};
 	}
 
 	/** Open an image once, to draw it several times or read its size. */
