@@ -198,8 +198,7 @@ interface ResolvedText {
 	native: TextOptionsInput;
 }
 
-function infoInput(info: DocumentInfo | undefined) {
-	if (info === undefined) return undefined;
+function infoInput(info: DocumentInfo) {
 	const custom: string[][] = [];
 	const known = new Set([
 		"Title",
@@ -633,7 +632,7 @@ export class PdfDocument extends Readable {
 	end(): this {
 		this.#open();
 		const info = infoInput(this.info);
-		if (info !== undefined) compose(() => this.#native.setInfo(info));
+		compose(() => this.#native.setInfo(info));
 		const bytes = compose(() => this.#native.end());
 		this.#ended = true;
 		this.push(bytes);

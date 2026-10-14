@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	PdfDocument,
+	type PdfDocumentOptions,
 	registerFile,
 	toBytes,
 	Vellum,
@@ -280,5 +281,167 @@ describe("PdfDocument — rendering", () => {
 		doc.fontSize(24).text("Rendu");
 		const png = await vellum.render(await bytesOf(doc), { page: 1 });
 		expect(png.subarray(1, 4).toString()).toBe("PNG");
+	});
+});
+
+describe("PdfDocument — lengths, sides and sources", () => {
+	it("converts every unit pdfkit knows", () => {
+		const doc = new PdfDocument({ size: "A4" }).fontSize(10);
+		const page = { width: 200, height: 100 };
+		const cases: Array<[string, number]> = [
+			["12", 12],
+			["12pt", 12],
+			["1in", 72],
+			["96px", 72],
+			["2.54cm", 72],
+			["25.4mm", 72],
+			["1pc", 12],
+			["2em", 20],
+			["2rem", 24],
+			["50vw", 100],
+			["50vh", 50],
+			["50vmin", 50],
+			["50vmax", 100],
+			["50%", 5],
+			["-1in", -72],
+		];
+		for (const [size, points] of cases) {
+			expect(doc.sizeToPoint(size, 0, page)).toBeCloseTo(points, 6);
+		}
+		expect(doc.sizeToPoint("1ex", 0, page)).toBeCloseTo(
+			doc.currentLineHeight(),
+			6,
+		);
+		expect(doc.sizeToPoint("1ch", 0, page)).toBeCloseTo(
+			doc.widthOfString("0"),
+			6,
+		);
+		expect(doc.sizeToPoint("50%", 0, page, 300)).toBe(150);
+		expect(doc.sizeToPoint(true)).toBe(1);
+		expect(doc.sizeToPoint(undefined, "1in")).toBe(72);
+		expect(() => doc.sizeToPoint(Number.POSITIVE_INFINITY)).toThrow(
+			VellumError,
+		);
+		expect(() => doc.sizeToPoint("12 parsecs")).toThrow(VellumError);
+	});
+
+	it("reads margins in every side form", () => {
+		const page = (margin: PdfDocumentOptions["margin"]) =>
+			new PdfDocument({ margin }).page.margins;
+		expect(page({ vertical: 10, horizontal: 20 })).toEqual({
+			top: 10,
+			right: 20,
+			bottom: 10,
+			left: 20,
+		});
+		expect(page({ top: 1, right: 2, bottom: 3, left: 4 })).toEqual({
+			top: 1,
+			right: 2,
+			bottom: 3,
+			left: 4,
+		});
+		expect(page([1, 2, 3, 4])).toEqual({
+			top: 1,
+			right: 2,
+			bottom: 3,
+			left: 4,
+		});
+		expect(page({})).toEqual({ top: 72, right: 72, bottom: 72, left: 72 });
+		const doc = new PdfDocument({ margin: 50 });
+		expect(doc.page.contentHeight).toBe(792 - 100);
+	});
+
+	it("reads a font from a URL or an ArrayBuffer", async () => {
+		const { readFileSync } = await import("node:fs");
+		const url = new URL(
+			"../../fonts/LiberationSerif-Regular.ttf",
+			import.meta.url,
+		);
+		const bytes = readFileSync(url);
+		const doc = new PdfDocument();
+		doc.font(url).text("from a URL");
+		doc.font(
+			bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+		);
+		doc.text("from an ArrayBuffer");
+		const text = await vellum.extractText(await bytesOf(doc));
+		expect(text).toContain("from a URL");
+		expect(text).toContain("from an ArrayBuffer");
+	});
+});
+
+describe("PdfDocument — more of pdfkit's surface", () => {
+	it("takes a page's font and size when it is added", () => {
+		const doc = new PdfDocument();
+		doc.addPage({ font: "Times-Roman", fontSize: 14 });
+		// Times: (683 + 217) / 1000 * 14
+		expect(doc.currentLineHeight()).toBeCloseTo(12.6, 3);
+		doc.font("Courier", 20);
+		expect(doc.currentLineHeight()).toBeCloseTo((629 + 157) / 50, 3);
+	});
+
+	it("moves by lines, with the document's line gap", () => {
+		const doc = new PdfDocument().fontSize(10).lineGap(5);
+		const line = doc.currentLineHeight(true);
+		const start = doc.y;
+		doc.moveDown(2);
+		expect(doc.y - start).toBeCloseTo(2 * line + 5, 3);
+		doc.moveUp();
+		expect(doc.y - start).toBeCloseTo(line, 3);
+	});
+
+	it("has no current page once the pages are flushed", () => {
+		const doc = new PdfDocument();
+		doc.flushPages();
+		expect(() => doc.page).toThrow(
+			expect.objectContaining({ code: "E_VELLUM_NO_PAGE" }),
+		);
+		doc.addPage();
+		expect(doc.page.width).toBe(612);
+	});
+
+	it("writes information keys of the caller's own", async () => {
+		const doc = new PdfDocument({
+			info: { Dossier: "Ç-42", Échéance: new Date(Date.UTC(2026, 10, 1)) },
+			compress: false,
+		});
+		const pdf = await bytesOf(doc);
+		expect(pdf.includes(Buffer.from("/Dossier"))).toBe(true);
+	});
+
+	it("turns bounds by any angle", () => {
+		const doc = new PdfDocument().fontSize(10);
+		const flat = doc.boundsOfString("Bonjour", 100, 100);
+		const half = doc.boundsOfString("Bonjour", 100, 100, { rotation: 180 });
+		expect(half).toEqual({
+			x: 100 - flat.width,
+			y: 100 - flat.height,
+			width: flat.width,
+			height: flat.height,
+		});
+		const quarter = doc.boundsOfString("Bonjour", 100, 100, { rotation: -90 });
+		expect(quarter.width).toBeCloseTo(flat.height, 6);
+		const tilted = doc.boundsOfString("Bonjour", 100, 100, { rotation: 45 });
+		const diagonal = (flat.width + flat.height) * Math.SQRT1_2;
+		expect(tilted.width).toBeCloseTo(diagonal, 3);
+		expect(tilted.height).toBeCloseTo(diagonal, 3);
+	});
+
+	it("can be read before it ends", async () => {
+		const doc = new PdfDocument();
+		const chunks: Buffer[] = [];
+		doc.on("data", (chunk: Buffer) => chunks.push(chunk));
+		await new Promise((resolve) => setImmediate(resolve));
+		const ended = new Promise((resolve) => doc.on("end", resolve));
+		doc.text("Bonjour").end();
+		await ended;
+		expect(Buffer.concat(chunks).subarray(0, 5).toString()).toBe("%PDF-");
+	});
+
+	it("rejects toBytes when the stream fails", async () => {
+		const doc = new PdfDocument();
+		const bytes = toBytes(doc);
+		doc.destroy(new Error("disk full"));
+		await expect(bytes).rejects.toThrow("disk full");
 	});
 });
