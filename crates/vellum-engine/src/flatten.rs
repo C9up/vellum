@@ -248,14 +248,16 @@ fn flatten_page(
 
     isolate_existing_contents(document, page_id)?;
 
-    let entries: Vec<(String, ObjectId)> = painted
+    let entries: Vec<(&str, ObjectId)> = painted
         .iter()
-        .map(|(key, stream_id, _)| (key.clone(), *stream_id))
+        .map(|(key, stream_id, _)| (key.as_str(), *stream_id))
         .collect();
-    register_resources(document, page_id, "XObject", &entries)?;
+    // The names actually given: a page flattened before already holds
+    // VellumFlat0, VellumFlat1…
+    let keys = register_resources(document, page_id, "XObject", &entries)?;
 
     let mut content: Vec<u8> = Vec::new();
-    for (key, _, matrix) in &painted {
+    for (key, (_, _, matrix)) in keys.iter().zip(&painted) {
         content.extend_from_slice(
             format!(
                 "q\n{} {} {} {} {} {} cm\n/{key} Do\nQ\n",

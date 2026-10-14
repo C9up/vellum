@@ -250,9 +250,24 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
     for (_, page_id) in targets {
         // PDF measures y from the BOTTOM; the option measures it from the top.
         let baseline = page_height(&document, page_id) - options.y;
-        let state = state_id
-            .map(|_| format!("/{STATE_KEY} gs\n"))
-            .unwrap_or_default();
+        // Registered first: the names the page hands back are the ones the
+        // content below must use — another stamp may already hold the base
+        // names on this page.
+        let font_key =
+            register_resources(&mut document, page_id, "Font", &[(FONT_KEY, font_id)])?.remove(0);
+        let state = match state_id {
+            Some(state_id) => {
+                let key = register_resources(
+                    &mut document,
+                    page_id,
+                    "ExtGState",
+                    &[(STATE_KEY, state_id)],
+                )?
+                .remove(0);
+                format!("/{key} gs\n")
+            }
+            None => String::new(),
+        };
 
         // Assembled as BYTES, not through a String: WinAnsi bytes above 127
         // are not valid UTF-8, and routing them through a Rust string turns
@@ -267,7 +282,7 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         content.extend_from_slice(b"BT\n");
         content.extend_from_slice(
             format!(
-                "/{FONT_KEY} {} Tf\n{} {} {} rg\n1 0 0 1 {} {} Tm\n",
+                "/{font_key} {} Tf\n{} {} {} rg\n1 0 0 1 {} {} Tm\n",
                 options.size,
                 f32::from(red) / 255.0,
                 f32::from(green) / 255.0,
@@ -280,20 +295,6 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         content.extend_from_slice(&shown);
         content.extend_from_slice(b"\nET\nQ\n");
 
-        register_resources(
-            &mut document,
-            page_id,
-            "Font",
-            &[(FONT_KEY.to_string(), font_id)],
-        )?;
-        if let Some(state_id) = state_id {
-            register_resources(
-                &mut document,
-                page_id,
-                "ExtGState",
-                &[(STATE_KEY.to_string(), state_id)],
-            )?;
-        }
         // The page is free to leave the graphics state transformed, so its own
         // content is balanced before ours is appended after it.
         isolate_existing_contents(&mut document, page_id)?;
@@ -619,6 +620,86 @@ mod tests {
         assert!(text.contains("Premier"), "got: {text}");
         assert!(text.contains("Second"), "got: {text}");
         assert_eq!(inspect(&second).unwrap().page_count, 1);
+    }
+
+    /// The font each `Tf` of page 0's content selects, in order, by the
+    /// `BaseFont` it resolves to.
+    fn fonts_drawn_with(pdf: &[u8]) -> Vec<String> {
+        let document = Document::load_mem(pdf).unwrap();
+        let page_id = document.page_iter().next().unwrap();
+        let fonts = document.get_page_fonts(page_id).unwrap();
+        let content = document.get_and_decode_page_content(page_id).unwrap();
+        content
+            .operations
+            .iter()
+            .filter(|operation| operation.operator == "Tf")
+            .map(|operation| {
+                let name = operation.operands[0].as_name().unwrap();
+                let base = fonts[name].get(b"BaseFont").unwrap().as_name().unwrap();
+                String::from_utf8_lossy(base).into_owned()
+            })
+            .collect()
+    }
+
+    /// A second stamp in another font used to take over the first one's
+    /// resource name, so the regular text of a page was redrawn in bold.
+    #[test]
+    fn a_second_stamp_in_bold_leaves_the_first_one_regular() {
+        let regular = stamp_text(
+            &blank(),
+            "Total",
+            &TextStampOptions {
+                x: 40.0,
+                y: 100.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bold = stamp_text(
+            &regular,
+            "1 200,00",
+            &TextStampOptions {
+                x: 40.0,
+                y: 140.0,
+                font: FontChoice::Standard(StandardFont::HelveticaBold),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fonts_drawn_with(&bold), ["Helvetica", "Helvetica-Bold"]);
+    }
+
+    /// The same collision with an embedded font first: its two-byte glyph
+    /// codes, read through Helvetica, are no longer the text written.
+    #[test]
+    fn a_second_stamp_keeps_the_supplied_font_of_the_first() {
+        let supplied = stamp_text(
+            &blank(),
+            "Uměl Řehoř",
+            &TextStampOptions {
+                x: 40.0,
+                y: 100.0,
+                size: 20.0,
+                font: FontChoice::Supplied(crate::font::tests::TEST_FONT.to_vec()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let standard = stamp_text(
+            &supplied,
+            "PAID",
+            &TextStampOptions {
+                x: 40.0,
+                y: 160.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let text = extract_text(&standard, 0).unwrap();
+        assert!(text.contains("Uměl Řehoř"), "got: {text}");
+        assert!(text.contains("PAID"), "got: {text}");
     }
 
     #[test]

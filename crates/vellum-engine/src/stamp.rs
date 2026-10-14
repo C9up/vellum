@@ -303,35 +303,33 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
         // the top of the page; PDF wants the bottom edge, measured up.
         let bottom = page_height(&document, page_id) - options.y - height;
 
+        // Registered first: another stamp may already hold the base names on
+        // this page, and the content must use the names actually given.
+        let image_key =
+            register_resources(&mut document, page_id, "XObject", &[(IMAGE_KEY, image_id)])?
+                .remove(0);
         let mut content: Vec<u8> = Vec::new();
         content.extend_from_slice(b"q\n");
-        if state_id.is_some() {
-            content.extend_from_slice(format!("/{STATE_KEY} gs\n").as_bytes());
+        if let Some(state_id) = state_id {
+            let state_key = register_resources(
+                &mut document,
+                page_id,
+                "ExtGState",
+                &[(STATE_KEY, state_id)],
+            )?
+            .remove(0);
+            content.extend_from_slice(format!("/{state_key} gs\n").as_bytes());
         }
         // An image is drawn into the unit square, so the transform carries the
         // whole of its size and position.
         content.extend_from_slice(
             format!(
-                "{width} 0 0 {height} {} {bottom} cm\n/{IMAGE_KEY} Do\nQ\n",
+                "{width} 0 0 {height} {} {bottom} cm\n/{image_key} Do\nQ\n",
                 options.x
             )
             .as_bytes(),
         );
 
-        register_resources(
-            &mut document,
-            page_id,
-            "XObject",
-            &[(IMAGE_KEY.to_string(), image_id)],
-        )?;
-        if let Some(state_id) = state_id {
-            register_resources(
-                &mut document,
-                page_id,
-                "ExtGState",
-                &[(STATE_KEY.to_string(), state_id)],
-            )?;
-        }
         isolate_existing_contents(&mut document, page_id)?;
         document
             .add_page_contents(page_id, content)
@@ -494,6 +492,66 @@ mod tests {
             "got {}",
             sizes[1].width
         );
+    }
+
+    /// A second image used to take over the first one's resource name, so
+    /// both places on the page showed the second image.
+    #[test]
+    fn a_second_image_leaves_the_first_one_in_place() {
+        const BLUE: PremulRgba8 = PremulRgba8 {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let at = |x: f32, y: f32| StampOptions {
+            x,
+            y,
+            width: Some(100.0),
+            height: Some(100.0),
+            ..Default::default()
+        };
+        let red = stamp_image(
+            &create_blank(&[A4]).unwrap(),
+            &solid_png(10, 10, RED),
+            &at(50.0, 50.0),
+        )
+        .unwrap();
+        let both = stamp_image(&red, &solid_png(10, 10, BLUE), &at(300.0, 400.0)).unwrap();
+
+        let first = pixel_at(&both, 0, 100, 100);
+        assert!(is_red(first), "the first stamp stays red: {first:?}");
+        let second = pixel_at(&both, 0, 350, 450);
+        assert!(
+            second.b > 200 && second.r < 60,
+            "the second is blue: {second:?}"
+        );
+    }
+
+    /// Same collision on the graphics state: the first stamp took the second
+    /// one's opacity.
+    #[test]
+    fn a_second_opacity_leaves_the_first_one_alone() {
+        let at = |x: f32, opacity: f32| StampOptions {
+            x,
+            y: 50.0,
+            width: Some(100.0),
+            height: Some(100.0),
+            opacity,
+            ..Default::default()
+        };
+        let strong = stamp_image(
+            &create_blank(&[A4]).unwrap(),
+            &solid_png(10, 10, RED),
+            &at(50.0, 0.9),
+        )
+        .unwrap();
+        let both = stamp_image(&strong, &solid_png(10, 10, RED), &at(300.0, 0.2)).unwrap();
+
+        let first = pixel_at(&both, 0, 100, 100);
+        assert!(is_red(first), "the 90% stamp stays near solid: {first:?}");
+        let second = pixel_at(&both, 0, 350, 100);
+        assert!(!is_red(second), "the 20% stamp stays faint: {second:?}");
     }
 
     /// Opacity is what separates a watermark from a redaction.

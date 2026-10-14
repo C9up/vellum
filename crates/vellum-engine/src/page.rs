@@ -45,13 +45,19 @@ pub(crate) fn isolate_existing_contents(
 }
 
 /// Name objects in one category of a page's `Resources` — `Font`, `XObject`,
-/// `ExtGState` — so the page's content stream can refer to them.
+/// `ExtGState` — so the page's content stream can refer to them, and answer
+/// the names given, in order.
+///
+/// A name already taken on the page is never reused: `base`, then `base1`,
+/// `base2`… The content already on the page refers to the objects it was
+/// written against by name, so overwriting a name repaints that content with
+/// whatever was registered last — the second font, the second image.
 pub(crate) fn register_resources(
     document: &mut Document,
     page_id: ObjectId,
     category: &str,
-    entries: &[(String, ObjectId)],
-) -> Result<(), String> {
+    entries: &[(&str, ObjectId)],
+) -> Result<Vec<String>, String> {
     // Resources may be an inline dictionary or a reference to one; both are
     // legal, and the page may carry none at all.
     let existing = document
@@ -73,8 +79,11 @@ pub(crate) fn register_resources(
         Ok(Object::Dictionary(dictionary)) => dictionary.clone(),
         _ => Dictionary::new(),
     };
-    for (key, id) in entries {
-        group.set(key.as_str(), Object::Reference(*id));
+    let mut names = Vec::with_capacity(entries.len());
+    for (base, id) in entries {
+        let name = free_name(&group, base);
+        group.set(name.as_str(), Object::Reference(*id));
+        names.push(name);
     }
     resources.set(category, Object::Dictionary(group));
 
@@ -85,7 +94,23 @@ pub(crate) fn register_resources(
         .and_then(|object| object.as_dict_mut())
         .map_err(|error| format!("cannot update page: {error}"))?;
     page.set("Resources", Object::Dictionary(resources));
-    Ok(())
+    Ok(names)
+}
+
+/// `base` if no entry of `group` has that name, else the first free
+/// `base<n>`.
+fn free_name(group: &Dictionary, base: &str) -> String {
+    if !group.has(base.as_bytes()) {
+        return base.to_string();
+    }
+    let mut n: u32 = 1;
+    loop {
+        let candidate = format!("{base}{n}");
+        if !group.has(candidate.as_bytes()) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// The height of a page, needed to turn a top-down y into PDF's bottom-up one.
