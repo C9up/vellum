@@ -9,6 +9,7 @@
 pub mod drawing;
 pub mod fonts;
 pub mod graphics;
+pub mod links;
 pub mod ops;
 pub mod standard;
 pub mod text;
@@ -118,6 +119,7 @@ impl PageSetup {
 pub struct Page {
     pub setup: PageSetup,
     pub ops: Vec<Op>,
+    pub links: Vec<links::LinkRecord>,
 }
 
 impl Page {
@@ -276,6 +278,7 @@ pub struct Composer {
     /// What `save()` stacked, the latest on top.
     pub(crate) saved: Vec<GraphicsState>,
     pub(crate) paints: PaintBook,
+    pub(crate) destinations: Vec<links::NamedPoint>,
     /// The document's `lineGap(n)`.
     pub line_gap: f32,
     /// Word widths in thousandths of an em, by font.
@@ -310,6 +313,7 @@ impl Composer {
             state: GraphicsState::default(),
             saved: Vec::new(),
             paints: PaintBook::default(),
+            destinations: Vec::new(),
             line_gap: 0.0,
             width_cache: HashMap::new(),
             wrapper: None,
@@ -338,6 +342,7 @@ impl Composer {
         self.pages.push(Page {
             setup,
             ops: Vec::new(),
+            links: Vec::new(),
         });
         self.current = Some(self.pages.len() - 1);
         self.x = setup.margins.left;
@@ -501,15 +506,28 @@ impl Composer {
             configuration,
             ..SerializeSettings::default()
         };
+        let annotations = (0..self.pages.len())
+            .map(|index| self.annotations(index))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut document = krilla::Document::new_with(settings);
-        for page in &self.pages {
+        for (page, annotations) in self.pages.iter().zip(annotations) {
             let page_settings = PageSettings::from_wh(page.setup.width, page.setup.height)
                 .ok_or_else(|| invalid_options("page size out of range"))?;
             let mut writer = document.start_page_with(page_settings);
             let mut surface = writer.surface();
             ops::replay(&mut surface, &page.ops, &self.fonts, &self.paints);
             surface.finish();
+            for annotation in annotations {
+                writer.add_annotation(annotation);
+            }
             writer.finish();
+        }
+        for destination in self.named_destinations() {
+            document
+                .register_named_destination(destination)
+                .ok_or_else(|| {
+                    ComposeError::new("WRITE_FAILED", "a destination name is used twice")
+                })?;
         }
         document.set_metadata(self.metadata());
         let bytes = document

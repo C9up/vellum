@@ -73,6 +73,20 @@ export interface TextOptionsInput {
 	baseline?: string;
 	/** A numeric baseline, in points. */
 	baselineOffset?: number;
+	/** Degrees, counter-clockwise. */
+	rotation?: number;
+	/** The skew of a fake italic. */
+	oblique?: number;
+	fill?: boolean;
+	stroke?: boolean;
+	underline?: boolean;
+	strike?: boolean;
+	/** A URL to link the text to. */
+	link?: string;
+	/** A page to link the text to, from zero. */
+	linkPage?: number;
+	goTo?: string;
+	destination?: string;
 }
 
 /**
@@ -426,6 +440,20 @@ export declare class NativeDocument {
 		coords: Array<number>,
 		rule?: string | undefined | null,
 	): void;
+	/**
+	 * A link over a rectangle: to a URL, a page (from zero), or a named
+	 * destination.
+	 */
+	link(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		url?: string | undefined | null,
+		page?: number | undefined | null,
+		name?: string | undefined | null,
+	): void;
+	addNamedDestination(name: string, x: number, y: number): void;
 	/** Write the document. Nothing can be added afterwards. */
 	end(): Buffer;
 }

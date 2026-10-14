@@ -143,6 +143,19 @@ export interface TextOptions {
 	baseline?: TextBaseline;
 	/** Degrees, counter-clockwise on the page. */
 	rotation?: number;
+	/** A fake italic: `true` slants by 0.25, a number is the angle in degrees. */
+	oblique?: boolean | number;
+	/** With `stroke`, fill as well: pdfkit's render modes. */
+	fill?: boolean;
+	stroke?: boolean;
+	underline?: boolean;
+	strike?: boolean;
+	/** A URL (http, https, mailto, tel), or a page of this document from zero. */
+	link?: string | number;
+	/** A named destination to link to. */
+	goTo?: string;
+	/** Name where each line starts as a destination. */
+	destination?: string;
 }
 
 export interface WidthOptions {
@@ -737,6 +750,21 @@ export class PdfDocument extends Readable {
 					options.features === undefined ? undefined : [...options.features],
 				baseline: typeof baseline === "string" ? baseline : undefined,
 				baselineOffset: typeof baseline === "number" ? baseline : undefined,
+				rotation: normalizeRotation(options.rotation),
+				oblique:
+					options.oblique === true
+						? -0.25
+						: typeof options.oblique === "number"
+							? -Math.tan((options.oblique * Math.PI) / 180)
+							: undefined,
+				fill: options.fill,
+				stroke: options.stroke,
+				underline: options.underline,
+				strike: options.strike,
+				link: typeof options.link === "string" ? options.link : undefined,
+				linkPage: typeof options.link === "number" ? options.link : undefined,
+				goTo: options.goTo,
+				destination: options.destination,
 			},
 		};
 	}
@@ -1085,6 +1113,53 @@ export class PdfDocument extends Readable {
 		const cmyk = [c, m, y, k].map((part) => (part * 255) / 100);
 		const handle = compose(() => this.#native.addSpotColour(name, cmyk));
 		this.#spots.set(name, handle);
+		return this;
+	}
+
+	/**
+	 * A link over a rectangle, to a URL or to a page of this document
+	 * (from zero). Only http, https, mailto and tel URLs are written: pdfkit
+	 * writes any, `javascript:` and `file:` included.
+	 */
+	link(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		target: string | number,
+	): this {
+		compose(() =>
+			typeof target === "number"
+				? this.#native.link(x, y, width, height, undefined, target, undefined)
+				: this.#native.link(x, y, width, height, target, undefined, undefined),
+		);
+		return this;
+	}
+
+	/** A link over a rectangle to a named destination. */
+	goTo(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		name: string,
+	): this {
+		compose(() =>
+			this.#native.link(x, y, width, height, undefined, undefined, name),
+		);
+		return this;
+	}
+
+	/**
+	 * Name a place on the current page, for `goTo`. `XYZ` (the default) at
+	 * `left`, `top`; without them, the page's top-left corner.
+	 */
+	addNamedDestination(
+		name: string,
+		...position: [fit?: "XYZ", left?: number | null, top?: number | null]
+	): this {
+		const [, left, top] = position;
+		compose(() => this.#native.addNamedDestination(name, left ?? 0, top ?? 0));
 		return this;
 	}
 

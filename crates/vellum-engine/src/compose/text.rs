@@ -26,7 +26,9 @@ use unicode_linebreak::{linebreaks, BreakOpportunity};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::fonts::{parse_features, LoadedFont, Shaped};
-use super::ops::{FillSpec, Op, PlacedGlyph};
+use super::graphics::{concat, Matrix, Segment};
+use super::links::LinkTarget;
+use super::ops::{FillSpec, Op, PlacedGlyph, StrokeSpec};
 use super::{ComposeError, Composer};
 use krilla::paint::FillRule;
 
@@ -84,6 +86,20 @@ pub struct TextOptions {
     pub horizontal_scaling: f32,
     pub features: Option<Vec<String>>,
     pub baseline: Baseline,
+    /// Degrees, counter-clockwise on the page, about where the text starts.
+    pub rotation: f32,
+    /// The skew of a fake italic: pdfkit's `-tan(angle)`, or -0.25.
+    pub oblique: Option<f32>,
+    /// pdfkit's text render modes: fill (the default), stroke, or both.
+    pub fill: bool,
+    pub stroke: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub link: Option<super::links::LinkTarget>,
+    /// A link to a named destination.
+    pub go_to: Option<String>,
+    /// Name the place each line starts as a destination.
+    pub destination: Option<String>,
 }
 
 /// Whether a run of text finished or needs a page to go on.
@@ -204,6 +220,9 @@ pub(crate) struct TextRun {
     needs_page: bool,
     /// The widest line so far, for [`Sink::Bounds`].
     content_width: f32,
+    /// The rotation the text is drawn under, about where it started; gone
+    /// after a page break, as pdfkit's transform is.
+    rotation: Option<Matrix>,
     /// Set when suspended.
     resume: Option<Resume>,
     /// State a suspended word callback needs to finish.
@@ -427,6 +446,8 @@ impl Composer {
             last_text_width: 0.0,
             needs_page: false,
             content_width: 0.0,
+            rotation: (options.rotation != 0.0)
+                .then(|| rotation_about(-options.rotation, self.x, self.y)),
             resume: None,
             pending: None,
             started: false,
@@ -994,6 +1015,7 @@ impl Composer {
     /// What pdfkit does once `continueOnNewPage` has added the page.
     fn after_page_break(&mut self, run: &mut TextRun) {
         run.needs_page = false;
+        run.rotation = None;
         let Ok(page) = self.page() else {
             return;
         };
@@ -1092,31 +1114,118 @@ impl Composer {
         let font_index = self
             .font
             .ok_or_else(|| ComposeError::new("NO_FONT", "no font is selected"))?;
+        let line_height = self.current_line_height(false)?;
         let state = self.state.clone();
+        // pdfkit: the text's rotation outside, then the oblique skew about
+        // the line's start, then the horizontal scaling from it.
+        let outer = run
+            .rotation
+            .map_or(state.ctm, |rotation| concat(state.ctm, rotation));
+        let mut glyph_ctm = outer;
+        if let Some(skew) = options.oblique {
+            glyph_ctm = concat(glyph_ctm, [1.0, 0.0, 0.0, 1.0, x, y]);
+            glyph_ctm = concat(glyph_ctm, [1.0, 0.0, skew, 1.0, -skew * dy, 0.0]);
+            glyph_ctm = concat(glyph_ctm, [1.0, 0.0, 0.0, 1.0, -x, -y]);
+        }
+        let scale = scaling / 100.0;
+        if scale != 1.0 {
+            glyph_ctm = concat(glyph_ctm, [scale, 0.0, 0.0, 1.0, x * (1.0 - scale), 0.0]);
+        }
+        let fill = (!options.stroke || options.fill).then_some(FillSpec {
+            paint: state.fill,
+            opacity: state.fill_opacity,
+            rule: FillRule::NonZero,
+        });
+        let stroke = options.stroke.then(|| StrokeSpec {
+            paint: state.stroke,
+            opacity: state.stroke_opacity,
+            style: state.stroke_style.clone(),
+        });
+
+        let visible_end = text.trim_end().len();
         let mut pen = x;
-        let mut ops = Vec::with_capacity(glyph_runs.len());
+        let mut drawn = 0.0;
+        let mut ops = Vec::with_capacity(glyph_runs.len() + 2);
         for glyphs in glyph_runs {
             let advance: f32 =
                 glyphs.iter().map(|glyph| glyph.advance).sum::<f32>() / 1000.0 * size;
+            drawn += glyphs
+                .iter()
+                .filter(|glyph| glyph.text_start < visible_end)
+                .map(|glyph| glyph.advance)
+                .sum::<f32>()
+                / 1000.0
+                * size;
             ops.push(Op::Glyphs {
                 font: font_index,
                 size,
                 origin: (pen, y + dy),
                 text: text.clone(),
                 glyphs,
-                fill: Some(FillSpec {
-                    paint: state.fill,
-                    opacity: state.fill_opacity,
-                    rule: FillRule::NonZero,
-                }),
-                stroke: None,
-                ctm: state.ctm,
+                fill: fill.clone(),
+                stroke: stroke.clone(),
+                ctm: glyph_ctm,
                 clips: state.clips.clone(),
             });
             pen += advance;
         }
+        // What is drawn, spaces at the end of the line left out — pdfkit
+        // underlines and links them too.
+        let width = drawn * scale;
+
+        // Decorations, in the fill colour unless the text is stroked.
+        let decoration = |line_y: f32, thickness: f32| Op::Path {
+            segments: vec![Segment::Move(x, line_y), Segment::Line(x + width, line_y)].into(),
+            fill: None,
+            stroke: Some(StrokeSpec {
+                paint: if options.stroke {
+                    state.stroke
+                } else {
+                    state.fill
+                },
+                opacity: if options.stroke {
+                    state.stroke_opacity
+                } else {
+                    state.fill_opacity
+                },
+                style: super::graphics::StrokeStyle {
+                    width: thickness,
+                    ..state.stroke_style.clone()
+                },
+            }),
+            ctm: outer,
+            clips: state.clips.clone(),
+        };
+        let thickness = if size < 10.0 {
+            0.5
+        } else {
+            (size / 10.0).floor()
+        };
+        if options.underline {
+            ops.push(decoration(y + line_height - thickness, thickness));
+        }
+        if options.strike {
+            ops.push(decoration(y + line_height / 2.0, thickness));
+        }
         self.page_mut()?.ops.extend(ops);
-        Ok(())
+
+        // Links and destinations are placed under the text's rotation.
+        let saved = self.state.ctm;
+        self.state.ctm = outer;
+        let placed = (|| {
+            if let Some(target) = &options.link {
+                self.link(x, y, width, line_height, target.clone())?;
+            }
+            if let Some(name) = &options.go_to {
+                self.link(x, y, width, line_height, LinkTarget::Named(name.clone()))?;
+            }
+            if let Some(name) = &options.destination {
+                self.add_named_destination(name, x, y)?;
+            }
+            Ok(())
+        })();
+        self.state.ctm = saved;
+        placed
     }
 
     /// The glyphs of one line, one list per visual run, with word and
@@ -1180,6 +1289,15 @@ impl Composer {
         }
         Ok(out)
     }
+}
+
+/// pdfkit's `rotate(angle, { origin: [x, y] })`, in degrees.
+fn rotation_about(angle: f32, x: f32, y: f32) -> Matrix {
+    let radians = angle.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let dx = x - (x * cos - y * sin);
+    let dy = y - (x * sin + y * cos);
+    [cos, sin, -sin, cos, dx, dy]
 }
 
 /// The pieces a run of a line is shaped in, in visual order, with their
@@ -1702,6 +1820,250 @@ mod tests {
         document.move_down(2.0).unwrap();
         text(&mut document, "B", None, defaults());
         assert_layout("move_down", &document);
+    }
+
+    #[test]
+    fn character_and_word_spacing_and_scaling_break_where_pdfkit_does() {
+        for (name, options) in [
+            (
+                "character_spacing",
+                TextOptions {
+                    character_spacing: Some(1.0),
+                    ..defaults()
+                },
+            ),
+            (
+                "word_spacing",
+                TextOptions {
+                    word_spacing: Some(3.0),
+                    ..defaults()
+                },
+            ),
+            (
+                "horizontal_scaling",
+                TextOptions {
+                    horizontal_scaling: 80.0,
+                    ..defaults()
+                },
+            ),
+        ] {
+            let mut document = document();
+            document.set_font_size(11.0).unwrap();
+            text(
+                &mut document,
+                FR,
+                Some((72.0, 72.0)),
+                TextOptions {
+                    width: Some(300.0),
+                    ..options
+                },
+            );
+            assert_layout(name, &document);
+        }
+    }
+
+    fn glyph_ctms(document: &Composer) -> Vec<Matrix> {
+        document.pages[0]
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Glyphs { ctm, .. } => Some(*ctm),
+                Op::Path { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rotation_oblique_and_scaling_transform_the_glyphs() {
+        let mut document = document();
+        text(
+            &mut document,
+            "Tourné",
+            Some((100.0, 100.0)),
+            TextOptions {
+                rotation: 90.0,
+                ..defaults()
+            },
+        );
+        let [a, b, c, d, e, f] = glyph_ctms(&document)[0];
+        // 90° counter-clockwise on the page, about (100, 100).
+        assert!((a.abs() + d.abs()) < 1e-5 && (b + 1.0).abs() < 1e-5 && (c - 1.0).abs() < 1e-5);
+        assert!((a * 100.0 + c * 100.0 + e - 100.0).abs() < 1e-3);
+        assert!((b * 100.0 + d * 100.0 + f - 100.0).abs() < 1e-3);
+
+        let mut document = self::document();
+        text(
+            &mut document,
+            "Penché",
+            Some((72.0, 72.0)),
+            TextOptions {
+                oblique: Some(-0.25),
+                horizontal_scaling: 50.0,
+                ..defaults()
+            },
+        );
+        let [a, _, c, _, _, _] = glyph_ctms(&document)[0];
+        assert!((a - 0.5).abs() < 1e-6, "scaled horizontally: {a}");
+        assert!((c + 0.25).abs() < 1e-6, "and skewed: {c}");
+    }
+
+    #[test]
+    fn stroked_text_and_decorations() {
+        let mut document = document();
+        document.set_font_size(20.0).unwrap();
+        text(
+            &mut document,
+            "Souligné ",
+            Some((72.0, 72.0)),
+            TextOptions {
+                stroke: true,
+                underline: true,
+                strike: true,
+                ..defaults()
+            },
+        );
+        let line_height = document.current_line_height(false).unwrap();
+        let visible = document
+            .width_of_string("Souligné", 0.0, 100.0, &[])
+            .unwrap();
+        let ops = &document.pages[0].ops;
+        let Some(Op::Glyphs { fill, stroke, .. }) = ops.first() else {
+            panic!("the text is drawn");
+        };
+        assert!(
+            fill.is_none() && stroke.is_some(),
+            "stroke only, as pdfkit's mode 1"
+        );
+        let lines: Vec<&[Segment]> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Path { segments, .. } => Some(&segments[..]),
+                Op::Glyphs { .. } => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 2, "an underline and a strike-through");
+        let [Segment::Move(x0, y0), Segment::Line(x1, _)] = lines[0] else {
+            panic!("a straight line");
+        };
+        // pdfkit: 2 points thick at 20 points, under the line box.
+        assert!((y0 - (72.0 + line_height - 2.0)).abs() < 1e-3);
+        assert_eq!(*x0, 72.0);
+        assert!(
+            (x1 - 72.0 - visible).abs() < 0.01,
+            "the trailing space is not underlined"
+        );
+        let [Segment::Move(_, strike), _] = lines[1] else {
+            panic!("a straight line");
+        };
+        assert!((strike - (72.0 + line_height / 2.0)).abs() < 1e-3);
+    }
+
+    /// hayro hands filled-and-stroked text over twice, a fill then a
+    /// stroke; it used to read back with every letter doubled.
+    #[test]
+    fn filled_and_stroked_text_reads_back_once() {
+        let mut document = document();
+        text(
+            &mut document,
+            "Contour",
+            Some((72.0, 72.0)),
+            TextOptions {
+                fill: true,
+                stroke: true,
+                ..defaults()
+            },
+        );
+        let bytes = document.end().unwrap();
+        assert_eq!(crate::extract_text(&bytes, 0).unwrap(), "Contour");
+    }
+
+    #[test]
+    fn links_and_destinations_are_written() {
+        let mut document = document();
+        text(
+            &mut document,
+            "Site",
+            Some((72.0, 72.0)),
+            TextOptions {
+                link: Some(LinkTarget::Uri("https://c9up.dev".into())),
+                ..defaults()
+            },
+        );
+        text(
+            &mut document,
+            "Vers les conditions",
+            Some((72.0, 100.0)),
+            TextOptions {
+                go_to: Some("conditions".into()),
+                ..defaults()
+            },
+        );
+        document.add_page(A4).unwrap();
+        text(
+            &mut document,
+            "Conditions",
+            Some((72.0, 72.0)),
+            TextOptions {
+                destination: Some("conditions".into()),
+                link: Some(LinkTarget::Page(0)),
+                ..defaults()
+            },
+        );
+        let bytes = document.end().unwrap();
+        let parsed = lopdf::Document::load_mem(&bytes).unwrap();
+        let first = *parsed.get_pages().get(&1).unwrap();
+        let annotations = parsed.get_page_annotations(first).unwrap();
+        assert_eq!(annotations.len(), 2);
+        let uri = annotations.iter().find_map(|annotation| {
+            let action = annotation.get(b"A").ok()?;
+            let action = match action {
+                lopdf::Object::Reference(id) => parsed.get_dictionary(*id).ok()?,
+                lopdf::Object::Dictionary(dictionary) => dictionary,
+                _ => return None,
+            };
+            action.get(b"URI").ok()?.as_str().ok().map(<[u8]>::to_vec)
+        });
+        assert_eq!(uri.as_deref(), Some(&b"https://c9up.dev"[..]));
+        let names = parsed.catalog().unwrap().get(b"Names").is_ok();
+        assert!(names, "the destination is in the name tree");
+    }
+
+    #[test]
+    fn a_link_must_go_somewhere_that_exists() {
+        let mut document = document();
+        text(
+            &mut document,
+            "Nulle part",
+            None,
+            TextOptions {
+                go_to: Some("missing".into()),
+                ..defaults()
+            },
+        );
+        assert_eq!(document.end().unwrap_err().code, "INVALID_LINK");
+
+        let mut document = self::document();
+        text(
+            &mut document,
+            "Page 9",
+            None,
+            TextOptions {
+                link: Some(LinkTarget::Page(9)),
+                ..defaults()
+            },
+        );
+        assert_eq!(document.end().unwrap_err().code, "INVALID_LINK");
+
+        let mut document = self::document();
+        let refused = document.text(
+            "Clique",
+            &TextOptions {
+                width: Some(200.0),
+                link: Some(LinkTarget::Uri("javascript:alert(1)".into())),
+                ..defaults()
+            },
+        );
+        assert_eq!(refused.unwrap_err().code, "INVALID_LINK");
     }
 
     #[test]

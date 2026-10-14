@@ -288,3 +288,76 @@ describe("PdfDocument — the rest of the vector surface", () => {
 		expect(near(image.at(100, 100), WHITE)).toBe(true);
 	});
 });
+
+describe("PdfDocument — text decorations, transforms and links", () => {
+	it("underlines and strikes through in the fill colour", async () => {
+		const doc = page();
+		doc
+			.fillColor("red")
+			.fontSize(20)
+			.text("Souligné", 10, 10, { underline: true, strike: true });
+		const lineHeight = doc.currentLineHeight();
+		const image = await pixels(doc);
+		// Centred on y + line height − thickness: 2 points at 20.
+		const underline = Math.floor(10 + lineHeight - 2);
+		expect(near(image.at(30, underline), RED)).toBe(true);
+	});
+
+	it("draws text rotated, oblique, stroked and scaled", async () => {
+		const doc = page();
+		doc.fontSize(16).text("Tourné", 100, 100, { rotation: 90 });
+		doc.text("Penché", 10, 10, { oblique: true });
+		doc.text("Penché aussi", 10, 40, { oblique: 20, horizontalScaling: 80 });
+		doc.lineWidth(0.5).text("Contour", 10, 160, { stroke: true, fill: true });
+		const bytes = toBytes(doc);
+		doc.end();
+		const text = await vellum.extractText(Buffer.from(await bytes));
+		// Vertical text reads back a letter per line.
+		const letters = text.replace(/\s+/g, "");
+		for (const word of ["Tourné", "Penché", "Contour"])
+			expect(letters).toContain(word);
+	});
+
+	it("links text and rectangles to URLs, pages and destinations", async () => {
+		const doc = new PdfDocument({ compress: false });
+		doc.text("Site", { link: "https://c9up.dev" });
+		doc.text("Plus loin", { goTo: "fin" });
+		doc.link(72, 300, 100, 20, "mailto:hello@example.com");
+		doc.addPage();
+		doc.text("Fin", { destination: "fin", link: 0 });
+		doc.goTo(72, 200, 100, 20, "fin");
+		doc.addNamedDestination("haut");
+		doc.addNamedDestination("bas", "XYZ", 72, 700);
+		const bytes = Buffer.from(
+			await (async () => {
+				const done = toBytes(doc);
+				doc.end();
+				return done;
+			})(),
+		);
+		expect(bytes.includes(Buffer.from("https://c9up.dev"))).toBe(true);
+		expect(bytes.includes(Buffer.from("mailto:hello@example.com"))).toBe(true);
+		expect(bytes.includes(Buffer.from("/Dests"))).toBe(true);
+	});
+
+	it("refuses a link that would run code or open files", () => {
+		const doc = page();
+		for (const target of ["javascript:alert(1)", "file:///etc/passwd"]) {
+			expect(() => doc.link(0, 0, 10, 10, target)).toThrow(
+				expect.objectContaining({ code: "E_VELLUM_INVALID_LINK" }),
+			);
+			expect(() => doc.text("x", { link: target })).toThrow(VellumError);
+		}
+	});
+
+	it("refuses a link to a page or a destination that never exists", () => {
+		const doc = page();
+		doc.link(0, 0, 10, 10, 5);
+		expect(() => doc.end()).toThrow(
+			expect.objectContaining({ code: "E_VELLUM_INVALID_LINK" }),
+		);
+		const other = page();
+		other.goTo(0, 0, 10, 10, "nowhere");
+		expect(() => other.end()).toThrow(VellumError);
+	});
+});

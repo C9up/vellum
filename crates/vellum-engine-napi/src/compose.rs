@@ -12,6 +12,7 @@ use vellum_engine::compose::graphics::{
     Colour, FillRule, Gradient, GradientShape, GradientStop, LineCap, LineJoin, Matrix, Paint,
     Segment,
 };
+use vellum_engine::compose::links::LinkTarget;
 use vellum_engine::compose::text::{Align, Baseline, Step, TextOptions};
 use vellum_engine::compose::{
     ComposeError, Composer, DocumentSettings, Info, Instant, PageSetup, Sides,
@@ -89,6 +90,20 @@ pub struct TextOptionsInput {
     pub baseline: Option<String>,
     /// A numeric baseline, in points.
     pub baseline_offset: Option<f64>,
+    /// Degrees, counter-clockwise.
+    pub rotation: Option<f64>,
+    /// The skew of a fake italic.
+    pub oblique: Option<f64>,
+    pub fill: Option<bool>,
+    pub stroke: Option<bool>,
+    pub underline: Option<bool>,
+    pub strike: Option<bool>,
+    /// A URL to link the text to.
+    pub link: Option<String>,
+    /// A page to link the text to, from zero.
+    pub link_page: Option<u32>,
+    pub go_to: Option<String>,
+    pub destination: Option<String>,
 }
 
 fn failure(error: ComposeError) -> Error {
@@ -201,6 +216,19 @@ impl TryFrom<TextOptionsInput> for TextOptions {
             horizontal_scaling,
             features: input.features,
             baseline: baseline(input.baseline.as_deref(), input.baseline_offset)?,
+            rotation: optional(input.rotation, "rotation")?.unwrap_or(0.0),
+            oblique: optional(input.oblique, "oblique")?,
+            fill: input.fill.unwrap_or(false),
+            stroke: input.stroke.unwrap_or(false),
+            underline: input.underline.unwrap_or(false),
+            strike: input.strike.unwrap_or(false),
+            link: match (input.link, input.link_page) {
+                (Some(uri), _) => Some(LinkTarget::Uri(uri)),
+                (None, Some(page)) => Some(LinkTarget::Page(page as usize)),
+                (None, None) => None,
+            },
+            go_to: input.go_to,
+            destination: input.destination,
         })
     }
 }
@@ -679,6 +707,37 @@ impl NativeDocument {
         let path = segments(&verbs, &coords)?;
         let rule = fill_rule(rule.as_deref())?;
         self.with(|document| document.clip(&path, rule).map_err(failure))
+    }
+
+    /// A link over a rectangle: to a URL, a page (from zero), or a named
+    /// destination.
+    #[napi]
+    #[allow(clippy::too_many_arguments)]
+    pub fn link(
+        &mut self,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        url: Option<String>,
+        page: Option<u32>,
+        name: Option<String>,
+    ) -> Result<()> {
+        let target = match (url, page, name) {
+            (Some(url), None, None) => LinkTarget::Uri(url),
+            (None, Some(page), None) => LinkTarget::Page(page as usize),
+            (None, None, Some(name)) => LinkTarget::Named(name),
+            _ => return Err(options_error("a link goes to one URL, page or destination")),
+        };
+        let (x, y) = (finite(x, "x")?, finite(y, "y")?);
+        let (width, height) = (finite(width, "width")?, finite(height, "height")?);
+        self.with(|document| document.link(x, y, width, height, target).map_err(failure))
+    }
+
+    #[napi]
+    pub fn add_named_destination(&mut self, name: String, x: f64, y: f64) -> Result<()> {
+        let (x, y) = (finite(x, "x")?, finite(y, "y")?);
+        self.with(|document| document.add_named_destination(&name, x, y).map_err(failure))
     }
 
     /// Write the document. Nothing can be added afterwards.

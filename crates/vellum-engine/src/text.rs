@@ -34,6 +34,9 @@ const LINE_TOLERANCE: f64 = 3.0;
 struct TextCollector {
     /// Baseline y and text, in the order the content stream emits them.
     glyphs: Vec<(f64, String)>,
+    /// The last glyph filled, with its position: text drawn filled and
+    /// stroked (render mode 2) comes through twice, a fill then a stroke.
+    last_filled: Option<(f64, f64, String)>,
 }
 
 impl TextCollector {
@@ -95,7 +98,7 @@ impl<'a> Device<'a> for TextCollector {
         transform: Affine,
         glyph_transform: Affine,
         _paint: &Paint<'a>,
-        _draw_mode: &GlyphDrawMode,
+        draw_mode: &GlyphDrawMode,
     ) {
         // A glyph with no unicode mapping cannot be turned into text: the font
         // has neither a /ToUnicode map nor a recognisable encoding. Skipped
@@ -108,13 +111,26 @@ impl<'a> Device<'a> for TextCollector {
         // renderer fills a glyph at `transform * glyph_transform`. Reading
         // `transform` alone gives the text-object origin, identical for every
         // line, so every baseline change went undetected.
-        self.glyphs.push((
-            (transform * glyph_transform).translation().y,
-            match text {
-                BfString::Char(character) => character.to_string(),
-                BfString::String(string) => string,
-            },
-        ));
+        let position = (transform * glyph_transform).translation();
+        let text = match text {
+            BfString::Char(character) => character.to_string(),
+            BfString::String(string) => string,
+        };
+        match draw_mode {
+            GlyphDrawMode::Fill => {
+                self.last_filled = Some((position.x, position.y, text.clone()));
+            }
+            GlyphDrawMode::Stroke(_) => {
+                let repeat = self.last_filled.take().is_some_and(|(x, y, filled)| {
+                    x == position.x && y == position.y && filled == text
+                });
+                if repeat {
+                    return;
+                }
+            }
+            GlyphDrawMode::Invisible => self.last_filled = None,
+        }
+        self.glyphs.push((position.y, text));
     }
 
     fn set_soft_mask(&mut self, _mask: Option<SoftMask<'a>>) {}
