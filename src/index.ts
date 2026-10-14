@@ -17,6 +17,22 @@
 import "./augmentations.js";
 
 export { defineConfig } from "./config.js";
+export type { FileSource } from "./document/files.js";
+export { registerFile } from "./document/files.js";
+export type {
+	DocumentInfo as PdfDocumentInfo,
+	FontSource,
+	PageLayout,
+	PageOptions as PdfPageOptions,
+	PdfDocumentOptions,
+	TextAlign,
+	TextBaseline,
+	TextOptions,
+	WidthOptions,
+} from "./document/PdfDocument.js";
+export { PdfDocument, PdfPage, toBytes } from "./document/PdfDocument.js";
+export type { PageSizeName, SideDefinition, Size } from "./document/sizes.js";
+export { PAGE_SIZES } from "./document/sizes.js";
 export { VellumError } from "./errors.js";
 export type {
 	DocumentInfo,

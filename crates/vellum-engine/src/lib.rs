@@ -11,6 +11,7 @@
 use krilla::geom::Size;
 use krilla::page::PageSettings;
 mod cms;
+pub mod compose;
 mod edit;
 mod fill;
 mod flatten;

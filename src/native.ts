@@ -11,7 +11,9 @@ import { VellumError } from "./errors.js";
 import type {
 	DocumentInfo,
 	DocumentMetadata,
+	DocumentSettingsInput,
 	FormField,
+	NativeDocument,
 	SignatureOptions as NativeSignatureOptions,
 	StampOptions as NativeStampOptions,
 	TextStampOptions as NativeTextStampOptions,
@@ -333,4 +335,46 @@ export function readRevocationNative(
 	return run("VERIFY_FAILED", (loaded) =>
 		loaded.readRevocation(response, certificate, issuer, at ?? undefined),
 	);
+}
+
+export type {
+	DocumentSettingsInput,
+	NativeDocument,
+	PageSetupInput,
+	TextOptionsInput,
+} from "./native/generated.js";
+
+/**
+ * Turn a document failure into a coded error. The engine reports them as
+ * `CODE: reason`.
+ */
+function composeFailure(error: unknown): VellumError {
+	if (error instanceof VellumError) return error;
+	const message = error instanceof Error ? error.message : String(error);
+	const match = /^([A-Z][A-Z0-9_]*): ([\s\S]*)$/.exec(message);
+	const code = match?.[1];
+	const reason = match?.[2];
+	return code !== undefined && reason !== undefined
+		? new VellumError(code, reason, { cause: error })
+		: new VellumError("WRITE_FAILED", message, { cause: error });
+}
+
+/** Run a call on a document being authored, with its failures coded. */
+export function compose<T>(work: () => T): T {
+	try {
+		return work();
+	} catch (error) {
+		throw composeFailure(error);
+	}
+}
+
+export function createDocumentNative(
+	settings: DocumentSettingsInput,
+): NativeDocument {
+	const loaded = engine();
+	return compose(() => new loaded.NativeDocument(settings));
+}
+
+export function standardFontFileNative(name: string): string | null {
+	return engine().standardFontFile(name);
 }

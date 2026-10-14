@@ -45,19 +45,47 @@ impl TextCollector {
     /// invented either — a PDF encodes its own, and guessing from gaps
     /// duplicates them.
     fn into_text(self) -> String {
-        let mut out = String::new();
+        let mut lines: Vec<String> = Vec::new();
         let mut previous_y: Option<f64> = None;
 
         for (y, text) in self.glyphs {
-            if previous_y.is_some_and(|previous| (y - previous).abs() > LINE_TOLERANCE) {
-                out.push('\n');
+            let new_line = previous_y.is_none_or(|previous| (y - previous).abs() > LINE_TOLERANCE);
+            match lines.last_mut() {
+                Some(line) if !new_line => line.push_str(&text),
+                _ => lines.push(text),
             }
-            out.push_str(&text);
             previous_y = Some(y);
         }
 
-        out.trim().to_string()
+        lines
+            .iter()
+            .map(|line| logical_order(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
     }
+}
+
+/// A line drawn right to left comes out of the content stream in the order
+/// it was painted, left to right. Running the bidirectional algorithm over
+/// it again puts it back in reading order — the reordering undoes itself —
+/// as poppler does.
+fn logical_order(line: &str) -> String {
+    let rtl = line.chars().any(|character| {
+        matches!(
+            unicode_bidi::bidi_class(character),
+            unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL
+        )
+    });
+    if !rtl {
+        return line.to_string();
+    }
+    let info = unicode_bidi::BidiInfo::new(line, None);
+    info.paragraphs
+        .iter()
+        .map(|paragraph| info.reorder_line(paragraph, paragraph.range.clone()))
+        .collect()
 }
 
 impl<'a> Device<'a> for TextCollector {

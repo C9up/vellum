@@ -9,6 +9,7 @@
     "LICENSE",
     "README.md",
     "dist",
+    "fonts",
     "stubs",
     "index.*.node",
     "scripts",

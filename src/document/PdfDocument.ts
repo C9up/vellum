@@ -1,0 +1,614 @@
+/**
+ * Authoring a PDF from nothing, with pdfkit's API.
+ *
+ * ```ts
+ * import { PdfDocument } from '@c9up/vellum'
+ *
+ * const doc = new PdfDocument({ size: 'A4' })
+ * doc.pipe(createWriteStream('quote.pdf'))
+ * doc.font('Helvetica-Bold').fontSize(18).text('Quote 2026-041')
+ * doc.moveDown().font('Helvetica').fontSize(11).text(terms, { align: 'justify' })
+ * doc.end()
+ * ```
+ *
+ * The shape is pdfkit 0.20's: the same methods and options, a cursor
+ * (`x`, `y`) that drawing moves, `pageAdded`, `bufferPages` with
+ * `switchToPage`, a readable stream of the bytes. Layout and writing happen
+ * in Rust. Where vellum differs, the difference is named where it happens.
+ */
+
+import { Readable } from "node:stream";
+import { VellumError } from "../errors.js";
+import {
+	compose,
+	createDocumentNative,
+	type NativeDocument,
+	standardFontFileNative,
+	type TextOptionsInput,
+} from "../native.js";
+import { type FileSource, readSource, standardFontBytes } from "./files.js";
+import {
+	normalizeSides,
+	pageDimensions,
+	type SideDefinition,
+	type Sides,
+	type Size,
+	sizeToPoint,
+} from "./sizes.js";
+
+/** A font: a standard name, a name given to {@link PdfDocument.registerFont}, a path, or the file's bytes. */
+export type FontSource = FileSource;
+
+export interface PageOptions {
+	/** A name from `PAGE_SIZES` (any case) or `[width, height]` in points. Default `letter`. */
+	size?: string | readonly [number, number];
+	layout?: "portrait" | "landscape";
+	margin?: SideDefinition<Size>;
+	margins?: SideDefinition<Size>;
+	userUnit?: number;
+	font?: FontSource;
+	fontFamily?: string;
+	fontSize?: Size;
+}
+
+export interface DocumentInfo {
+	Title?: string;
+	Author?: string;
+	Subject?: string;
+	Keywords?: string;
+	Creator?: string;
+	Producer?: string;
+	CreationDate?: Date;
+	ModDate?: Date;
+	[key: string]: string | Date | undefined;
+}
+
+export type PageLayout =
+	| "singlePage"
+	| "oneColumn"
+	| "twoColumnLeft"
+	| "twoColumnRight"
+	| "twoPageLeft"
+	| "twoPageRight";
+
+export interface PdfDocumentOptions
+	extends Omit<PageOptions, "fontFamily" | "fontSize"> {
+	/**
+	 * Default `1.7`. pdfkit's `1.3` (its default) and `1.7ext3` are not
+	 * written: the engine writes 1.4 to 2.0.
+	 */
+	pdfVersion?: "1.4" | "1.5" | "1.6" | "1.7" | "2.0";
+	compress?: boolean;
+	autoFirstPage?: boolean;
+	bufferPages?: boolean;
+	info?: DocumentInfo;
+	lang?: string;
+	displayTitle?: boolean;
+	pageLayout?: PageLayout;
+}
+
+export type TextAlign = "left" | "center" | "right" | "justify";
+
+export type TextBaseline =
+	| number
+	| "svg-middle"
+	| "middle"
+	| "svg-central"
+	| "bottom"
+	| "ideographic"
+	| "alphabetic"
+	| "mathematical"
+	| "hanging"
+	| "top";
+
+export interface TextOptions {
+	/** Wrap width. Default: to the right margin. */
+	width?: number;
+	/** Where the text stops: no page break past it. */
+	height?: number;
+	/** `false` draws each line as given, moving `x` along. */
+	lineBreak?: boolean;
+	/**
+	 * Default: left for a left-to-right paragraph, right for a right-to-left
+	 * one. pdfkit has no direction, so its default is always left.
+	 */
+	align?: TextAlign;
+	lineGap?: number;
+	paragraphGap?: number;
+	indent?: number;
+	indentAllLines?: boolean;
+	columns?: number;
+	columnGap?: number;
+	ellipsis?: boolean | string;
+	continued?: boolean;
+	characterSpacing?: number;
+	wordSpacing?: number;
+	horizontalScaling?: number;
+	features?: readonly string[];
+	baseline?: TextBaseline;
+}
+
+export interface WidthOptions {
+	characterSpacing?: number;
+	horizontalScaling?: number;
+	features?: readonly string[];
+}
+
+/** A page of the document: its size and margins, in points. */
+export class PdfPage {
+	readonly width: number;
+	readonly height: number;
+	readonly size: string | readonly [number, number];
+	readonly layout: "portrait" | "landscape";
+	/**
+	 * Settable, as in pdfkit: a footer is commonly written by setting
+	 * `margins.bottom` to 0 for a moment.
+	 */
+	readonly margins: Sides<number>;
+	readonly userUnit: number;
+	/** The options the page was added with, as `continueOnNewPage` reuses them. */
+	readonly options: PageOptions;
+
+	constructor(
+		dimensions: readonly [number, number],
+		margins: Sides<number>,
+		options: PageOptions,
+		sync: (margins: Sides<number>) => void,
+	) {
+		[this.width, this.height] = dimensions;
+		this.size = options.size ?? "letter";
+		this.layout = options.layout ?? "portrait";
+		const values = { ...margins };
+		const live: Sides<number> = { ...margins };
+		for (const side of SIDES) {
+			Object.defineProperty(live, side, {
+				enumerable: true,
+				get: () => values[side],
+				set: (value: number) => {
+					sync({ ...values, [side]: value });
+					values[side] = value;
+				},
+			});
+		}
+		this.margins = live;
+		this.userUnit = options.userUnit ?? 1;
+		this.options = options;
+	}
+
+	get contentWidth(): number {
+		return this.width - this.margins.left - this.margins.right;
+	}
+
+	get contentHeight(): number {
+		return this.height - this.margins.top - this.margins.bottom;
+	}
+
+	maxY(): number {
+		return this.height - this.margins.bottom;
+	}
+}
+
+const PAGE_KEYS = ["size", "layout", "userUnit"] as const;
+const SIDES = ["top", "right", "bottom", "left"] as const;
+
+interface ResolvedText {
+	options: TextOptions;
+	native: TextOptionsInput;
+}
+
+function infoInput(info: DocumentInfo | undefined) {
+	if (info === undefined) return undefined;
+	const custom: string[][] = [];
+	const known = new Set([
+		"Title",
+		"Author",
+		"Subject",
+		"Keywords",
+		"Creator",
+		"Producer",
+		"CreationDate",
+		"ModDate",
+	]);
+	for (const [key, value] of Object.entries(info)) {
+		if (known.has(key) || value === undefined) continue;
+		custom.push([key, value instanceof Date ? value.toISOString() : value]);
+	}
+	return {
+		title: info.Title,
+		author: info.Author,
+		subject: info.Subject,
+		keywords: info.Keywords,
+		creator: info.Creator,
+		producer: info.Producer,
+		creationDate: (info.CreationDate ?? new Date()).getTime(),
+		modDate: info.ModDate?.getTime(),
+		custom,
+	};
+}
+
+export class PdfDocument extends Readable {
+	readonly options: PdfDocumentOptions;
+	/** The document information, written when the document ends. */
+	readonly info: DocumentInfo;
+	readonly #native: NativeDocument;
+	readonly #pages: PdfPage[] = [];
+	readonly #fonts = new Map<string, number>();
+	readonly #registered = new Map<
+		string,
+		{ src: FontSource; family: string | undefined }
+	>();
+	readonly #remSize: number;
+	#textOptions: TextOptions | undefined;
+	#ended = false;
+
+	constructor(options: PdfDocumentOptions = {}) {
+		super();
+		this.options = options;
+		this.info = { CreationDate: new Date(), ...options.info };
+		this.#native = createDocumentNative({
+			lang: options.lang,
+			displayTitle: options.displayTitle,
+			pageLayout: options.pageLayout,
+			pdfVersion: options.pdfVersion,
+			compress: options.compress,
+			bufferPages: options.bufferPages,
+		});
+		this.#remSize = 12;
+		this.font(options.font ?? "Helvetica");
+		if (options.autoFirstPage !== false) this.addPage();
+	}
+
+	override _read(): void {
+		// The bytes are pushed whole by end().
+	}
+
+	get x(): number {
+		return this.#native.getX();
+	}
+
+	set x(value: number) {
+		compose(() => this.#native.setX(value));
+	}
+
+	get y(): number {
+		return this.#native.getY();
+	}
+
+	set y(value: number) {
+		compose(() => this.#native.setY(value));
+	}
+
+	/** The page drawing goes to. */
+	get page(): PdfPage {
+		const index = this.#native.currentPage();
+		const page = index === null ? undefined : this.#pages[index];
+		if (page === undefined) {
+			throw new VellumError(
+				"NO_PAGE",
+				"there is no current page: call addPage() first",
+			);
+		}
+		return page;
+	}
+
+	#sizeContext(page: { width: number; height: number }, percentageOf?: number) {
+		return {
+			fontSize: this.#native.getFontSize(),
+			remSize: this.#remSize,
+			lineHeight: () => this.currentLineHeight(),
+			zeroWidth: () => this.widthOfString("0"),
+			page,
+			percentageOf,
+		};
+	}
+
+	/**
+	 * pdfkit's `sizeToPoint`. A string that is not a length is refused,
+	 * where pdfkit reads it as 0.
+	 */
+	sizeToPoint(
+		size: Size | boolean | undefined,
+		fallback: Size | boolean = 0,
+		page: { width: number; height: number } = this.page,
+		percentageOf?: number,
+	): number {
+		return sizeToPoint(size, fallback, this.#sizeContext(page, percentageOf));
+	}
+
+	/**
+	 * Start a new page. Options given are merged over the document's page
+	 * options — pdfkit replaces them instead, so its `addPage({ margin: 10 })`
+	 * falls back to a letter page.
+	 */
+	addPage(options?: PageOptions): this {
+		this.#open();
+		const merged = this.#pageOptions(options);
+		if (options?.font !== undefined)
+			this.font(options.font, options.fontFamily);
+		if (options?.fontSize !== undefined) this.fontSize(options.fontSize);
+		const dimensions = pageDimensions(merged.size, merged.layout);
+		const page = { width: dimensions[0], height: dimensions[1] };
+		const margins = normalizeSides(
+			merged.margin ?? merged.margins,
+			72,
+			(value) => this.sizeToPoint(value, 0, page),
+		);
+		compose(() =>
+			this.#native.addPage({
+				width: dimensions[0],
+				height: dimensions[1],
+				...margins,
+				userUnit: merged.userUnit,
+			}),
+		);
+		const index = this.#pages.length;
+		this.#pages.push(
+			new PdfPage(dimensions, margins, merged, (next) =>
+				compose(() =>
+					this.#native.setMargins(
+						index,
+						next.top,
+						next.right,
+						next.bottom,
+						next.left,
+					),
+				),
+			),
+		);
+		this.emit("pageAdded");
+		return this;
+	}
+
+	#pageOptions(options: PageOptions | undefined): PageOptions {
+		const merged: PageOptions = {};
+		for (const key of PAGE_KEYS) {
+			const value = options?.[key] ?? this.options[key];
+			if (value !== undefined) Object.assign(merged, { [key]: value });
+		}
+		const ownMargin =
+			options?.margin !== undefined || options?.margins !== undefined;
+		const margin = ownMargin ? options?.margin : this.options.margin;
+		const margins = ownMargin ? options?.margins : this.options.margins;
+		if (margin !== undefined) merged.margin = margin;
+		if (margins !== undefined) merged.margins = margins;
+		return merged;
+	}
+
+	/** A new page like the current one: what text does when it runs out of page. */
+	continueOnNewPage(options?: PageOptions): this {
+		return this.addPage(options ?? this.page.options);
+	}
+
+	bufferedPageRange(): { start: number; count: number } {
+		return this.#native.bufferedPageRange();
+	}
+
+	switchToPage(index: number): PdfPage {
+		compose(() => this.#native.switchToPage(index));
+		return this.page;
+	}
+
+	/** Close the pages written so far: they can no longer be switched to. */
+	flushPages(): void {
+		compose(() => this.#native.flushPages());
+	}
+
+	registerFont(name: string, src: FontSource, family?: string): this {
+		this.#registered.set(name, { src, family });
+		return this;
+	}
+
+	font(src: FontSource, family?: string | number, size?: Size): this {
+		this.#open();
+		let face = typeof family === "number" ? undefined : family;
+		const fontSize = typeof family === "number" ? family : size;
+		let source = src;
+		let cacheKey: string | undefined;
+		const registered =
+			typeof src === "string" ? this.#registered.get(src) : undefined;
+		if (typeof src === "string" && registered !== undefined) {
+			cacheKey = src;
+			source = registered.src;
+			face = registered.family;
+		} else {
+			const named = face ?? src;
+			cacheKey = typeof named === "string" ? named : undefined;
+		}
+		if (fontSize !== undefined) this.fontSize(fontSize);
+
+		const known =
+			cacheKey === undefined ? undefined : this.#fonts.get(cacheKey);
+		if (known !== undefined) {
+			compose(() => this.#native.setFont(known));
+			return this;
+		}
+		const standard =
+			typeof source === "string" ? standardFontFileNative(source) : null;
+		const bytes =
+			standard !== null ? standardFontBytes(standard) : readSource(source);
+		const handle = compose(() =>
+			this.#native.loadFont(
+				bytes,
+				face,
+				standard !== null && typeof source === "string" ? source : undefined,
+			),
+		);
+		if (cacheKey !== undefined) this.#fonts.set(cacheKey, handle);
+		compose(() => this.#native.setFont(handle));
+		return this;
+	}
+
+	fontSize(size: Size): this {
+		const points = sizeToPoint(
+			size,
+			0,
+			this.#sizeContext(
+				this.#pages.length > 0 ? this.page : { width: 0, height: 0 },
+			),
+		);
+		compose(() => this.#native.setFontSize(points));
+		return this;
+	}
+
+	currentLineHeight(includeGap?: boolean): number {
+		return compose(() => this.#native.currentLineHeight(includeGap));
+	}
+
+	lineGap(gap: number): this {
+		compose(() => this.#native.setLineGap(gap));
+		return this;
+	}
+
+	moveDown(lines = 1): this {
+		compose(() => this.#native.moveDown(lines));
+		return this;
+	}
+
+	moveUp(lines = 1): this {
+		compose(() => this.#native.moveUp(lines));
+		return this;
+	}
+
+	widthOfString(text: string, options: WidthOptions = {}): number {
+		return compose(() =>
+			this.#native.widthOfString(
+				text,
+				options.characterSpacing,
+				options.horizontalScaling,
+				options.features === undefined ? undefined : [...options.features],
+			),
+		);
+	}
+
+	text(text: unknown, options?: TextOptions): this;
+	text(text: unknown, x?: number, y?: number, options?: TextOptions): this;
+	text(
+		text: unknown,
+		x?: number | TextOptions,
+		y?: number,
+		options?: TextOptions,
+	): this {
+		this.#open();
+		const resolved = this.#initOptions(x, y, options);
+		this.#textOptions = resolved.options.continued
+			? resolved.options
+			: undefined;
+		const value = text === null || text === undefined ? "" : String(text);
+		let step = compose(() => this.#native.text(value, resolved.native));
+		while (step === "needPage") {
+			this.continueOnNewPage();
+			step = compose(() => this.#native.resumeText());
+		}
+		return this;
+	}
+
+	heightOfString(text: unknown, options?: TextOptions): number {
+		const resolved = this.#initOptions(options, undefined, undefined);
+		const value = text === null || text === undefined ? "" : String(text);
+		return compose(() => this.#native.heightOfString(value, resolved.native));
+	}
+
+	/** pdfkit's `_initOptions`: merge a continued text's options, place the cursor, default the width. */
+	#initOptions(
+		x: number | TextOptions | undefined,
+		y: number | undefined,
+		given: TextOptions | undefined,
+	): ResolvedText {
+		const options: TextOptions = {
+			...(typeof x === "object" ? x : given),
+		};
+		if (this.#textOptions !== undefined) {
+			for (const [key, value] of Object.entries(this.#textOptions)) {
+				if (key !== "continued" && Reflect.get(options, key) === undefined) {
+					Reflect.set(options, key, value);
+				}
+			}
+		}
+		if (typeof x === "number") this.x = x;
+		if (y !== undefined) this.y = y;
+		if (options.lineBreak !== false) {
+			if (options.width === undefined) {
+				const page = this.page;
+				options.width = page.width - this.x - page.margins.right;
+			}
+			options.width = Math.max(options.width, 0);
+		}
+		const baseline = options.baseline;
+		return {
+			options,
+			native: {
+				width: options.lineBreak === false ? undefined : options.width,
+				height: options.height,
+				align: options.align,
+				lineGap: options.lineGap,
+				paragraphGap: options.paragraphGap,
+				indent: options.indent,
+				indentAllLines: options.indentAllLines,
+				columns:
+					options.columns === undefined || options.columns < 1
+						? 1
+						: options.columns,
+				columnGap: options.columnGap ?? 18,
+				ellipsis:
+					options.ellipsis === true
+						? "…"
+						: typeof options.ellipsis === "string"
+							? options.ellipsis
+							: undefined,
+				continued: options.continued,
+				characterSpacing: options.characterSpacing,
+				wordSpacing: options.wordSpacing,
+				horizontalScaling: options.horizontalScaling || 100,
+				features:
+					options.features === undefined ? undefined : [...options.features],
+				baseline: typeof baseline === "string" ? baseline : undefined,
+				baselineOffset: typeof baseline === "number" ? baseline : undefined,
+			},
+		};
+	}
+
+	#open(): void {
+		if (this.#ended) {
+			throw new VellumError(
+				"DOCUMENT_ENDED",
+				"the document has ended; nothing more can be added to it",
+			);
+		}
+	}
+
+	/** Write the document: its bytes are then read from the stream. */
+	end(): this {
+		this.#open();
+		const info = infoInput(this.info);
+		if (info !== undefined) compose(() => this.#native.setInfo(info));
+		const bytes = compose(() => this.#native.end());
+		this.#ended = true;
+		this.push(bytes);
+		this.push(null);
+		return this;
+	}
+}
+
+/** Every byte of a document, once it has ended. */
+export function toBytes(document: PdfDocument): Promise<Uint8Array> {
+	return new Promise((resolve, reject) => {
+		const chunks: Buffer[] = [];
+		const onData = (chunk: Buffer) => chunks.push(chunk);
+		const cleanup = () => {
+			document.off("data", onData);
+			document.off("end", onEnd);
+			document.off("error", onError);
+		};
+		const onEnd = () => {
+			cleanup();
+			resolve(new Uint8Array(Buffer.concat(chunks)));
+		};
+		const onError = (error: Error) => {
+			cleanup();
+			reject(error);
+		};
+		document.on("data", onData);
+		document.on("end", onEnd);
+		document.on("error", onError);
+	});
+}

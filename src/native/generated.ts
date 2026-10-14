@@ -4,6 +4,72 @@
 // output. Editing this file by hand puts it back where it started: a
 // description that can disagree with the code it describes.
 
+export interface DocumentInfoInput {
+	title?: string;
+	author?: string;
+	subject?: string;
+	keywords?: string;
+	creator?: string;
+	producer?: string;
+	/** Milliseconds since the Unix epoch. */
+	creationDate?: number;
+	modDate?: number;
+	/** Any other key, as `[key, value]` pairs. */
+	custom?: Array<Array<string>>;
+}
+
+export interface DocumentSettingsInput {
+	lang?: string;
+	displayTitle?: boolean;
+	pageLayout?: string;
+	pdfVersion?: string;
+	compress?: boolean;
+	bufferPages?: boolean;
+}
+
+export interface PageSetupInput {
+	width: number;
+	height: number;
+	top: number;
+	right: number;
+	bottom: number;
+	left: number;
+	userUnit?: number;
+}
+
+export interface PageRange {
+	start: number;
+	count: number;
+}
+
+/** `text()`'s options once the caller has resolved them. */
+
+export interface TextOptionsInput {
+	width?: number;
+	height?: number;
+	/**
+	 * `left`, `center`, `right`, `justify`; absent follows the paragraph's
+	 * direction.
+	 */
+	align?: string;
+	lineGap?: number;
+	paragraphGap?: number;
+	indent?: number;
+	indentAllLines?: boolean;
+	columns?: number;
+	columnGap?: number;
+	ellipsis?: string;
+	continued?: boolean;
+	characterSpacing?: number;
+	wordSpacing?: number;
+	horizontalScaling?: number;
+	features?: Array<string>;
+	/** A named baseline: `top`, `alphabetic`, `middle`, `svg-middle`… */
+	baseline?: string;
+	/** A numeric baseline, in points. */
+	baselineOffset?: number;
+}
+
 export interface DocumentInfo {
 	pageCount: number;
 	version: string;
@@ -242,6 +308,63 @@ export interface RevocationAnswer {
 	/** When it was withdrawn, or why nobody could be believed. */
 	detail?: string;
 }
+
+export declare class NativeDocument {
+	constructor(settings: DocumentSettingsInput);
+	addPage(setup: PageSetupInput): void;
+	setMargins(
+		page: number,
+		top: number,
+		right: number,
+		bottom: number,
+		left: number,
+	): void;
+	getX(): number;
+	setX(x: number): void;
+	getY(): number;
+	setY(y: number): void;
+	bufferedPageRange(): PageRange;
+	/** The page drawing goes to, counted from zero. */
+	currentPage(): number | null;
+	switchToPage(index: number): void;
+	flushPages(): void;
+	/**
+	 * Load a font and answer its handle; `standard` names the standard
+	 * face the bytes stand in for.
+	 */
+	loadFont(
+		bytes: Buffer,
+		family?: string | undefined | null,
+		standard?: string | undefined | null,
+	): number;
+	setFont(handle: number): void;
+	getFontSize(): number;
+	setFontSize(size: number): void;
+	getLineGap(): number;
+	setLineGap(gap: number): void;
+	/** The current font's ascender, in thousandths of an em. */
+	ascender(): number;
+	currentLineHeight(includeGap?: boolean | undefined | null): number;
+	widthOfString(
+		text: string,
+		characterSpacing?: number | undefined | null,
+		horizontalScaling?: number | undefined | null,
+		features?: Array<string> | undefined | null,
+	): number;
+	/** `done`, or `needPage`: add a page, then [`Self::resume_text`]. */
+	text(text: string, options: TextOptionsInput): string;
+	resumeText(): string;
+	heightOfString(text: string, options: TextOptionsInput): number;
+	moveDown(lines: number): void;
+	moveUp(lines: number): void;
+	setInfo(info: DocumentInfoInput): void;
+	/** Write the document. Nothing can be added afterwards. */
+	end(): Buffer;
+}
+
+/** The file in the package's `fonts/` directory a standard name stands for. */
+
+export declare function standardFontFile(name: string): string | null;
 
 export declare function inspect(bytes: Buffer): DocumentInfo;
 

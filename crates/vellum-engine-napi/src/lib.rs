@@ -3,6 +3,8 @@ use napi_derive::napi;
 use std::collections::HashMap;
 use std::panic::catch_unwind;
 
+pub mod compose;
+
 /// Run engine work with a panic net.
 ///
 /// A malformed PDF is hostile input: a panic crossing the NAPI boundary takes
