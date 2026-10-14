@@ -6,6 +6,7 @@
 //! lays out the next block from where the last one ended. Everything a page
 //! draws is kept (see [`ops`]) and written by krilla when the document ends.
 
+pub mod annotations;
 pub mod drawing;
 pub mod fonts;
 pub mod graphics;
@@ -220,6 +221,8 @@ pub struct DocumentSettings {
     pub buffer_pages: bool,
     /// Write a structure tree.
     pub tagged: bool,
+    /// The largest file `attach` takes, in bytes.
+    pub max_file_bytes: usize,
     /// The standard the document is checked against as it is written.
     pub subset: Option<Subset>,
 }
@@ -285,6 +288,7 @@ impl Default for DocumentSettings {
             buffer_pages: false,
             tagged: false,
             subset: None,
+            max_file_bytes: annotations::MAX_FILE_BYTES,
         }
     }
 }
@@ -366,6 +370,9 @@ pub struct Composer {
     /// What `text()` and `list()` marked, for the caller's structure tree.
     pub(crate) marked_contents: Vec<usize>,
     pub(crate) outline: Vec<links::OutlineItem>,
+    pub(crate) attachments: Vec<annotations::Attachment>,
+    pub(crate) extra_annotations: Vec<(usize, annotations::PageAnnotation)>,
+    pub(crate) fits: Vec<(String, annotations::Fit)>,
     /// The document's `lineGap(n)`.
     pub line_gap: f32,
     /// Word widths in thousandths of an em, by font.
@@ -408,6 +415,9 @@ impl Composer {
             structure: Vec::new(),
             marked_contents: Vec::new(),
             outline: Vec::new(),
+            attachments: Vec::new(),
+            extra_annotations: Vec::new(),
+            fits: Vec::new(),
             line_gap: 0.0,
             width_cache: HashMap::new(),
             wrapper: None,
@@ -598,6 +608,7 @@ impl Composer {
             self.end_mark()?;
         }
         self.check_subset()?;
+        self.check_extras()?;
         self.ended = true;
 
         let mut builder = ConfigurationBuilder::new();
@@ -681,6 +692,12 @@ impl Composer {
         }
         if let Some(outline) = self.krilla_outline()? {
             document.set_outline(outline);
+        }
+        for file in self.embedded_files() {
+            let name = file.path.clone();
+            document.embed_file(file).ok_or_else(|| {
+                invalid_options(format!("two files are embedded under the name {name:?}"))
+            })?;
         }
         document.set_metadata(self.metadata());
         let bytes = document.finish().map_err(|error| match error {
@@ -781,6 +798,7 @@ impl Composer {
             && !outlined
             && mod_date.is_none()
             && info.custom.is_empty()
+            && !self.needs_annotation_pass()
         {
             return Ok(bytes);
         }
@@ -832,6 +850,7 @@ impl Composer {
                 dictionary.set(key.as_str(), text_string(value));
             }
         }
+        self.write_extras(&mut document)?;
         let mut out = Vec::new();
         document
             .save_to(&mut out)

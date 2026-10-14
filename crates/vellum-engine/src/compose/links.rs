@@ -70,7 +70,13 @@ pub fn check_uri(uri: &str) -> Result<(), ComposeError> {
     Ok(())
 }
 
-fn bounding_box(matrix: Matrix, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
+pub(crate) fn bounding_box(
+    matrix: Matrix,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> (f32, f32, f32, f32) {
     let [a, b, c, d, e, f] = matrix;
     let corners = [
         (x, y),

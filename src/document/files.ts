@@ -3,14 +3,21 @@
  * fonts shipped in the package, files registered in memory, or the disk.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { VellumError } from "../errors.js";
 
 /** A file named by path, or its bytes. */
 export type FileSource = string | URL | Uint8Array | ArrayBuffer;
 
-const registered = new Map<string, Buffer>();
+/** A file's dates, as a file attachment records them. */
+export interface FileStats {
+	birthtime?: Date;
+	ctime?: Date;
+}
+
+const registered = new Map<string, { data: Buffer; stats: FileStats }>();
 
 function key(path: string | URL): string {
 	if (path instanceof URL) return fileURLToPath(path);
@@ -24,12 +31,13 @@ function key(path: string | URL): string {
 export function registerFile(
 	path: string | URL,
 	data: Uint8Array | undefined,
+	stats: FileStats = {},
 ): void {
 	if (data === undefined) {
 		registered.delete(key(path));
 		return;
 	}
-	registered.set(key(path), Buffer.from(data));
+	registered.set(key(path), { data: Buffer.from(data), stats });
 }
 
 const DATA_URL = /^data:[^,;]*(?:;[^,;]*)*;base64,/;
@@ -46,7 +54,7 @@ export function readSource(source: FileSource): Buffer {
 	}
 	const path = key(source);
 	const fromMemory = registered.get(path);
-	if (fromMemory !== undefined) return fromMemory;
+	if (fromMemory !== undefined) return fromMemory.data;
 	try {
 		return readFileSync(path);
 	} catch (error) {
@@ -55,6 +63,37 @@ export function readSource(source: FileSource): Buffer {
 			`cannot read ${JSON.stringify(path)}: ${error instanceof Error ? error.message : String(error)}`,
 			{ cause: error },
 		);
+	}
+}
+
+/** What a file attachment records of its source: name, type and dates. */
+export function describeSource(source: FileSource): {
+	name: string | undefined;
+	type: string | undefined;
+	stats: FileStats;
+} {
+	if (typeof source === "string") {
+		const media = /^data:([^,;]*)(?:;[^,;]*)*;base64,/.exec(source);
+		if (media !== null) {
+			return { name: undefined, type: media[1] || undefined, stats: {} };
+		}
+	}
+	if (typeof source !== "string" && !(source instanceof URL)) {
+		return { name: undefined, type: undefined, stats: {} };
+	}
+	const path = key(source);
+	const known = registered.get(path);
+	if (known !== undefined)
+		return { name: basename(path), type: undefined, stats: known.stats };
+	try {
+		const { birthtime, ctime } = statSync(path);
+		return {
+			name: basename(path),
+			type: undefined,
+			stats: { birthtime, ctime },
+		};
+	} catch {
+		return { name: basename(path), type: undefined, stats: {} };
 	}
 }
 

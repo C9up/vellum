@@ -28,6 +28,8 @@ export interface DocumentSettingsInput {
 	pdfVersion?: string;
 	compress?: boolean;
 	bufferPages?: boolean;
+	/** The largest file `file()` embeds, in bytes. Default 64 MiB. */
+	maxFileBytes?: number;
 }
 
 export interface PageSetupInput {
@@ -107,6 +109,44 @@ export interface StructureChildInput {
 	node?: number;
 	content?: number;
 	annotation?: number;
+}
+
+/** A file to embed. */
+
+export interface FileInput {
+	name: string;
+	data: Buffer;
+	mime?: string;
+	description?: string;
+	/** `Alternative`, `Data`, `Source`, `Supplement`, `Unspecified`. */
+	relationship?: string;
+	/** Milliseconds since the Unix epoch. */
+	created?: number;
+	modified?: number;
+	hidden?: boolean;
+}
+
+/**
+ * An annotation other than a link: `note`, `highlight`, `underline`,
+ * `strike`, `line`, `square`, `circle`, `text`, `file`.
+ */
+
+export interface AnnotationInput {
+	kind: string;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	contents?: string;
+	/** `[r, g, b]`, 0 to 255. */
+	colour?: Array<number>;
+	/** A note's icon. */
+	icon?: string;
+	/** A line's end, the start being `x`, `y`. */
+	x2?: number;
+	y2?: number;
+	/** A file annotation's file. */
+	file?: number;
 }
 
 export interface ImageInfo {
@@ -567,6 +607,18 @@ export declare class NativeDocument {
 	): void;
 	/** The outline, entries in order, each after its parent. */
 	setOutline(entries: Array<OutlineInput>): void;
+	attachFile(input: FileInput): number;
+	annotate(input: AnnotationInput): void;
+	/**
+	 * Open a named destination with another view: `Fit`, `FitB`, `FitH`,
+	 * `FitBH` (top), `FitV`, `FitBV` (left), `FitR` (left, top, right,
+	 * bottom), in user space.
+	 */
+	setDestinationFit(
+		name: string,
+		fit: string,
+		values: Array<number | undefined | null>,
+	): void;
 	/** Write the document. Nothing can be added afterwards. */
 	end(): Buffer;
 }

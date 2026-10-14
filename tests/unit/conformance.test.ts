@@ -103,6 +103,23 @@ describe("PdfDocument — PDF/A and PDF/UA", () => {
 		});
 	}
 
+	it("writes a PDF/A-3b invoice carrying its XML, as Factur-X does", async () => {
+		const doc = invoice("PDF/A-3b");
+		doc.file(Buffer.from('<?xml version="1.0"?><Invoice/>'), {
+			name: "factur-x.xml",
+			type: "text/xml",
+			relationship: "Alternative",
+			description: "Factur-X",
+			modifiedDate: new Date(),
+		});
+		const pdf = await end(doc);
+		if (OUT !== undefined) {
+			mkdirSync(OUT, { recursive: true });
+			writeFileSync(join(OUT, "PDF_A-3b+xml.pdf"), pdf);
+		}
+		expect(pdf.includes(Buffer.from("factur-x.xml"))).toBe(true);
+	});
+
 	it("refuses what a standard forbids, saying why", () => {
 		const untitled = new PdfDocument({ subset: "PDF/UA", lang: "fr" });
 		untitled.text("Sans titre ni sommaire");

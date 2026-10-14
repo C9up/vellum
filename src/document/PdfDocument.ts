@@ -32,7 +32,12 @@ import {
 	paintOf,
 	plainColour,
 } from "./colours.js";
-import { type FileSource, readSource, standardFontBytes } from "./files.js";
+import {
+	describeSource,
+	type FileSource,
+	readSource,
+	standardFontBytes,
+} from "./files.js";
 import {
 	normalizeSides,
 	pageDimensions,
@@ -114,6 +119,8 @@ export interface PdfDocumentOptions
 	ignoreOrientation?: boolean;
 	/** Write a structure tree (`struct()`, `addStructure()`). */
 	tagged?: boolean;
+	/** The largest file `file()` embeds, in bytes. Default 64 MiB. */
+	maxFileBytes?: number;
 	/**
 	 * The standard the document is checked against as it is written; what
 	 * it forbids is refused at `end()`. pdfkit declares the standard and
@@ -329,6 +336,61 @@ export class PdfRadialGradient extends PdfGradient {
 	}
 }
 
+export interface FileOptions {
+	/**
+	 * Default: a path's base name. pdfkit records the path as given, the
+	 * server's directories with it.
+	 */
+	name?: string;
+	/** MIME type. Default: a `data:` URL's. */
+	type?: string;
+	description?: string;
+	/** Not listed among the document's files, as a file annotation's file is. */
+	hidden?: boolean;
+	creationDate?: Date;
+	modifiedDate?: Date;
+	relationship?:
+		| "Alternative"
+		| "Data"
+		| "Source"
+		| "Supplement"
+		| "Unspecified";
+}
+
+/** A file embedded with {@link PdfDocument.file}. */
+export interface PdfFileSpec {
+	readonly name: string;
+}
+
+export interface AnnotationOptions {
+	/** Default black; a note is yellow, a highlight light yellow. */
+	color?: ColourValue;
+	/** What a reader shows for the annotation. */
+	Contents?: string;
+}
+
+export interface NoteOptions extends AnnotationOptions {
+	/** The note's icon. Default `Comment`. */
+	Name?:
+		| "Comment"
+		| "Key"
+		| "Note"
+		| "Help"
+		| "NewParagraph"
+		| "Paragraph"
+		| "Insert";
+}
+
+/** pdfkit's `annotate` subtypes that a document can carry safely. */
+export type AnnotationSubtype =
+	| "Text"
+	| "Highlight"
+	| "Underline"
+	| "StrikeOut"
+	| "Square"
+	| "Circle"
+	| "FreeText";
+
 /** An image opened with {@link PdfDocument.openImage}: its size in pixels. */
 export interface PdfImage {
 	readonly width: number;
@@ -531,6 +593,7 @@ export class PdfDocument extends Readable {
 	readonly #spots = new Map<string, number>();
 	readonly #images = new Map<string, PdfImage>();
 	readonly #imageHandles = new WeakMap<PdfImage, number>();
+	readonly #fileHandles = new WeakMap<PdfFileSpec, number>();
 	/** The document outline: its bookmarks, added with `addItem`. */
 	readonly outline: PdfOutline = new PdfOutline(() => {
 		const index = this.#native.currentPage();
@@ -571,6 +634,7 @@ export class PdfDocument extends Readable {
 			pdfVersion: options.pdfVersion,
 			compress: options.compress,
 			bufferPages: options.bufferPages,
+			maxFileBytes: options.maxFileBytes,
 			tagged: options.tagged,
 			subset: options.subset,
 		});
@@ -1517,11 +1581,266 @@ export class PdfDocument extends Readable {
 	 */
 	addNamedDestination(
 		name: string,
-		...position: [fit?: "XYZ", left?: number | null, top?: number | null]
+		...view:
+			| [
+					fit?: "XYZ",
+					left?: number | null,
+					top?: number | null,
+					zoom?: number | null,
+			  ]
+			| [fit: "Fit" | "FitB"]
+			| [fit: "FitH" | "FitBH", top?: number | null]
+			| [fit: "FitV" | "FitBV", left?: number | null]
+			| [fit: "FitR", left: number, top: number, right: number, bottom: number]
 	): this {
-		const [, left, top] = position;
-		compose(() => this.#native.addNamedDestination(name, left ?? 0, top ?? 0));
+		const [fit = "XYZ", ...values] = view;
+		if (fit === "XYZ") {
+			// The zoom is not written: a view at XYZ keeps the reader's.
+			const [left, top] = values;
+			compose(() =>
+				this.#native.addNamedDestination(name, left ?? 0, top ?? 0),
+			);
+			return this;
+		}
+		compose(() => this.#native.addNamedDestination(name, 0, 0));
+		compose(() =>
+			this.#native.setDestinationFit(
+				name,
+				fit,
+				values.map((value) => value ?? undefined),
+			),
+		);
 		return this;
+	}
+
+	/**
+	 * pdfkit's `file`: embed a file in the document. The options given are
+	 * left as they are; pdfkit writes the name and relationship into them.
+	 */
+	file(src: FileSource, options: FileOptions = {}): PdfFileSpec {
+		const bytes = readSource(src);
+		const source = describeSource(src);
+		const name = options.name ?? source.name;
+		if (name === undefined) {
+			throw new VellumError(
+				"INVALID_OPTIONS",
+				"a file given as bytes needs a name",
+			);
+		}
+		const handle = compose(() =>
+			this.#native.attachFile({
+				name,
+				data: bytes,
+				mime: options.type ?? source.type,
+				description: options.description,
+				relationship: options.relationship,
+				created: (options.creationDate ?? source.stats.birthtime)?.getTime(),
+				modified: (options.modifiedDate ?? source.stats.ctime)?.getTime(),
+				hidden: options.hidden,
+			}),
+		);
+		const spec: PdfFileSpec = Object.freeze({ name });
+		this.#fileHandles.set(spec, handle);
+		return spec;
+	}
+
+	#annotation(
+		kind: string,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: AnnotationOptions & { Name?: string },
+		fallback: ColourValue | undefined,
+		extra: { x2?: number; y2?: number; file?: number; contents?: string } = {},
+	): this {
+		const colour = options.color ?? fallback;
+		const rgb = colour === undefined ? undefined : plainColour(colour);
+		if (rgb !== undefined && rgb.kind !== "rgb") {
+			throw new VellumError("INVALID_COLOR", "an annotation's colour is RGB");
+		}
+		compose(() =>
+			this.#native.annotate({
+				kind,
+				x,
+				y,
+				width,
+				height,
+				contents: extra.contents ?? options.Contents,
+				colour: rgb?.values,
+				icon: options.Name,
+				x2: extra.x2,
+				y2: extra.y2,
+				file: extra.file,
+			}),
+		);
+		return this;
+	}
+
+	note(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		contents: string,
+		options: NoteOptions = {},
+	): this {
+		return this.#annotation(
+			"note",
+			x,
+			y,
+			width,
+			height,
+			{ Name: "Comment", ...options },
+			[243, 223, 92],
+			{ contents },
+		);
+	}
+
+	highlight(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: AnnotationOptions = {},
+	): this {
+		return this.#annotation(
+			"highlight",
+			x,
+			y,
+			width,
+			height,
+			options,
+			[241, 238, 148],
+		);
+	}
+
+	underline(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: AnnotationOptions = {},
+	): this {
+		return this.#annotation(
+			"underline",
+			x,
+			y,
+			width,
+			height,
+			options,
+			[0, 0, 0],
+		);
+	}
+
+	strike(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: AnnotationOptions = {},
+	): this {
+		return this.#annotation("strike", x, y, width, height, options, [0, 0, 0]);
+	}
+
+	/**
+	 * A line annotation from (`x1`, `y1`) to (`x2`, `y2`), its rectangle the
+	 * line's box; pdfkit takes the end point for a width and a height.
+	 */
+	lineAnnotation(
+		x1: number,
+		y1: number,
+		x2: number,
+		y2: number,
+		options: AnnotationOptions = {},
+	): this {
+		return this.#annotation("line", x1, y1, 0, 0, options, [0, 0, 0], {
+			x2,
+			y2,
+		});
+	}
+
+	rectAnnotation(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: AnnotationOptions = {},
+	): this {
+		return this.#annotation("square", x, y, width, height, options, [0, 0, 0]);
+	}
+
+	ellipseAnnotation(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: AnnotationOptions = {},
+	): this {
+		return this.#annotation("circle", x, y, width, height, options, [0, 0, 0]);
+	}
+
+	textAnnotation(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		text: string,
+		options: AnnotationOptions = {},
+	): this {
+		return this.#annotation("text", x, y, width, height, options, [0, 0, 0], {
+			contents: text,
+		});
+	}
+
+	/** A file shown on the page, embedded hidden from the document's file list. */
+	fileAnnotation(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		file: FileOptions & { src: FileSource },
+		options: AnnotationOptions = {},
+	): this {
+		const { src, ...fileOptions } = file;
+		const spec = this.file(src, { ...fileOptions, hidden: true });
+		const handle = this.#fileHandles.get(spec);
+		return this.#annotation("file", x, y, width, height, options, [0, 0, 0], {
+			file: handle,
+		});
+	}
+
+	/**
+	 * pdfkit's generic `annotate`, for the subtypes a document carries
+	 * safely. pdfkit writes any dictionary key it is given, actions included
+	 * (`/A /JavaScript`); links go through `link` and `goTo`.
+	 */
+	annotate(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		options: NoteOptions & { Subtype: AnnotationSubtype },
+	): this {
+		const kinds = {
+			Text: "note",
+			Highlight: "highlight",
+			Underline: "underline",
+			StrikeOut: "strike",
+			Square: "square",
+			Circle: "circle",
+			FreeText: "text",
+		} as const;
+		const kind = kinds[options.Subtype];
+		return this.#annotation(
+			kind,
+			x,
+			y,
+			width,
+			height,
+			kind === "note" ? { Name: "Comment", ...options } : options,
+			[0, 0, 0],
+		);
 	}
 
 	/**

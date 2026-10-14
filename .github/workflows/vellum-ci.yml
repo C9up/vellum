@@ -273,7 +273,7 @@ jobs:
             name=$(basename "$file" .pdf)
             case "$name" in
               PDF_UA) flavour=ua1 ;;
-              *) flavour=${name#PDF_A-} ;;
+              *) flavour=${name#PDF_A-}; flavour=${flavour%%+*} ;;
             esac
             result=$("$RUNNER_TEMP/verapdf/verapdf" --flavour "$flavour" --format text "$file")
             echo "$result"
@@ -282,7 +282,7 @@ jobs:
               *) status=1 ;;
             esac
           done
-          ls "$RUNNER_TEMP"/conformance/*.pdf | wc -l | grep -qx 5 || { echo "::error::expected 5 documents"; status=1; }
+          ls "$RUNNER_TEMP"/conformance/*.pdf | wc -l | grep -qx 6 || { echo "::error::expected 6 documents"; status=1; }
           exit $status
 
   # Publish job — gated on workflow_dispatch (manual maintainer trigger).

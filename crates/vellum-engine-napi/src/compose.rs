@@ -8,6 +8,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use vellum_engine::compose::annotations::{AnnotationKind, Attachment, Fit, Relationship};
 use vellum_engine::compose::graphics::{
     Colour, FillRule, Gradient, GradientShape, GradientStop, LineCap, LineJoin, Matrix, Paint,
     Segment,
@@ -45,6 +46,8 @@ pub struct DocumentSettingsInput {
     pub pdf_version: Option<String>,
     pub compress: Option<bool>,
     pub buffer_pages: Option<bool>,
+    /// The largest file `file()` embeds, in bytes. Default 64 MiB.
+    pub max_file_bytes: Option<u32>,
 }
 
 #[napi(object)]
@@ -118,6 +121,42 @@ pub struct StructureChildInput {
     pub node: Option<u32>,
     pub content: Option<u32>,
     pub annotation: Option<u32>,
+}
+
+/// A file to embed.
+#[napi(object)]
+pub struct FileInput {
+    pub name: String,
+    pub data: Buffer,
+    pub mime: Option<String>,
+    pub description: Option<String>,
+    /// `Alternative`, `Data`, `Source`, `Supplement`, `Unspecified`.
+    pub relationship: Option<String>,
+    /// Milliseconds since the Unix epoch.
+    pub created: Option<f64>,
+    pub modified: Option<f64>,
+    pub hidden: Option<bool>,
+}
+
+/// An annotation other than a link: `note`, `highlight`, `underline`,
+/// `strike`, `line`, `square`, `circle`, `text`, `file`.
+#[napi(object)]
+pub struct AnnotationInput {
+    pub kind: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub contents: Option<String>,
+    /// `[r, g, b]`, 0 to 255.
+    pub colour: Option<Vec<f64>>,
+    /// A note's icon.
+    pub icon: Option<String>,
+    /// A line's end, the start being `x`, `y`.
+    pub x2: Option<f64>,
+    pub y2: Option<f64>,
+    /// A file annotation's file.
+    pub file: Option<u32>,
 }
 
 #[napi(object)]
@@ -367,6 +406,9 @@ impl NativeDocument {
                 .map(Subset::parse)
                 .transpose()
                 .map_err(failure)?,
+            max_file_bytes: settings
+                .max_file_bytes
+                .map_or(defaults.max_file_bytes, |limit| limit as usize),
         })
         .map_err(failure)?;
         Ok(Self {
@@ -1012,6 +1054,143 @@ impl NativeDocument {
             }
         }
         self.with(|document| document.set_outline(roots).map_err(failure))
+    }
+
+    #[napi]
+    pub fn attach_file(&mut self, input: FileInput) -> Result<u32> {
+        let attachment = Attachment {
+            name: input.name,
+            data: std::sync::Arc::new(input.data.to_vec()),
+            mime: input.mime,
+            description: input.description,
+            relationship: input
+                .relationship
+                .as_deref()
+                .map(Relationship::parse)
+                .transpose()
+                .map_err(failure)?
+                .unwrap_or_default(),
+            created: input.created.map(|unix_ms| Instant { unix_ms }),
+            modified: input.modified.map(|unix_ms| Instant { unix_ms }),
+            hidden: input.hidden.unwrap_or(false),
+        };
+        self.with(|document| {
+            document
+                .attach(attachment)
+                .map(|id| id as u32)
+                .map_err(failure)
+        })
+    }
+
+    #[napi]
+    pub fn annotate(&mut self, input: AnnotationInput) -> Result<()> {
+        let point = |value: Option<f64>, name: &str| -> Result<f32> {
+            finite(
+                value.ok_or_else(|| options_error(format!("{name} is missing")))?,
+                name,
+            )
+        };
+        let (x, y) = (finite(input.x, "x")?, finite(input.y, "y")?);
+        let kind = match input.kind.as_str() {
+            "note" => AnnotationKind::Note {
+                icon: input.icon.unwrap_or_else(|| "Comment".into()),
+            },
+            "highlight" => AnnotationKind::Highlight,
+            "underline" => AnnotationKind::Underline,
+            "strike" => AnnotationKind::StrikeOut,
+            "line" => AnnotationKind::Line {
+                from: (x, y),
+                to: (point(input.x2, "x2")?, point(input.y2, "y2")?),
+            },
+            "square" => AnnotationKind::Square,
+            "circle" => AnnotationKind::Circle,
+            "text" => AnnotationKind::FreeText,
+            "file" => AnnotationKind::File {
+                attachment: input
+                    .file
+                    .ok_or_else(|| options_error("a file annotation needs its file"))?
+                    as usize,
+            },
+            other => {
+                return Err(options_error(format!(
+                    "{other:?} is not an annotation this document writes"
+                )))
+            }
+        };
+        if let AnnotationKind::Note { icon } = &kind {
+            let known = [
+                "Comment",
+                "Key",
+                "Note",
+                "Help",
+                "NewParagraph",
+                "Paragraph",
+                "Insert",
+            ];
+            if !known.contains(&icon.as_str()) {
+                return Err(options_error(format!("{icon:?} is not a note icon")));
+            }
+        }
+        let colour = match input.colour.as_deref() {
+            None => None,
+            Some([red, green, blue]) => Some([
+                byte(*red, "colour")?,
+                byte(*green, "colour")?,
+                byte(*blue, "colour")?,
+            ]),
+            Some(_) => return Err(options_error("an annotation's colour is [r, g, b]")),
+        };
+        let (width, height) = (
+            finite(input.width, "width")?,
+            finite(input.height, "height")?,
+        );
+        let contents = input.contents;
+        self.with(|document| {
+            document
+                .annotate(kind, x, y, width, height, contents, colour)
+                .map_err(failure)
+        })
+    }
+
+    /// Open a named destination with another view: `Fit`, `FitB`, `FitH`,
+    /// `FitBH` (top), `FitV`, `FitBV` (left), `FitR` (left, top, right,
+    /// bottom), in user space.
+    #[napi]
+    pub fn set_destination_fit(
+        &mut self,
+        name: String,
+        fit: String,
+        values: Vec<Option<f64>>,
+    ) -> Result<()> {
+        let value = |index: usize| -> Result<Option<f32>> {
+            values
+                .get(index)
+                .copied()
+                .flatten()
+                .map(|value| finite(value, "a destination's position"))
+                .transpose()
+        };
+        let fit = match fit.as_str() {
+            "Fit" => Fit::Fit,
+            "FitB" => Fit::FitB,
+            "FitH" => Fit::FitH(value(0)?),
+            "FitBH" => Fit::FitBH(value(0)?),
+            "FitV" => Fit::FitV(value(0)?),
+            "FitBV" => Fit::FitBV(value(0)?),
+            "FitR" => {
+                let corners = [value(0)?, value(1)?, value(2)?, value(3)?];
+                let [Some(left), Some(top), Some(right), Some(bottom)] = corners else {
+                    return Err(options_error("FitR takes left, top, right and bottom"));
+                };
+                Fit::FitR([left, top, right, bottom])
+            }
+            other => {
+                return Err(options_error(format!(
+                    "{other:?} is not a destination view"
+                )))
+            }
+        };
+        self.with(|document| document.set_destination_fit(&name, fit).map_err(failure))
     }
 
     /// Write the document. Nothing can be added afterwards.

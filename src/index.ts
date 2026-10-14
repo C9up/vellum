@@ -18,20 +18,25 @@ import "./augmentations.js";
 
 export { defineConfig } from "./config.js";
 export type { ColourValue } from "./document/colours.js";
-export type { FileSource } from "./document/files.js";
+export type { FileSource, FileStats } from "./document/files.js";
 export { registerFile } from "./document/files.js";
 export type {
+	AnnotationOptions,
+	AnnotationSubtype,
 	Colour,
 	DocumentInfo as PdfDocumentInfo,
+	FileOptions,
 	FillRule,
 	FontSource,
 	ImageOptions,
 	ImageSource,
 	ListItems,
 	ListOptions,
+	NoteOptions,
 	PageLayout,
 	PageOptions as PdfPageOptions,
 	PdfDocumentOptions,
+	PdfFileSpec,
 	PdfImage,
 	TextAlign,
 	TextBaseline,
