@@ -254,6 +254,29 @@ pub fn tag_tree(
     Ok(tree)
 }
 
+/// Which of `count` marks the tree holds. krilla numbers every structure
+/// and span sequence and panics on one the tree leaves out; pdfkit writes it
+/// and leaves it unreferenced. One no element holds is drawn untagged.
+pub fn held_marks(roots: &[Element], count: usize) -> Vec<bool> {
+    let mut held = vec![false; count];
+    // Walked without recursion: the depth is checked later, by `tag_tree`.
+    let mut pending: Vec<&Element> = roots.iter().collect();
+    while let Some(element) = pending.pop() {
+        for child in &element.children {
+            match child {
+                Child::Element(element) => pending.push(element),
+                Child::Content(id) => {
+                    if let Some(slot) = held.get_mut(*id) {
+                        *slot = true;
+                    }
+                }
+                Child::Annotation(_) => {}
+            }
+        }
+    }
+    held
+}
+
 pub fn content_tag(mark: &Mark) -> ContentTag<'_> {
     match mark {
         Mark::Artifact(kind) => ContentTag::Artifact(Artifact::new(
@@ -387,5 +410,47 @@ mod tests {
             ..Element::default()
         };
         assert!(tag(&unknown).is_err());
+    }
+
+    #[test]
+    fn content_no_element_holds_is_written_untagged() {
+        use crate::compose::{DocumentSettings, PageSetup, Sides};
+        let mut document = Composer::new(DocumentSettings {
+            tagged: true,
+            ..DocumentSettings::default()
+        })
+        .unwrap();
+        let margins = Sides {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        };
+        document
+            .add_page(PageSetup {
+                width: 100.0,
+                height: 100.0,
+                margins,
+                user_unit: 1.0,
+            })
+            .unwrap();
+        // pdfkit lets a sequence be marked and never attached.
+        document.begin_mark(Mark::Structure).unwrap();
+        document.end_mark().unwrap();
+        let held = document.begin_mark(Mark::Structure).unwrap();
+        document.end_mark().unwrap();
+        document
+            .set_structure(vec![Element {
+                kind: "P".into(),
+                children: vec![Child::Content(held)],
+                ..Element::default()
+            }])
+            .unwrap();
+        assert_eq!(
+            held_marks(&document.structure, document.marks.len()),
+            [false, true]
+        );
+        let bytes = document.end().expect("written, not a panic");
+        assert!(lopdf::Document::load_mem(&bytes).is_ok());
     }
 }

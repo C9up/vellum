@@ -653,6 +653,7 @@ impl Composer {
             marks: vec![Vec::new(); self.marks.len()],
             links: vec![None; self.link_count],
         };
+        let held = tagging::held_marks(&self.structure, self.marks.len());
         let mut document = krilla::Document::new_with(settings);
         for (page, annotations) in self.pages.iter().zip(annotations) {
             let page_settings = PageSettings::from_wh(page.setup.width, page.setup.height)
@@ -669,6 +670,7 @@ impl Composer {
                     paints: &self.paints,
                 },
                 &self.marks,
+                &held,
             );
             surface.finish();
             for (id, identifier) in marked {

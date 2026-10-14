@@ -143,6 +143,7 @@ pub fn replay(
     ops: &[Op],
     resources: &Resources<'_>,
     marks: &[super::tagging::Mark],
+    held: &[bool],
 ) -> Marked {
     let mut marked = Vec::new();
     let mut open = false;
@@ -151,7 +152,11 @@ pub fn replay(
         let Some(clips) = ops[index].clips().cloned() else {
             match ops[index] {
                 Op::BeginMark(id) if !open => {
-                    if let Some(mark) = marks.get(id) {
+                    let tagged = |mark: &&super::tagging::Mark| {
+                        matches!(mark, super::tagging::Mark::Artifact(_))
+                            || held.get(id).copied().unwrap_or(false)
+                    };
+                    if let Some(mark) = marks.get(id).filter(tagged) {
                         let identifier = surface.start_tagged(super::tagging::content_tag(mark));
                         marked.push((id, identifier));
                         open = true;
