@@ -41,6 +41,32 @@ describe("guide: generating documents", () => {
 		);
 	});
 
+	it("the README's example", async () => {
+		const conditions =
+			"Les devis sont valables trente jours. Passé ce délai, les prix peuvent être révisés.";
+
+		const doc = new PdfDocument({ size: "A4", bufferPages: true });
+		const bytes = toBytes(doc);
+
+		doc.font("Helvetica-Bold").fontSize(18).text("Devis 2026-041");
+		doc.font("Helvetica").fontSize(10).text(conditions, { align: "justify" });
+		doc.table({
+			columnStyles: ["*", 80],
+			headerRows: 1,
+			data: [
+				["Poste", "Montant"],
+				["Peinture", "1 190,00"],
+			],
+		});
+		doc.end();
+
+		const pdf = await bytes;
+
+		const text = await vellum.extractText(Buffer.from(pdf));
+		expect(text).toContain("Devis 2026-041");
+		expect(text).toContain("1 190,00");
+	});
+
 	it("the document and its pages", async () => {
 		const doc = new PdfDocument({
 			size: "A4",
