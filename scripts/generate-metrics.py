@@ -28,6 +28,7 @@ FONTS = [
     ("TimesRoman", "NimbusRoman-Regular"),
     ("TimesBold", "NimbusRoman-Bold"),
     ("TimesItalic", "NimbusRoman-Italic"),
+    ("TimesBoldItalic", "NimbusRoman-BoldItalic"),
     ("Courier", "NimbusMonoPS-Regular"),
     ("CourierBold", "NimbusMonoPS-Bold"),
 ]
@@ -114,6 +115,7 @@ def main():
         ("TimesRoman", "W"): 944, ("TimesRoman", "i"): 278, ("TimesRoman", "."): 250,
         ("TimesBold", "A"): 722, ("TimesBold", "a"): 500,
         ("TimesItalic", "A"): 611, ("TimesItalic", "a"): 500,
+        ("TimesBoldItalic", "A"): 667, ("TimesBoldItalic", "a"): 500,
         ("Courier", "A"): 600, ("Courier", "i"): 600, ("Courier", " "): 600,
         ("CourierBold", "W"): 600,
     }

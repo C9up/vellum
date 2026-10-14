@@ -119,7 +119,7 @@ pub(crate) const TIMES_ITALIC: [u16; 256] = [
 ];
 
 /// `Times-BoldItalic`, which the stamp does not offer and a composed document
-/// does. From Adobe's AFM, as pdfkit reads it.
+/// does.
 #[rustfmt::skip]
 pub(crate) const TIMES_BOLD_ITALIC: [u16; 256] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
