@@ -361,3 +361,58 @@ describe("PdfDocument — text decorations, transforms and links", () => {
 		expect(() => other.end()).toThrow(VellumError);
 	});
 });
+
+describe("PdfDocument — SVG and raw path content", () => {
+	const SQUARE =
+		'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="10" height="10" fill="red"/><rect x="10" width="10" height="10" fill="blue"/></svg>';
+
+	it("draws SVG as vectors, sized and fitted like an image", async () => {
+		const doc = page();
+		doc.svg(SQUARE, 0, 0);
+		doc.svg(SQUARE, 0, 100, { width: 200 });
+		doc.svg(Buffer.from(SQUARE), 100, 0, { fit: [100, 100], valign: "bottom" });
+		const top = doc.y;
+		doc.svg(SQUARE, { height: 5 });
+		expect(doc.y - top).toBe(5);
+		const image = await pixels(doc);
+		expect(near(image.at(5, 5), RED)).toBe(true);
+		expect(near(image.at(15, 5), [0, 0, 255])).toBe(true);
+		// 200 wide keeps 2:1: red on the left half, 100 high.
+		expect(near(image.at(50, 150), RED)).toBe(true);
+		expect(near(image.at(150, 150), [0, 0, 255])).toBe(true);
+		// Fitted 100 x 50 to the bottom of its 100 x 100 box.
+		expect(near(image.at(120, 75), RED)).toBe(true);
+		expect(near(image.at(120, 25), WHITE)).toBe(true);
+	});
+
+	it("refuses what is not an SVG", () => {
+		expect(() => page().svg("<html></html>")).toThrow(
+			expect.objectContaining({ code: "E_VELLUM_INVALID_SVG" }),
+		);
+	});
+
+	it("takes PDF path operators through addContent, and nothing else", async () => {
+		const doc = page();
+		doc.save().translate(100, 100);
+		doc.addContent("0 0 m 50 0 l 50 50 l h").fill("red");
+		doc.addContent("-80 -80 30 30 re").fill("blue");
+		doc
+			.addContent("0 60 m 10 70 20 70 v 30 60 30 70 y 30 60 40 60 50 70 c h")
+			.stroke();
+		doc.restore();
+		const image = await pixels(doc);
+		expect(near(image.at(140, 110), RED)).toBe(true);
+		expect(near(image.at(110, 140), WHITE), "below the diagonal").toBe(true);
+		expect(near(image.at(35, 35), [0, 0, 255])).toBe(true);
+		for (const content of [
+			"BT /F1 12 Tf (x) Tj ET",
+			"0 0 m 10 10 l S",
+			"1 0 0 1 0 0 cm",
+			"1 2 m 3",
+		]) {
+			expect(() => page().addContent(content), content).toThrow(
+				expect.objectContaining({ code: "E_VELLUM_UNSUPPORTED_CONTENT" }),
+			);
+		}
+	});
+});

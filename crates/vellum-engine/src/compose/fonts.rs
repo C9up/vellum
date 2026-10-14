@@ -212,6 +212,11 @@ impl LoadedFont {
         Ok(advance / 1000.0 * size)
     }
 
+    /// The file's bytes, as an SVG's text needs them.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.data
+    }
+
     /// Same file, same face: loading it again would embed it twice.
     pub fn is_same(&self, other: &LoadedFont) -> bool {
         self.index == other.index

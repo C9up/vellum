@@ -3,6 +3,8 @@
  * engine paints them.
  */
 
+import { VellumError } from "../errors.js";
+
 /** 4·(√2 − 1)/3: how far a cubic's handles reach to draw a quarter circle. */
 const KAPPA = (4 * (Math.SQRT2 - 1)) / 3;
 
@@ -242,6 +244,81 @@ export function polygon(
 	path.moveTo(first[0], first[1]);
 	for (const [x, y] of rest) path.lineTo(x, y);
 	path.closePath();
+}
+
+const OPERATORS: Readonly<Record<string, number>> = {
+	m: 2,
+	l: 2,
+	c: 6,
+	v: 4,
+	y: 4,
+	h: 0,
+	re: 4,
+};
+
+/**
+ * PDF path construction operators onto `path`: `m l c v y h re`, in user
+ * space. Anything else — painting, text, images, graphics state — is
+ * refused rather than written into the page as pdfkit's `addContent` does.
+ */
+export function pdfPath(path: PathRecorder, content: string): void {
+	const operands: number[] = [];
+	for (const token of content.trim().split(/\s+/)) {
+		if (token === "") continue;
+		const count = OPERATORS[token];
+		if (count === undefined) {
+			const value = Number(token);
+			if (
+				!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(token) ||
+				!Number.isFinite(value)
+			) {
+				throw new VellumError(
+					"UNSUPPORTED_CONTENT",
+					`${JSON.stringify(token)} is not a path operator: only m, l, c, v, y, h and re are taken`,
+				);
+			}
+			operands.push(value);
+			continue;
+		}
+		if (operands.length !== count) {
+			throw new VellumError(
+				"UNSUPPORTED_CONTENT",
+				`${token} takes ${count} numbers, got ${operands.length}`,
+			);
+		}
+		const [a = 0, b = 0, c = 0, d = 0, e = 0, f = 0] = operands.splice(0);
+		const [x0, y0] = path.point;
+		switch (token) {
+			case "m":
+				path.moveTo(a, b);
+				break;
+			case "l":
+				path.lineTo(a, b);
+				break;
+			case "c":
+				path.bezierCurveTo(a, b, c, d, e, f);
+				break;
+			// v: the first handle is the current point; y: the second is the end.
+			case "v":
+				path.bezierCurveTo(x0, y0, a, b, c, d);
+				break;
+			case "y":
+				path.bezierCurveTo(a, b, c, d, c, d);
+				break;
+			case "h":
+				path.closePath();
+				break;
+			case "re":
+				rect(path, a, b, c, d);
+				break;
+		}
+	}
+	if (operands.length > 0) {
+		throw new VellumError(
+			"UNSUPPORTED_CONTENT",
+			"numbers left without an operator",
+		);
+	}
 }
 
 const ARGUMENTS: Readonly<Record<string, number>> = {

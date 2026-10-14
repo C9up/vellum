@@ -211,6 +211,13 @@ export interface EncryptionInput {
 	permissions?: PermissionsInput;
 }
 
+export interface SvgInfo {
+	handle: number;
+	/** Points. */
+	width: number;
+	height: number;
+}
+
 export interface ImageInfo {
 	handle: number;
 	/** Pixels, as stored. */
@@ -684,6 +691,15 @@ export declare class NativeDocument {
 	/** A form field, shown on the current page when `rect` is given. */
 	formField(input: FieldInput, rect?: RectInput | undefined | null): number;
 	setEncryption(input: EncryptionInput): void;
+	/** Parse an SVG: its handle and its size in points. */
+	loadSvg(bytes: Buffer): SvgInfo;
+	drawSvg(
+		handle: number,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+	): void;
 	/** Write the document. Nothing can be added afterwards. */
 	end(): Buffer;
 }

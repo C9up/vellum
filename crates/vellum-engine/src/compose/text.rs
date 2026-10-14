@@ -2067,7 +2067,11 @@ mod tests {
             .iter()
             .filter_map(|op| match op {
                 Op::Glyphs { ctm, .. } => Some(*ctm),
-                Op::Path { .. } | Op::Image { .. } | Op::BeginMark(_) | Op::EndMark => None,
+                Op::Path { .. }
+                | Op::Image { .. }
+                | Op::Svg { .. }
+                | Op::BeginMark(_)
+                | Op::EndMark => None,
             })
             .collect()
     }
@@ -2137,7 +2141,11 @@ mod tests {
             .iter()
             .filter_map(|op| match op {
                 Op::Path { segments, .. } => Some(&segments[..]),
-                Op::Glyphs { .. } | Op::Image { .. } | Op::BeginMark(_) | Op::EndMark => None,
+                Op::Glyphs { .. }
+                | Op::Image { .. }
+                | Op::Svg { .. }
+                | Op::BeginMark(_)
+                | Op::EndMark => None,
             })
             .collect();
         assert_eq!(lines.len(), 2, "an underline and a strike-through");
@@ -2335,7 +2343,11 @@ mod tests {
                     Some(Segment::Move(x, y)) => Some((*x, *y)),
                     _ => None,
                 },
-                Op::Glyphs { .. } | Op::Image { .. } | Op::BeginMark(_) | Op::EndMark => None,
+                Op::Glyphs { .. }
+                | Op::Image { .. }
+                | Op::Svg { .. }
+                | Op::BeginMark(_)
+                | Op::EndMark => None,
             })
             .collect()
     }

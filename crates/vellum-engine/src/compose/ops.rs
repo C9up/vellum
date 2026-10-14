@@ -73,6 +73,13 @@ pub enum Op {
         opacity: f32,
         clips: Arc<Vec<Clip>>,
     },
+    /// An SVG drawing, scaled to `size` in the user space `ctm` maps.
+    Svg {
+        svg: usize,
+        size: Size,
+        ctm: Matrix,
+        clips: Arc<Vec<Clip>>,
+    },
     /// The start of a marked sequence, by its handle (see `tagging`).
     BeginMark(usize),
     EndMark,
@@ -91,9 +98,10 @@ impl Op {
     /// stands outside every clip so marked content and clips never overlap.
     fn clips(&self) -> Option<&Arc<Vec<Clip>>> {
         match self {
-            Op::Glyphs { clips, .. } | Op::Path { clips, .. } | Op::Image { clips, .. } => {
-                Some(clips)
-            }
+            Op::Glyphs { clips, .. }
+            | Op::Path { clips, .. }
+            | Op::Image { clips, .. }
+            | Op::Svg { clips, .. } => Some(clips),
             Op::BeginMark(_) | Op::EndMark => None,
         }
     }
@@ -122,6 +130,7 @@ fn stroke(spec: &StrokeSpec, paints: &PaintBook) -> Stroke {
 /// What the operations of a page refer to.
 pub struct Resources<'a> {
     pub fonts: &'a [LoadedFont],
+    pub svgs: &'a [usvg::Tree],
     pub images: &'a [LoadedImage],
     pub paints: &'a PaintBook,
 }
@@ -203,6 +212,15 @@ fn draw(surface: &mut Surface, op: &Op, resources: &Resources<'_>) {
     let (fonts, paints) = (resources.fonts, resources.paints);
     match op {
         Op::BeginMark(_) | Op::EndMark => {}
+        Op::Svg { svg, size, ctm, .. } => {
+            use krilla_svg::{SurfaceExt, SvgSettings};
+            let Some(tree) = resources.svgs.get(*svg) else {
+                return;
+            };
+            surface.push_transform(&krilla_transform(*ctm));
+            surface.draw_svg(tree, *size, SvgSettings::default());
+            surface.pop();
+        }
         Op::Image {
             image,
             size,

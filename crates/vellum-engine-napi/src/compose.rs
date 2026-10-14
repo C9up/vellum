@@ -268,6 +268,14 @@ fn format(input: FormatInput) -> Result<Format> {
 }
 
 #[napi(object)]
+pub struct SvgInfo {
+    pub handle: u32,
+    /// Points.
+    pub width: f64,
+    pub height: f64,
+}
+
+#[napi(object)]
 pub struct ImageInfo {
     pub handle: u32,
     /// Pixels, as stored.
@@ -1395,6 +1403,33 @@ impl NativeDocument {
             },
         };
         self.with(|document| document.set_encryption(encryption).map_err(failure))
+    }
+
+    /// Parse an SVG: its handle and its size in points.
+    #[napi]
+    pub fn load_svg(&mut self, bytes: Buffer) -> Result<SvgInfo> {
+        let bytes = bytes.to_vec();
+        self.with(|document| {
+            document
+                .load_svg(&bytes)
+                .map(|(handle, width, height)| SvgInfo {
+                    handle: handle as u32,
+                    width: f64::from(width),
+                    height: f64::from(height),
+                })
+                .map_err(failure)
+        })
+    }
+
+    #[napi]
+    pub fn draw_svg(&mut self, handle: u32, x: f64, y: f64, width: f64, height: f64) -> Result<()> {
+        let (x, y) = (finite(x, "x")?, finite(y, "y")?);
+        let (width, height) = (finite(width, "width")?, finite(height, "height")?);
+        self.with(|document| {
+            document
+                .draw_svg(handle as usize, x, y, width, height)
+                .map_err(failure)
+        })
     }
 
     /// Write the document. Nothing can be added afterwards.

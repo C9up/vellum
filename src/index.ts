@@ -42,6 +42,7 @@ export type {
 	PdfFormField,
 	PdfImage,
 	Permissions,
+	SvgOptions,
 	TextAlign,
 	TextBaseline,
 	TextOptions,

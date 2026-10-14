@@ -15,6 +15,7 @@ pub mod images;
 pub mod links;
 pub mod ops;
 pub mod standard;
+pub mod svg;
 pub mod tagging;
 pub mod text;
 
@@ -364,6 +365,7 @@ pub struct Composer {
     pub(crate) paints: PaintBook,
     pub(crate) destinations: Vec<links::NamedPoint>,
     pub(crate) images: Vec<images::LoadedImage>,
+    pub(crate) svgs: Vec<usvg::Tree>,
     pub(crate) link_count: usize,
     pub(crate) marks: Vec<tagging::Mark>,
     pub(crate) open_mark: Option<usize>,
@@ -412,6 +414,7 @@ impl Composer {
             paints: PaintBook::default(),
             destinations: Vec::new(),
             images: Vec::new(),
+            svgs: Vec::new(),
             link_count: 0,
             marks: Vec::new(),
             open_mark: None,
@@ -661,6 +664,7 @@ impl Composer {
                 &page.ops,
                 &ops::Resources {
                     fonts: &self.fonts,
+                    svgs: &self.svgs,
                     images: &self.images,
                     paints: &self.paints,
                 },

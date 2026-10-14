@@ -36,6 +36,10 @@ sha2 = { version = "0.10", features = ["oid"] }
 # and WebP decode an authored document's images once, under limits, before
 # krilla does: the same decoders krilla carries, so nothing more is built.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# SVG drawn as vectors into an authored page, through usvg; the version
+# krilla 0.8 is built with.
+krilla-svg = "0.8.1"
+usvg = "0.47"
 # An image's size from its header alone. krilla allocates the decoded image
 # from what the header claims, so a few bytes claiming 100 000 x 100 000
 # pixels would ask for 30 GB; the size is checked before krilla sees them.

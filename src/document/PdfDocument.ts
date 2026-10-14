@@ -60,6 +60,7 @@ import {
 	arc,
 	ellipse,
 	PathRecorder,
+	pdfPath,
 	polygon,
 	rect,
 	roundedRect,
@@ -500,6 +501,15 @@ export interface PdfImage {
 /** An image: a path, a `data:` URL, its bytes, or one already opened. */
 export type ImageSource = FileSource | PdfImage;
 
+export interface SvgOptions {
+	width?: number;
+	height?: number;
+	/** Fit inside `[width, height]`, keeping the proportions. */
+	fit?: readonly [number, number];
+	align?: "left" | "center" | "right";
+	valign?: "top" | "center" | "bottom";
+}
+
 export interface ImageOptions {
 	x?: number;
 	y?: number;
@@ -693,6 +703,10 @@ export class PdfDocument extends Readable {
 	readonly #imageHandles = new WeakMap<PdfImage, number>();
 	readonly #fileHandles = new WeakMap<PdfFileSpec, number>();
 	readonly #fieldHandles = new WeakMap<PdfFormField, number>();
+	readonly #svgs = new Map<
+		string,
+		{ handle: number; width: number; height: number }
+	>();
 	#formReady = false;
 	/** The document outline: its bookmarks, added with `addItem`. */
 	readonly outline: PdfOutline = new PdfOutline(() => {
@@ -1755,6 +1769,66 @@ export class PdfDocument extends Readable {
 		const spec: PdfFileSpec = Object.freeze({ name });
 		this.#fileHandles.set(spec, handle);
 		return spec;
+	}
+
+	/**
+	 * Draw an SVG as vectors — its markup, a path, a `data:` URL or its
+	 * bytes. pdfkit draws only path data (`path()`); this is in addition.
+	 * The SVG reads no file and no network, whatever it names.
+	 */
+	svg(
+		src: FileSource,
+		x?: number | SvgOptions,
+		y?: number,
+		options: SvgOptions = {},
+	): this {
+		this.#open();
+		const given = typeof x === "object" ? x : options;
+		const inDocumentFlow = typeof y !== "number";
+		let left = typeof x === "number" ? x : this.x;
+		let top = y ?? this.y;
+		const key = typeof src === "string" ? src : undefined;
+		let info = key === undefined ? undefined : this.#svgs.get(key);
+		if (info === undefined) {
+			const markup = typeof src === "string" && src.trimStart().startsWith("<");
+			const bytes = markup ? Buffer.from(src) : readSource(src);
+			info = compose(() => this.#native.loadSvg(bytes));
+			if (key !== undefined) this.#svgs.set(key, info);
+		}
+		let w = given.width || info.width;
+		let h = given.height || info.height;
+		if (given.width && !given.height) h = info.height * (w / info.width);
+		else if (given.height && !given.width) w = info.width * (h / info.height);
+		else if (given.fit) {
+			const [bw, bh] = given.fit;
+			const ratio = info.width / info.height;
+			if (ratio > bw / bh) {
+				w = bw;
+				h = bw / ratio;
+			} else {
+				h = bh;
+				w = bh * ratio;
+			}
+			if (given.align === "center") left += bw / 2 - w / 2;
+			else if (given.align === "right") left += bw - w;
+			if (given.valign === "center") top += bh / 2 - h / 2;
+			else if (given.valign === "bottom") top += bh - h;
+		}
+		if (inDocumentFlow) this.y += h;
+		const handle = info.handle;
+		compose(() => this.#native.drawSvg(handle, left, top, w, h));
+		return this;
+	}
+
+	/**
+	 * pdfkit's `addContent`, for path construction only: `m l c v y h re`
+	 * become the current path, painted with `fill()` or `stroke()`. pdfkit
+	 * writes any operator into the page; text, images and state are refused
+	 * here, as they would bypass everything that checks them.
+	 */
+	addContent(content: string): this {
+		pdfPath(this.#path, content);
+		return this;
 	}
 
 	/** pdfkit's `initForm`: form fields may be added from here on. */
