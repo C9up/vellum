@@ -6,7 +6,9 @@
 //! lays out the next block from where the last one ended. Everything a page
 //! draws is kept (see [`ops`]) and written by krilla when the document ends.
 
+pub mod drawing;
 pub mod fonts;
+pub mod graphics;
 pub mod ops;
 pub mod standard;
 pub mod text;
@@ -21,7 +23,8 @@ use krilla::SerializeSettings;
 use lopdf::{Dictionary, Object};
 
 use fonts::LoadedFont;
-use ops::{Colour, Op};
+use graphics::{GraphicsState, PaintBook};
+use ops::Op;
 
 /// A failure with the code the TypeScript side raises it under.
 #[derive(Debug, Clone, PartialEq)]
@@ -269,7 +272,10 @@ pub struct Composer {
     pub(crate) fonts: Vec<LoadedFont>,
     pub(crate) font: Option<usize>,
     pub(crate) font_size: f32,
-    pub(crate) fill: Colour,
+    pub(crate) state: GraphicsState,
+    /// What `save()` stacked, the latest on top.
+    pub(crate) saved: Vec<GraphicsState>,
+    pub(crate) paints: PaintBook,
     /// The document's `lineGap(n)`.
     pub line_gap: f32,
     /// Word widths in thousandths of an em, by font.
@@ -301,7 +307,9 @@ impl Composer {
             fonts: Vec::new(),
             font: None,
             font_size: 12.0,
-            fill: Colour::BLACK,
+            state: GraphicsState::default(),
+            saved: Vec::new(),
+            paints: PaintBook::default(),
             line_gap: 0.0,
             width_cache: HashMap::new(),
             wrapper: None,
@@ -334,6 +342,11 @@ impl Composer {
         self.current = Some(self.pages.len() - 1);
         self.x = setup.margins.left;
         self.y = setup.margins.top;
+        // A page starts untransformed and unclipped, with nothing saved;
+        // colours, opacities and the stroke style carry over.
+        self.state.ctm = graphics::IDENTITY;
+        self.state.clips = std::sync::Arc::new(Vec::new());
+        self.saved.clear();
         Ok(())
     }
 
@@ -494,7 +507,7 @@ impl Composer {
                 .ok_or_else(|| invalid_options("page size out of range"))?;
             let mut writer = document.start_page_with(page_settings);
             let mut surface = writer.surface();
-            ops::replay(&mut surface, &page.ops, &self.fonts);
+            ops::replay(&mut surface, &page.ops, &self.fonts, &self.paints);
             surface.finish();
             writer.finish();
         }

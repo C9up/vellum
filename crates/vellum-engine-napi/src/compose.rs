@@ -8,6 +8,10 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use vellum_engine::compose::graphics::{
+    Colour, FillRule, Gradient, GradientShape, GradientStop, LineCap, LineJoin, Matrix, Paint,
+    Segment,
+};
 use vellum_engine::compose::text::{Align, Baseline, Step, TextOptions};
 use vellum_engine::compose::{
     ComposeError, Composer, DocumentSettings, Info, Instant, PageSetup, Sides,
@@ -490,6 +494,193 @@ impl NativeDocument {
         self.with(|document| document.set_info(info).map_err(failure))
     }
 
+    #[napi]
+    pub fn save(&mut self) -> Result<()> {
+        self.with(|document| document.save().map_err(failure))
+    }
+
+    #[napi]
+    pub fn restore(&mut self) -> Result<()> {
+        self.with(|document| document.restore().map_err(failure))
+    }
+
+    #[napi]
+    pub fn transform(&mut self, values: Vec<f64>) -> Result<()> {
+        let matrix = matrix(&values)?;
+        self.with(|document| document.transform(matrix).map_err(failure))
+    }
+
+    #[napi]
+    pub fn get_ctm(&self) -> Vec<f64> {
+        self.inner
+            .ctm()
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect()
+    }
+
+    #[napi]
+    pub fn set_fill_paint(&mut self, input: PaintInput) -> Result<()> {
+        let paint = paint(input)?;
+        self.with(|document| document.set_fill(paint).map_err(failure))
+    }
+
+    #[napi]
+    pub fn set_stroke_paint(&mut self, input: PaintInput) -> Result<()> {
+        let paint = paint(input)?;
+        self.with(|document| document.set_stroke(paint).map_err(failure))
+    }
+
+    #[napi]
+    pub fn set_fill_opacity(&mut self, value: f64) {
+        self.inner.set_fill_opacity(value as f32);
+    }
+
+    #[napi]
+    pub fn set_stroke_opacity(&mut self, value: f64) {
+        self.inner.set_stroke_opacity(value as f32);
+    }
+
+    #[napi]
+    pub fn set_line_width(&mut self, width: f64) -> Result<()> {
+        let width = finite(width, "lineWidth")?;
+        self.with(|document| document.set_line_width(width).map_err(failure))
+    }
+
+    /// `butt`, `round`, `square`.
+    #[napi]
+    pub fn set_line_cap(&mut self, cap: String) -> Result<()> {
+        let cap = match cap.as_str() {
+            "butt" => LineCap::Butt,
+            "round" => LineCap::Round,
+            "square" => LineCap::Square,
+            other => return Err(options_error(format!("{other:?} is not a line cap"))),
+        };
+        self.inner.set_line_cap(cap);
+        Ok(())
+    }
+
+    /// `miter`, `round`, `bevel`.
+    #[napi]
+    pub fn set_line_join(&mut self, join: String) -> Result<()> {
+        let join = match join.as_str() {
+            "miter" => LineJoin::Miter,
+            "round" => LineJoin::Round,
+            "bevel" => LineJoin::Bevel,
+            other => return Err(options_error(format!("{other:?} is not a line join"))),
+        };
+        self.inner.set_line_join(join);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn set_miter_limit(&mut self, limit: f64) -> Result<()> {
+        let limit = finite(limit, "miterLimit")?;
+        self.with(|document| document.set_miter_limit(limit).map_err(failure))
+    }
+
+    /// No lengths: a solid line.
+    #[napi]
+    pub fn set_dash(&mut self, lengths: Option<Vec<f64>>, phase: Option<f64>) -> Result<()> {
+        let dash = match lengths {
+            None => None,
+            Some(lengths) => Some((
+                lengths
+                    .iter()
+                    .map(|length| finite(*length, "dash"))
+                    .collect::<Result<Vec<_>>>()?,
+                optional(phase, "phase")?.unwrap_or(0.0),
+            )),
+        };
+        self.with(|document| document.set_dash(dash).map_err(failure))
+    }
+
+    #[napi]
+    pub fn add_gradient(&mut self, input: GradientInput) -> Result<u32> {
+        let coords = input
+            .coords
+            .iter()
+            .map(|value| finite(*value, "gradient coordinates"))
+            .collect::<Result<Vec<_>>>()?;
+        let shape = match (input.kind.as_str(), coords.as_slice()) {
+            ("linear", &[x1, y1, x2, y2]) => GradientShape::Linear { x1, y1, x2, y2 },
+            ("radial", &[x1, y1, r1, x2, y2, r2]) => GradientShape::Radial {
+                x1,
+                y1,
+                r1,
+                x2,
+                y2,
+                r2,
+            },
+            (kind, _) => return Err(options_error(format!("{kind:?} is not a gradient"))),
+        };
+        let stops = input
+            .stops
+            .into_iter()
+            .map(|stop| {
+                Ok(GradientStop {
+                    offset: finite(stop.offset, "a stop's position")?,
+                    colour: colour(&stop.kind, &stop.values)?,
+                    opacity: finite(stop.opacity, "a stop's opacity")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let gradient = Gradient {
+            shape,
+            stops,
+            transform: matrix(&input.transform)?,
+        };
+        self.with(|document| {
+            document
+                .add_gradient(gradient)
+                .map(|index| index as u32)
+                .map_err(failure)
+        })
+    }
+
+    /// A spot colour falling back to CMYK (each 0–255).
+    #[napi]
+    pub fn add_spot_colour(&mut self, name: String, cmyk: Vec<f64>) -> Result<u32> {
+        let Colour::Cmyk(cyan, magenta, yellow, black) = colour("cmyk", &cmyk)? else {
+            return Err(options_error("a spot colour falls back to CMYK"));
+        };
+        self.with(|document| {
+            document
+                .add_spot(&name, [cyan, magenta, yellow, black])
+                .map(|index| index as u32)
+                .map_err(failure)
+        })
+    }
+
+    /// `fill`: a fill rule, or absent to only stroke.
+    #[napi]
+    pub fn paint_path(
+        &mut self,
+        verbs: String,
+        coords: Vec<f64>,
+        fill: Option<String>,
+        stroke: bool,
+    ) -> Result<()> {
+        let path = segments(&verbs, &coords)?;
+        let rule = fill
+            .as_deref()
+            .map(|rule| fill_rule(Some(rule)))
+            .transpose()?;
+        self.with(|document| document.paint_path(&path, rule, stroke).map_err(failure))
+    }
+
+    #[napi]
+    pub fn clip_path(
+        &mut self,
+        verbs: String,
+        coords: Vec<f64>,
+        rule: Option<String>,
+    ) -> Result<()> {
+        let path = segments(&verbs, &coords)?;
+        let rule = fill_rule(rule.as_deref())?;
+        self.with(|document| document.clip(&path, rule).map_err(failure))
+    }
+
     /// Write the document. Nothing can be added afterwards.
     #[napi]
     pub fn end(&mut self) -> Result<Buffer> {
@@ -501,4 +692,132 @@ impl NativeDocument {
 #[napi]
 pub fn standard_font_file(name: String) -> Option<String> {
     vellum_engine::compose::standard::standard(&name).map(|face| face.file.to_string())
+}
+
+/// A colour or paint: `rgb` (0–255 each), `cmyk` (0–255 each), or a
+/// `spot` / `gradient` handle.
+#[napi(object)]
+pub struct PaintInput {
+    pub kind: String,
+    pub values: Option<Vec<f64>>,
+    pub handle: Option<u32>,
+}
+
+#[napi(object)]
+pub struct GradientStopInput {
+    pub offset: f64,
+    /// `rgb` or `cmyk`.
+    pub kind: String,
+    pub values: Vec<f64>,
+    pub opacity: f64,
+}
+
+#[napi(object)]
+pub struct GradientInput {
+    /// `linear` (`x1 y1 x2 y2`) or `radial` (`x1 y1 r1 x2 y2 r2`).
+    pub kind: String,
+    pub coords: Vec<f64>,
+    pub stops: Vec<GradientStopInput>,
+    pub transform: Vec<f64>,
+}
+
+fn byte(value: f64, name: &str) -> Result<u8> {
+    if value.is_finite() && (0.0..=255.0).contains(&value) {
+        Ok(value.round() as u8)
+    } else {
+        Err(options_error(format!(
+            "{name} components are 0 to 255, got {value}"
+        )))
+    }
+}
+
+fn colour(kind: &str, values: &[f64]) -> Result<Colour> {
+    match (kind, values) {
+        ("rgb", [red, green, blue]) => Ok(Colour::Rgb(
+            byte(*red, "rgb")?,
+            byte(*green, "rgb")?,
+            byte(*blue, "rgb")?,
+        )),
+        ("cmyk", [cyan, magenta, yellow, black]) => Ok(Colour::Cmyk(
+            byte(*cyan, "cmyk")?,
+            byte(*magenta, "cmyk")?,
+            byte(*yellow, "cmyk")?,
+            byte(*black, "cmyk")?,
+        )),
+        _ => Err(options_error(format!(
+            "{kind:?} with {} values is not a colour",
+            values.len()
+        ))),
+    }
+}
+
+fn paint(input: PaintInput) -> Result<Paint> {
+    match (input.kind.as_str(), input.handle) {
+        ("spot", Some(handle)) => Ok(Paint::Spot(handle as usize)),
+        ("gradient", Some(handle)) => Ok(Paint::Gradient(handle as usize)),
+        (kind, _) => colour(kind, &input.values.unwrap_or_default()).map(Paint::Colour),
+    }
+}
+
+fn matrix(values: &[f64]) -> Result<Matrix> {
+    let [a, b, c, d, e, f] =
+        <[f64; 6]>::try_from(values).map_err(|_| options_error("a transform has six numbers"))?;
+    Ok([
+        finite(a, "transform")?,
+        finite(b, "transform")?,
+        finite(c, "transform")?,
+        finite(d, "transform")?,
+        finite(e, "transform")?,
+        finite(f, "transform")?,
+    ])
+}
+
+/// A path as verbs (`M L C Q Z`) and the numbers they take, in order.
+fn segments(verbs: &str, coords: &[f64]) -> Result<Vec<Segment>> {
+    let mut numbers = coords.iter();
+    let mut take = |count: usize| -> Result<Vec<f32>> {
+        (0..count)
+            .map(|_| {
+                numbers
+                    .next()
+                    .ok_or_else(|| options_error("a path has fewer numbers than its verbs take"))
+                    .and_then(|value| finite(*value, "path coordinates"))
+            })
+            .collect()
+    };
+    let mut out = Vec::with_capacity(verbs.len());
+    for verb in verbs.chars() {
+        out.push(match verb {
+            'M' => {
+                let p = take(2)?;
+                Segment::Move(p[0], p[1])
+            }
+            'L' => {
+                let p = take(2)?;
+                Segment::Line(p[0], p[1])
+            }
+            'C' => {
+                let p = take(6)?;
+                Segment::Cubic(p[0], p[1], p[2], p[3], p[4], p[5])
+            }
+            'Q' => {
+                let p = take(4)?;
+                Segment::Quad(p[0], p[1], p[2], p[3])
+            }
+            'Z' => Segment::Close,
+            other => return Err(options_error(format!("{other:?} is not a path verb"))),
+        });
+    }
+    if numbers.next().is_some() {
+        return Err(options_error("a path has more numbers than its verbs take"));
+    }
+    Ok(out)
+}
+
+fn fill_rule(rule: Option<&str>) -> Result<FillRule> {
+    match rule {
+        None | Some("non-zero") | Some("nonzero") => Ok(FillRule::NonZero),
+        Some("even-odd") | Some("evenodd") => Ok(FillRule::EvenOdd),
+        Some(other) => Err(options_error(format!("{other:?} is not a fill rule"))),
+    }
 }

@@ -75,6 +75,33 @@ export interface TextOptionsInput {
 	baselineOffset?: number;
 }
 
+/**
+ * A colour or paint: `rgb` (0–255 each), `cmyk` (0–255 each), or a
+ * `spot` / `gradient` handle.
+ */
+
+export interface PaintInput {
+	kind: string;
+	values?: Array<number>;
+	handle?: number;
+}
+
+export interface GradientStopInput {
+	offset: number;
+	/** `rgb` or `cmyk`. */
+	kind: string;
+	values: Array<number>;
+	opacity: number;
+}
+
+export interface GradientInput {
+	/** `linear` (`x1 y1 x2 y2`) or `radial` (`x1 y1 r1 x2 y2 r2`). */
+	kind: string;
+	coords: Array<number>;
+	stops: Array<GradientStopInput>;
+	transform: Array<number>;
+}
+
 export interface DocumentInfo {
 	pageCount: number;
 	version: string;
@@ -365,6 +392,40 @@ export declare class NativeDocument {
 	moveDown(lines: number): void;
 	moveUp(lines: number): void;
 	setInfo(info: DocumentInfoInput): void;
+	save(): void;
+	restore(): void;
+	transform(values: Array<number>): void;
+	getCtm(): Array<number>;
+	setFillPaint(input: PaintInput): void;
+	setStrokePaint(input: PaintInput): void;
+	setFillOpacity(value: number): void;
+	setStrokeOpacity(value: number): void;
+	setLineWidth(width: number): void;
+	/** `butt`, `round`, `square`. */
+	setLineCap(cap: string): void;
+	/** `miter`, `round`, `bevel`. */
+	setLineJoin(join: string): void;
+	setMiterLimit(limit: number): void;
+	/** No lengths: a solid line. */
+	setDash(
+		lengths?: Array<number> | undefined | null,
+		phase?: number | undefined | null,
+	): void;
+	addGradient(input: GradientInput): number;
+	/** A spot colour falling back to CMYK (each 0–255). */
+	addSpotColour(name: string, cmyk: Array<number>): number;
+	/** `fill`: a fill rule, or absent to only stroke. */
+	paintPath(
+		verbs: string,
+		coords: Array<number>,
+		fill: string | undefined | null,
+		stroke: boolean,
+	): void;
+	clipPath(
+		verbs: string,
+		coords: Array<number>,
+		rule?: string | undefined | null,
+	): void;
 	/** Write the document. Nothing can be added afterwards. */
 	end(): Buffer;
 }

@@ -26,6 +26,12 @@ import {
 	standardFontFileNative,
 	type TextOptionsInput,
 } from "../native.js";
+import {
+	type ColourValue,
+	type PlainColour,
+	paintOf,
+	plainColour,
+} from "./colours.js";
 import { type FileSource, readSource, standardFontBytes } from "./files.js";
 import {
 	normalizeSides,
@@ -35,6 +41,15 @@ import {
 	type Size,
 	sizeToPoint,
 } from "./sizes.js";
+import {
+	arc,
+	ellipse,
+	PathRecorder,
+	polygon,
+	rect,
+	roundedRect,
+	svgPath,
+} from "./vector.js";
 
 /** A font: a standard name, a name given to {@link PdfDocument.registerFont}, a path, or the file's bytes. */
 export type FontSource = FileSource;
@@ -134,6 +149,111 @@ export interface WidthOptions {
 	characterSpacing?: number;
 	horizontalScaling?: number;
 	features?: readonly string[];
+}
+
+type Matrix = [number, number, number, number, number, number];
+
+/**
+ * A gradient, built with `stop()` and painted with `fill(gradient)` or
+ * `fillColor(gradient)`. Its coordinates are in the user space it is
+ * painted in.
+ */
+export abstract class PdfGradient {
+	readonly #stops: { offset: number; colour: PlainColour; opacity: number }[] =
+		[];
+	#transform: Matrix = [1, 0, 0, 1, 0, 0];
+	#handle: number | undefined;
+	readonly #register: (gradient: PdfGradient) => number;
+
+	protected constructor(register: (gradient: PdfGradient) => number) {
+		this.#register = register;
+	}
+
+	/** `offset` from 0 to 1; every stop in one colour space. */
+	stop(offset: number, colour: ColourValue, opacity = 1): this {
+		this.#stops.push({ offset, colour: plainColour(colour), opacity });
+		this.#handle = undefined;
+		return this;
+	}
+
+	setTransform(
+		m11: number,
+		m12: number,
+		m21: number,
+		m22: number,
+		dx: number,
+		dy: number,
+	): this {
+		this.#transform = [m11, m12, m21, m22, dx, dy];
+		this.#handle = undefined;
+		return this;
+	}
+
+	abstract readonly kind: "linear" | "radial";
+	abstract readonly coords: readonly number[];
+
+	/** The engine's handle, registered again only once the gradient changed. */
+	handle(): number {
+		if (this.#handle === undefined) this.#handle = this.#register(this);
+		return this.#handle;
+	}
+
+	get stops(): ReadonlyArray<{
+		offset: number;
+		colour: PlainColour;
+		opacity: number;
+	}> {
+		return this.#stops;
+	}
+
+	get transform(): readonly number[] {
+		return this.#transform;
+	}
+}
+
+export class PdfLinearGradient extends PdfGradient {
+	readonly kind = "linear";
+	readonly coords: readonly number[];
+
+	constructor(
+		register: (gradient: PdfGradient) => number,
+		x1: number,
+		y1: number,
+		x2: number,
+		y2: number,
+	) {
+		super(register);
+		this.coords = [x1, y1, x2, y2];
+	}
+}
+
+export class PdfRadialGradient extends PdfGradient {
+	readonly kind = "radial";
+	readonly coords: readonly number[];
+
+	constructor(
+		register: (gradient: PdfGradient) => number,
+		x1: number,
+		y1: number,
+		r1: number,
+		x2: number,
+		y2: number,
+		r2: number,
+	) {
+		super(register);
+		this.coords = [x1, y1, r1, x2, y2, r2];
+	}
+}
+
+/** A colour, or a gradient. */
+export type Colour = ColourValue | PdfGradient;
+
+export type FillRule = "even-odd" | "evenodd" | "non-zero" | "nonzero";
+
+const FILL_RULE = /^(even-?odd|non-?zero)$/;
+
+function isFillRule(value: unknown): value is FillRule {
+	return typeof value === "string" && FILL_RULE.test(value);
 }
 
 /** A page of the document: its size and margins, in points. */
@@ -240,6 +360,8 @@ export class PdfDocument extends Readable {
 	>();
 	readonly #remSize: number;
 	#textOptions: TextOptions | undefined;
+	readonly #path = new PathRecorder();
+	readonly #spots = new Map<string, number>();
 	#ended = false;
 
 	constructor(options: PdfDocumentOptions = {}) {
@@ -617,6 +739,353 @@ export class PdfDocument extends Readable {
 				baselineOffset: typeof baseline === "number" ? baseline : undefined,
 			},
 		};
+	}
+
+	save(): this {
+		compose(() => this.#native.save());
+		return this;
+	}
+
+	/** pdfkit writes an unmatched restore into the page; here it is refused. */
+	restore(): this {
+		compose(() => this.#native.restore());
+		return this;
+	}
+
+	transform(
+		m11: number,
+		m12: number,
+		m21: number,
+		m22: number,
+		dx: number,
+		dy: number,
+	): this {
+		if (
+			m11 === 1 &&
+			m12 === 0 &&
+			m21 === 0 &&
+			m22 === 1 &&
+			dx === 0 &&
+			dy === 0
+		) {
+			return this;
+		}
+		compose(() => this.#native.transform([m11, m12, m21, m22, dx, dy]));
+		return this;
+	}
+
+	translate(x: number, y: number): this {
+		return this.transform(1, 0, 0, 1, x, y);
+	}
+
+	/** Degrees, clockwise on the page, about `origin` (default the user-space origin). */
+	rotate(
+		angle: number,
+		options: { origin?: readonly [number, number] } = {},
+	): this {
+		const radians = (angle * Math.PI) / 180;
+		const cos = Math.cos(radians);
+		const sin = Math.sin(radians);
+		let x = 0;
+		let y = 0;
+		if (options.origin !== undefined) {
+			[x, y] = options.origin;
+			const rotatedX = x * cos - y * sin;
+			const rotatedY = x * sin + y * cos;
+			x -= rotatedX;
+			y -= rotatedY;
+		}
+		return this.transform(cos, sin, -sin, cos, x, y);
+	}
+
+	scale(
+		xFactor: number,
+		yFactor?: number | { origin?: readonly [number, number] },
+		options: { origin?: readonly [number, number] } = {},
+	): this {
+		const factor = typeof yFactor === "number" ? yFactor : xFactor;
+		const origin =
+			typeof yFactor === "object" ? yFactor.origin : options.origin;
+		let x = 0;
+		let y = 0;
+		if (origin !== undefined) {
+			[x, y] = origin;
+			x -= xFactor * x;
+			y -= factor * y;
+		}
+		return this.transform(xFactor, 0, 0, factor, x, y);
+	}
+
+	lineWidth(width: number): this {
+		compose(() => this.#native.setLineWidth(width));
+		return this;
+	}
+
+	lineCap(cap: "butt" | "round" | "square" | 0 | 1 | 2): this {
+		const name =
+			typeof cap === "number"
+				? (["butt", "round", "square"] as const)[cap]
+				: cap.toLowerCase();
+		compose(() => this.#native.setLineCap(String(name)));
+		return this;
+	}
+
+	lineJoin(join: "miter" | "round" | "bevel" | 0 | 1 | 2): this {
+		const name =
+			typeof join === "number"
+				? (["miter", "round", "bevel"] as const)[join]
+				: join.toLowerCase();
+		compose(() => this.#native.setLineJoin(String(name)));
+		return this;
+	}
+
+	miterLimit(limit: number): this {
+		compose(() => this.#native.setMiterLimit(limit));
+		return this;
+	}
+
+	dash(
+		length: number | readonly number[],
+		options: { space?: number; phase?: number } = {},
+	): this {
+		const lengths =
+			typeof length === "number"
+				? [length, options.space || length]
+				: [...length];
+		compose(() => this.#native.setDash(lengths, options.phase || 0));
+		return this;
+	}
+
+	undash(): this {
+		compose(() => this.#native.setDash(undefined, undefined));
+		return this;
+	}
+
+	moveTo(x: number, y: number): this {
+		this.#path.moveTo(x, y);
+		return this;
+	}
+
+	lineTo(x: number, y: number): this {
+		this.#path.lineTo(x, y);
+		return this;
+	}
+
+	bezierCurveTo(
+		cp1x: number,
+		cp1y: number,
+		cp2x: number,
+		cp2y: number,
+		x: number,
+		y: number,
+	): this {
+		this.#path.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y);
+		return this;
+	}
+
+	/**
+	 * A true quadratic curve. pdfkit writes PDF's `v` operator instead: a
+	 * cubic whose first handle is the current point, which bends differently.
+	 */
+	quadraticCurveTo(cpx: number, cpy: number, x: number, y: number): this {
+		this.#path.quadraticCurveTo(cpx, cpy, x, y);
+		return this;
+	}
+
+	closePath(): this {
+		this.#path.closePath();
+		return this;
+	}
+
+	rect(x: number, y: number, width: number, height: number): this {
+		rect(this.#path, x, y, width, height);
+		return this;
+	}
+
+	/** One radius, or `[topLeft, topRight, bottomRight, bottomLeft]`. */
+	roundedRect(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		radius?: number | readonly number[],
+	): this {
+		roundedRect(this.#path, x, y, width, height, radius);
+		return this;
+	}
+
+	ellipse(x: number, y: number, radiusX: number, radiusY?: number): this {
+		ellipse(this.#path, x, y, radiusX, radiusY);
+		return this;
+	}
+
+	circle(x: number, y: number, radius: number): this {
+		return this.ellipse(x, y, radius);
+	}
+
+	/** Angles in radians. */
+	arc(
+		x: number,
+		y: number,
+		radius: number,
+		startAngle: number,
+		endAngle: number,
+		anticlockwise?: boolean,
+	): this {
+		arc(this.#path, x, y, radius, startAngle, endAngle, anticlockwise);
+		return this;
+	}
+
+	polygon(...points: ReadonlyArray<readonly [number, number]>): this {
+		polygon(this.#path, points);
+		return this;
+	}
+
+	/** SVG path data (`M10 10 h 50 a 5 5 0 0 1 5 5 Z`). */
+	path(data: string): this {
+		svgPath(this.#path, data);
+		return this;
+	}
+
+	#paint(fill: FillRule | undefined | null, stroke: boolean): this {
+		const { verbs, coords } = this.#path.take();
+		if (verbs.length === 0) return this;
+		compose(() =>
+			this.#native.paintPath(
+				verbs,
+				coords,
+				fill === null ? undefined : (fill ?? "non-zero"),
+				stroke,
+			),
+		);
+		return this;
+	}
+
+	fill(colour?: Colour | FillRule, rule?: FillRule): this {
+		if (isFillRule(colour)) return this.#paint(colour, false);
+		if (colour !== undefined) this.fillColor(colour);
+		return this.#paint(rule, false);
+	}
+
+	stroke(colour?: Colour): this {
+		if (colour !== undefined) this.strokeColor(colour);
+		return this.#paint(null, true);
+	}
+
+	fillAndStroke(
+		fillColour?: Colour | FillRule,
+		strokeColour?: Colour | FillRule,
+		rule?: FillRule,
+	): this {
+		let fill = fillColour;
+		let stroke = strokeColour ?? fillColour;
+		let windingRule = rule;
+		if (isFillRule(fill)) {
+			windingRule = fill;
+			fill = undefined;
+		}
+		if (isFillRule(stroke)) {
+			windingRule = stroke;
+			stroke = fill;
+		}
+		if (fill !== undefined) {
+			this.fillColor(fill);
+			if (stroke !== undefined) this.strokeColor(stroke);
+		}
+		return this.#paint(windingRule, true);
+	}
+
+	/** Clip to the path until the next `restore()`. */
+	clip(rule?: FillRule): this {
+		const { verbs, coords } = this.#path.take();
+		compose(() => this.#native.clipPath(verbs, coords, rule));
+		return this;
+	}
+
+	#paintInput(colour: Colour) {
+		if (colour instanceof PdfGradient) {
+			return { kind: "gradient", handle: colour.handle() };
+		}
+		return paintOf(colour, this.#spots);
+	}
+
+	fillColor(colour: Colour, opacity?: number): this {
+		const paint = this.#paintInput(colour);
+		compose(() => this.#native.setFillPaint(paint));
+		if (opacity !== undefined) this.fillOpacity(opacity);
+		return this;
+	}
+
+	strokeColor(colour: Colour, opacity?: number): this {
+		const paint = this.#paintInput(colour);
+		compose(() => this.#native.setStrokePaint(paint));
+		if (opacity !== undefined) this.strokeOpacity(opacity);
+		return this;
+	}
+
+	opacity(opacity: number): this {
+		return this.fillOpacity(opacity).strokeOpacity(opacity);
+	}
+
+	fillOpacity(opacity: number): this {
+		this.#native.setFillOpacity(opacity);
+		return this;
+	}
+
+	strokeOpacity(opacity: number): this {
+		this.#native.setStrokeOpacity(opacity);
+		return this;
+	}
+
+	#registerGradient = (gradient: PdfGradient): number =>
+		compose(() =>
+			this.#native.addGradient({
+				kind: gradient.kind,
+				coords: [...gradient.coords],
+				stops: gradient.stops.map((stop) => ({
+					offset: stop.offset,
+					kind: stop.colour.kind,
+					values: stop.colour.values,
+					opacity: stop.opacity,
+				})),
+				transform: [...gradient.transform],
+			}),
+		);
+
+	linearGradient(
+		x1: number,
+		y1: number,
+		x2: number,
+		y2: number,
+	): PdfLinearGradient {
+		return new PdfLinearGradient(this.#registerGradient, x1, y1, x2, y2);
+	}
+
+	radialGradient(
+		x1: number,
+		y1: number,
+		r1: number,
+		x2: number,
+		y2: number,
+		r2: number,
+	): PdfRadialGradient {
+		return new PdfRadialGradient(
+			this.#registerGradient,
+			x1,
+			y1,
+			r1,
+			x2,
+			y2,
+			r2,
+		);
+	}
+
+	/** A spot colour, then used by its name; CMYK from 0 to 100. */
+	addSpotColor(name: string, c: number, m: number, y: number, k: number): this {
+		const cmyk = [c, m, y, k].map((part) => (part * 255) / 100);
+		const handle = compose(() => this.#native.addSpotColour(name, cmyk));
+		this.#spots.set(name, handle);
+		return this;
 	}
 
 	#open(): void {

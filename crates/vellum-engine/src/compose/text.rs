@@ -26,8 +26,9 @@ use unicode_linebreak::{linebreaks, BreakOpportunity};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::fonts::{parse_features, LoadedFont, Shaped};
-use super::ops::{Op, PlacedGlyph};
+use super::ops::{FillSpec, Op, PlacedGlyph};
 use super::{ComposeError, Composer};
+use krilla::paint::FillRule;
 
 const SOFT_HYPHEN: char = '\u{00AD}';
 const HYPHEN: &str = "-";
@@ -1091,7 +1092,7 @@ impl Composer {
         let font_index = self
             .font
             .ok_or_else(|| ComposeError::new("NO_FONT", "no font is selected"))?;
-        let colour = self.fill;
+        let state = self.state.clone();
         let mut pen = x;
         let mut ops = Vec::with_capacity(glyph_runs.len());
         for glyphs in glyph_runs {
@@ -1101,9 +1102,16 @@ impl Composer {
                 font: font_index,
                 size,
                 origin: (pen, y + dy),
-                colour,
                 text: text.clone(),
                 glyphs,
+                fill: Some(FillSpec {
+                    paint: state.fill,
+                    opacity: state.fill_opacity,
+                    rule: FillRule::NonZero,
+                }),
+                stroke: None,
+                ctm: state.ctm,
+                clips: state.clips.clone(),
             });
             pen += advance;
         }
@@ -1393,7 +1401,10 @@ mod tests {
                     origin,
                     text,
                     ..
-                } = op;
+                } = op
+                else {
+                    continue;
+                };
                 let ascender = document.fonts[*font].vertical.ascender;
                 out.push(Fragment {
                     page,
@@ -1768,15 +1779,17 @@ mod tests {
         let widths: Vec<f32> = document.pages[0]
             .ops
             .iter()
-            .map(|op| {
-                let Op::Glyphs { glyphs, size, .. } = op;
+            .filter_map(|op| {
+                let Op::Glyphs { glyphs, size, .. } = op else {
+                    return None;
+                };
                 // The last glyph's advance carries the word spacing past the
                 // line's end; what is drawn stops before it.
                 let drawn: f32 = glyphs[..glyphs.len() - 1]
                     .iter()
                     .map(|glyph| glyph.advance)
                     .sum();
-                (drawn + 600.0) / 1000.0 * size
+                Some((drawn + 600.0) / 1000.0 * size)
             })
             .collect();
         assert_eq!(widths.len(), 9);
