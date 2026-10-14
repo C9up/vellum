@@ -36,6 +36,11 @@ sha2 = { version = "0.10", features = ["oid"] }
 # and WebP decode an authored document's images once, under limits, before
 # krilla does: the same decoders krilla carries, so nothing more is built.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# An image's size from its header alone. krilla allocates the decoded image
+# from what the header claims, so a few bytes claiming 100 000 x 100 000
+# pixels would ask for 30 GB; the size is checked before krilla sees them.
+# Already in the tree through krilla.
+imagesize = "0.14"
 # The signature value itself: a CMS SignedData, its certificates, the RSA
 # signature and the ASN.1 they are all written in. These sit on the older
 # RustCrypto generation, which costs a second copy of `digest` next to the one

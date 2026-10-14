@@ -166,6 +166,16 @@ impl LoadedImage {
         }
         let kind = kind(&bytes)
             .ok_or_else(|| invalid("unknown image format: PNG, JPEG, GIF and WebP are read"))?;
+        // Before krilla: it allocates the image from what the header claims.
+        let claimed = imagesize::blob_size(&bytes)
+            .map_err(|error| invalid(format!("the image's header cannot be read: {error}")))?;
+        let pixels = (claimed.width as u64).saturating_mul(claimed.height as u64);
+        if pixels > MAX_IMAGE_PIXELS {
+            return Err(invalid(format!(
+                "an image of {} x {} pixels is over the limit of {MAX_IMAGE_PIXELS}",
+                claimed.width, claimed.height
+            )));
+        }
         let data = Arc::new(bytes);
         let krilla = match kind {
             ImageKind::Png => Image::from_png(data.clone().into(), true),
