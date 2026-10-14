@@ -109,6 +109,8 @@ enum Sink {
     Draw,
     /// Only move down: measuring.
     Measure,
+    /// Move down and keep the widest line: the bounds of the text.
+    Bounds,
 }
 
 /// pdfkit's `LineWrapper`: the state that lives across the lines of one
@@ -199,6 +201,8 @@ pub(crate) struct TextRun {
     last_text_width: f32,
     /// A section ran out and only a new page lets the run go on.
     needs_page: bool,
+    /// The widest line so far, for [`Sink::Bounds`].
+    content_width: f32,
     /// Set when suspended.
     resume: Option<Resume>,
     /// State a suspended word callback needs to finish.
@@ -347,6 +351,44 @@ impl Composer {
         result.map(|_| height)
     }
 
+    /// pdfkit's `boundsOfString`: `(width, height)` of what `text()` would
+    /// draw, before any rotation. Never breaks the page — pdfkit's does,
+    /// adding real pages to the document while it measures.
+    pub fn bounds_of_string(
+        &mut self,
+        text: &str,
+        options: &TextOptions,
+    ) -> Result<(f32, f32), ComposeError> {
+        let (x, y) = (self.x, self.y);
+        // A height still stops the text where it would; without one, no
+        // page break.
+        let measuring = TextOptions {
+            height: Some(options.height.unwrap_or(f32::INFINITY)),
+            continued: false,
+            ..options.clone()
+        };
+        let continued = self.wrapper.take();
+        let width = self.measure_bounds(text, &measuring);
+        self.wrapper = continued;
+        let mut height = self.y - y;
+        if let Some(limit) = options.height.filter(|limit| *limit != 0.0) {
+            height = height.min(limit);
+        }
+        self.x = x;
+        self.y = y;
+        width.map(|width| (width, height))
+    }
+
+    fn measure_bounds(&mut self, text: &str, options: &TextOptions) -> Result<f32, ComposeError> {
+        let mut run = self.start_run(text, options, Sink::Bounds)?;
+        if options.width.is_some_and(|width| width != 0.0) {
+            self.wrap(&mut run)?;
+        } else {
+            self.unwrapped(&mut run)?;
+        }
+        Ok(run.content_width)
+    }
+
     fn start_run(
         &mut self,
         text: &str,
@@ -383,6 +425,7 @@ impl Composer {
             continue_y: self.y,
             last_text_width: 0.0,
             needs_page: false,
+            content_width: 0.0,
             resume: None,
             pending: None,
             started: false,
@@ -465,6 +508,17 @@ impl Composer {
                     )?;
                 }
                 Sink::Measure => self.advance_line(run)?,
+                Sink::Bounds => {
+                    let features = run.features.clone();
+                    let width = self.width_of_string(
+                        line,
+                        run.options.character_spacing.unwrap_or(0.0),
+                        run.options.horizontal_scaling,
+                        &features,
+                    )?;
+                    self.advance_bounds(run)?;
+                    run.content_width = run.content_width.max(width);
+                }
             }
         }
         Ok(())
@@ -480,6 +534,51 @@ impl Composer {
     fn advance_line(&mut self, run: &TextRun) -> Result<(), ComposeError> {
         self.y += self.current_line_height(true)? + self.line_gap_for(run);
         Ok(())
+    }
+
+    /// pdfkit's bounds take the line gap with `??`, not `||`: an explicit 0
+    /// wins over the document's gap.
+    fn advance_bounds(&mut self, run: &TextRun) -> Result<(), ComposeError> {
+        let gap = run.options.line_gap.unwrap_or(self.line_gap);
+        self.y += self.current_line_height(true)? + gap;
+        Ok(())
+    }
+
+    /// How wide a wrapped line is drawn: its text width, or for a justified
+    /// line its words and the space spread between them. pdfkit adds the
+    /// spread on top of a width that keeps the trailing space, and word and
+    /// character spacing a second time on top of a width that already carries
+    /// them; a justified line then measures wider than the line it fills.
+    fn rendered_width(
+        &mut self,
+        line: &str,
+        run: &TextRun,
+        info: &LineInfo,
+    ) -> Result<f32, ComposeError> {
+        let line: String = line
+            .chars()
+            .filter(|&character| character != '\n')
+            .collect();
+        if line.is_empty() {
+            return Ok(0.0);
+        }
+        let text_width = info.text_width.unwrap_or(0.0);
+        let (Align::Justify, Some(line_width)) = (info.align, info.line_width) else {
+            return Ok(text_width);
+        };
+        let character_spacing = run.options.character_spacing.unwrap_or(0.0);
+        let features = run.features.clone();
+        let words = line.split_whitespace().count();
+        let compact: String = line.split_whitespace().collect();
+        let compact_width = self.width_of_string(
+            &compact,
+            character_spacing,
+            run.options.horizontal_scaling,
+            &features,
+        )?;
+        let space = self.width_of_string(" ", 0.0, 100.0, &[])? + character_spacing;
+        let spread = ((line_width - compact_width) / (words.max(2) - 1) as f32 - space).max(0.0);
+        Ok(compact_width + (words.saturating_sub(1)) as f32 * (spread + space))
     }
 
     fn word_width(&mut self, run: &TextRun, word: &str) -> Result<f32, ComposeError> {
@@ -841,6 +940,11 @@ impl Composer {
                 self.advance_line(run)?;
             }
             Sink::Measure => self.advance_line(run)?,
+            Sink::Bounds => {
+                self.advance_bounds(run)?;
+                let width = self.rendered_width(&line, run, &info)?;
+                run.content_width = run.content_width.max(width);
+            }
         }
         run.line_count += 1;
         for hook in std::mem::take(&mut run.wrapper.after_line) {

@@ -37,6 +37,11 @@ export interface PageSetupInput {
 	userUnit?: number;
 }
 
+export interface TextBounds {
+	width: number;
+	height: number;
+}
+
 export interface PageRange {
 	start: number;
 	count: number;
@@ -355,6 +360,8 @@ export declare class NativeDocument {
 	text(text: string, options: TextOptionsInput): string;
 	resumeText(): string;
 	heightOfString(text: string, options: TextOptionsInput): number;
+	/** Width and height of what `text()` would draw, before any rotation. */
+	boundsOfString(text: string, options: TextOptionsInput): TextBounds;
 	moveDown(lines: number): void;
 	moveUp(lines: number): void;
 	setInfo(info: DocumentInfoInput): void;

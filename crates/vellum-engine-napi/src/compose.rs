@@ -50,6 +50,12 @@ pub struct PageSetupInput {
 }
 
 #[napi(object)]
+pub struct TextBounds {
+    pub width: f64,
+    pub height: f64,
+}
+
+#[napi(object)]
 pub struct PageRange {
     pub start: u32,
     pub count: u32,
@@ -443,6 +449,25 @@ impl NativeDocument {
             document
                 .height_of_string(&text, &options)
                 .map(f64::from)
+                .map_err(failure)
+        })
+    }
+
+    /// Width and height of what `text()` would draw, before any rotation.
+    #[napi]
+    pub fn bounds_of_string(
+        &mut self,
+        text: String,
+        options: TextOptionsInput,
+    ) -> Result<TextBounds> {
+        let options = TextOptions::try_from(options)?;
+        self.with(|document| {
+            document
+                .bounds_of_string(&text, &options)
+                .map(|(width, height)| TextBounds {
+                    width: f64::from(width),
+                    height: f64::from(height),
+                })
                 .map_err(failure)
         })
     }

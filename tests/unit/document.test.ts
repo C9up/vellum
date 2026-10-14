@@ -214,3 +214,71 @@ describe("PdfDocument — output", () => {
 		expect(() => doc.end()).toThrow(VellumError);
 	});
 });
+
+describe("PdfDocument — boundsOfString", () => {
+	// pdfkit 0.20.2's answers for the same text, font and options.
+	const sans = new URL(
+		"../../fonts/LiberationSans-Regular.ttf",
+		import.meta.url,
+	).pathname;
+	const FR =
+		"Les présentes conditions générales régissent l'ensemble des prestations fournies par l'entreprise à ses clients, qu'il s'agisse de travaux de rénovation, d'installations neuves ou d'interventions de dépannage. Toute commande implique l'acceptation sans réserve des conditions ci-après, à l'exclusion de tout autre document. Les devis sont valables trente jours à compter de leur date d'émission ; passé ce délai, les prix peuvent être révisés en fonction de l'évolution du coût des matériaux et de la main-d'œuvre.";
+
+	function document() {
+		return new PdfDocument({ size: "A4" }).font(sans).fontSize(11);
+	}
+
+	it("measures a wrapped paragraph as pdfkit does", () => {
+		const bounds = document().boundsOfString(FR, 72, 72, { width: 300 });
+		expect(bounds.x).toBe(72);
+		expect(bounds.y).toBe(72);
+		expect(bounds.width).toBeCloseTo(299.8896, 2);
+		expect(bounds.height).toBeCloseTo(113.8403, 2);
+	});
+
+	it("turns the box with the rotation", () => {
+		const bounds = document().boundsOfString(FR, 72, 72, {
+			width: 300,
+			rotation: 90,
+		});
+		expect(bounds.y).toBeCloseTo(-227.8896, 2);
+		expect(bounds.width).toBeCloseTo(113.8403, 2);
+		expect(bounds.height).toBeCloseTo(299.8896, 2);
+	});
+
+	it("stops at a height, and measures lines given as they are", () => {
+		const doc = document();
+		expect(
+			doc.boundsOfString(FR, 72, 72, { width: 300, height: 50 }).height,
+		).toBeCloseTo(37.9468, 2);
+		const lines = doc.boundsOfString("Première ligne\nSeconde", 72, 72, {
+			lineBreak: false,
+		});
+		expect(lines.width).toBeCloseTo(70.9199, 2);
+		expect(lines.height).toBeCloseTo(25.2979, 2);
+	});
+
+	it("measures a justified paragraph by the width it fills", () => {
+		// pdfkit answers 310.6 here, wider than the 300 the lines fill.
+		const bounds = document().boundsOfString(FR, 72, 72, {
+			width: 300,
+			align: "justify",
+		});
+		expect(bounds.width).toBeCloseTo(300, 1);
+	});
+
+	it("adds no page while measuring", () => {
+		const doc = document();
+		doc.boundsOfString(FR.repeat(20), 72, 700, { width: 300 });
+		expect(doc.bufferedPageRange().count).toBe(1);
+	});
+});
+
+describe("PdfDocument — rendering", () => {
+	it("renders the pages it writes", async () => {
+		const doc = new PdfDocument({ size: "A4" });
+		doc.fontSize(24).text("Rendu");
+		const png = await vellum.render(await bytesOf(doc), { page: 1 });
+		expect(png.subarray(1, 4).toString()).toBe("PNG");
+	});
+});

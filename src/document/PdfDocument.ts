@@ -126,6 +126,8 @@ export interface TextOptions {
 	horizontalScaling?: number;
 	features?: readonly string[];
 	baseline?: TextBaseline;
+	/** Degrees, counter-clockwise on the page. */
+	rotation?: number;
 }
 
 export interface WidthOptions {
@@ -508,6 +510,57 @@ export class PdfDocument extends Readable {
 		return compose(() => this.#native.heightOfString(value, resolved.native));
 	}
 
+	/**
+	 * The box of what `text()` would draw from (`x`, `y`), rotation
+	 * included. The cursor moves to (`x`, `y`) when they are given.
+	 */
+	boundsOfString(
+		text: unknown,
+		x?: number | TextOptions,
+		y?: number,
+		options?: TextOptions,
+	): { x: number; y: number; width: number; height: number } {
+		const resolved = this.#initOptions(x, y, options);
+		const value = text === null || text === undefined ? "" : String(text);
+		const { x: left, y: top } = this;
+		const { width, height } = compose(() =>
+			this.#native.boundsOfString(value, resolved.native),
+		);
+		const rotation = normalizeRotation(resolved.options.rotation);
+		switch (rotation) {
+			case 0:
+				return { x: left, y: top, width, height };
+			case 90:
+				return { x: left, y: top - width, width: height, height: width };
+			case 180:
+				return { x: left - width, y: top - height, width, height };
+			case 270:
+				return { x: left - height, y: top, width: height, height: width };
+		}
+		const cos = Math.cos((rotation * Math.PI) / 180);
+		const sin = Math.sin((rotation * Math.PI) / 180);
+		const xs = [
+			left,
+			left + width * cos,
+			left + width * cos + height * sin,
+			left + height * sin,
+		];
+		const ys = [
+			top,
+			top - width * sin,
+			top - width * sin + height * cos,
+			top + height * cos,
+		];
+		const x0 = Math.min(...xs);
+		const y0 = Math.min(...ys);
+		return {
+			x: x0,
+			y: y0,
+			width: Math.max(...xs) - x0,
+			height: Math.max(...ys) - y0,
+		};
+	}
+
 	/** pdfkit's `_initOptions`: merge a continued text's options, place the cursor, default the width. */
 	#initOptions(
 		x: number | TextOptions | undefined,
@@ -587,6 +640,12 @@ export class PdfDocument extends Readable {
 		this.push(null);
 		return this;
 	}
+}
+
+/** Degrees brought into [0, 360), as pdfkit does. */
+function normalizeRotation(rotation: number | undefined): number {
+	const turned = Number(rotation ?? 0) % 360;
+	return turned < 0 ? turned + 360 : turned;
 }
 
 /** Every byte of a document, once it has ended. */
