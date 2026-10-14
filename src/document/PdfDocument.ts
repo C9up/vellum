@@ -160,6 +160,18 @@ export interface TextOptions {
 	destination?: string;
 }
 
+export interface ListOptions extends TextOptions {
+	listType?: "bullet" | "numbered" | "lettered";
+	bulletRadius?: number;
+	/** From the bullet to the text. */
+	textIndent?: number;
+	/** What each nested level adds. */
+	bulletIndent?: number;
+}
+
+/** A list's items: nested arrays are sub-lists. */
+export type ListItems = ReadonlyArray<string | ListItems>;
+
 export interface WidthOptions {
 	characterSpacing?: number;
 	horizontalScaling?: number;
@@ -671,6 +683,67 @@ export class PdfDocument extends Readable {
 		while (step === "needPage") {
 			this.continueOnNewPage();
 			step = compose(() => this.#native.resumeText());
+		}
+		return this;
+	}
+
+	/**
+	 * pdfkit's `list`: bullets, numbers (`1.`) or letters (`A.` … `Z.`,
+	 * `AA.`), nested arrays as sub-lists numbered from 1.
+	 */
+	list(
+		items: ListItems,
+		x?: number | ListOptions,
+		y?: number,
+		options?: ListOptions,
+	): this {
+		this.#open();
+		const given: ListOptions = typeof x === "object" ? x : (options ?? {});
+		const listType = given.listType ?? "bullet";
+		const unit = Math.round(
+			(compose(() => this.#native.ascender()) / 1000) *
+				this.#native.getFontSize(),
+		);
+		const radius = given.bulletRadius || unit / 3;
+		const indent =
+			given.textIndent || (listType === "bullet" ? radius * 5 : unit * 2);
+		const itemIndent =
+			given.bulletIndent || (listType === "bullet" ? radius * 8 : unit * 2);
+		const flat: Array<{ text: string; level: number; number: number }> = [];
+		const flatten = (list: ListItems, level: number) => {
+			let number = 1;
+			for (const item of list) {
+				if (typeof item === "string") {
+					flat.push({ text: item, level, number: number++ });
+				} else {
+					flatten(item, level + 1);
+				}
+			}
+		};
+		flatten(items, 1);
+		const resolved = this.#initOptions(
+			typeof x === "object" ? given : x,
+			y,
+			given,
+		);
+		for (const { text, level, number } of flat) {
+			const label =
+				listType === "numbered"
+					? `${number}.`
+					: listType === "lettered"
+						? `${String.fromCharCode(((number - 1) % 26) + 65).repeat(Math.floor((number - 1) / 26) + 1)}.`
+						: undefined;
+			const item =
+				label === undefined
+					? { level, radius, midLine: unit / 2, indent, itemIndent }
+					: { level, label, indent, itemIndent };
+			let step = compose(() =>
+				this.#native.listItem(text, resolved.native, item),
+			);
+			while (step === "needPage") {
+				this.continueOnNewPage();
+				step = compose(() => this.#native.resumeText());
+			}
 		}
 		return this;
 	}

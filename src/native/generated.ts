@@ -37,6 +37,17 @@ export interface PageSetupInput {
 	userUnit?: number;
 }
 
+/** An item of `list()`: a bullet (`radius`, `midLine`) or a `label`. */
+
+export interface ListItemInput {
+	level: number;
+	radius?: number;
+	midLine?: number;
+	label?: string;
+	indent: number;
+	itemIndent: number;
+}
+
 export interface ImageInfo {
 	handle: number;
 	/** Pixels, as stored. */
@@ -408,6 +419,12 @@ export declare class NativeDocument {
 	): number;
 	/** `done`, or `needPage`: add a page, then [`Self::resume_text`]. */
 	text(text: string, options: TextOptionsInput): string;
+	/** One item of a list: `done`, or `needPage` as for [`Self::text`]. */
+	listItem(
+		text: string,
+		options: TextOptionsInput,
+		item: ListItemInput,
+	): string;
 	resumeText(): string;
 	heightOfString(text: string, options: TextOptionsInput): number;
 	/** Width and height of what `text()` would draw, before any rotation. */

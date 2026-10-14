@@ -27,6 +27,8 @@ export type {
 	FontSource,
 	ImageOptions,
 	ImageSource,
+	ListItems,
+	ListOptions,
 	PageLayout,
 	PageOptions as PdfPageOptions,
 	PdfDocumentOptions,

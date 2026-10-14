@@ -13,7 +13,7 @@ use vellum_engine::compose::graphics::{
     Segment,
 };
 use vellum_engine::compose::links::LinkTarget;
-use vellum_engine::compose::text::{Align, Baseline, Step, TextOptions};
+use vellum_engine::compose::text::{Align, Baseline, ListItem, ListMarker, Step, TextOptions};
 use vellum_engine::compose::{
     ComposeError, Composer, DocumentSettings, Info, Instant, PageSetup, Sides,
 };
@@ -52,6 +52,17 @@ pub struct PageSetupInput {
     pub bottom: f64,
     pub left: f64,
     pub user_unit: Option<f64>,
+}
+
+/// An item of `list()`: a bullet (`radius`, `midLine`) or a `label`.
+#[napi(object)]
+pub struct ListItemInput {
+    pub level: u32,
+    pub radius: Option<f64>,
+    pub mid_line: Option<f64>,
+    pub label: Option<String>,
+    pub indent: f64,
+    pub item_indent: f64,
 }
 
 #[napi(object)]
@@ -477,6 +488,40 @@ impl NativeDocument {
     pub fn text(&mut self, text: String, options: TextOptionsInput) -> Result<&'static str> {
         let options = TextOptions::try_from(options)?;
         self.with(|document| document.text(&text, &options).map(step).map_err(failure))
+    }
+
+    /// One item of a list: `done`, or `needPage` as for [`Self::text`].
+    #[napi]
+    pub fn list_item(
+        &mut self,
+        text: String,
+        options: TextOptionsInput,
+        item: ListItemInput,
+    ) -> Result<&'static str> {
+        let options = TextOptions::try_from(options)?;
+        if item.level == 0 || item.level > 64 {
+            return Err(options_error("a list nests 1 to 64 levels deep"));
+        }
+        let marker = match (item.label, item.radius, item.mid_line) {
+            (Some(label), _, _) => ListMarker::Label(label),
+            (None, Some(radius), Some(mid_line)) => ListMarker::Bullet {
+                radius: finite(radius, "bulletRadius")?,
+                mid_line: finite(mid_line, "midLine")?,
+            },
+            _ => return Err(options_error("a list item has a label or a bullet")),
+        };
+        let item = ListItem {
+            level: item.level,
+            marker,
+            indent: finite(item.indent, "textIndent")?,
+            item_indent: finite(item.item_indent, "bulletIndent")?,
+        };
+        self.with(|document| {
+            document
+                .list_item(&text, &options, item)
+                .map(step)
+                .map_err(failure)
+        })
     }
 
     #[napi]

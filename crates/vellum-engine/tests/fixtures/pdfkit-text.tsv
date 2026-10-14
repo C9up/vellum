@@ -1,5 +1,6 @@
 # Layouts recorded with pdfkit 0.20.2, Liberation Sans 2.1.5: one fragment per line,
-# scenario<TAB>page<TAB>x<TAB>y<TAB>text, x where the line is drawn, y the top of its line box,
+# scenario<TAB>page<TAB>x<TAB>y<TAB>text, x where the line is drawn, y the top of its line box;
+# scenario<TAB>circle<TAB>x<TAB>y<TAB>radius for a list's bullets;
 # then scenario<TAB>end<TAB>x<TAB>y<TAB>pages[<TAB>result].
 paragraph	0	72	72	Les présentes conditions générales régissent l'ensemble des 
 paragraph	0	72	84.649	prestations fournies par l'entreprise à ses clients, qu'il 
@@ -231,6 +232,34 @@ word_spacing	0	72	160.542	compter de leur date d'émission ; passé ce délai, l
 word_spacing	0	72	173.191	prix peuvent être révisés en fonction de l'évolution du 
 word_spacing	0	72	185.84	coût des matériaux et de la main-d'œuvre.
 word_spacing	end	72	198.489	1
+list_bullet	0	88.667	72	Premier élément assez long pour 
+list_bullet	0	88.667	84.649	passer à la ligne suivante de la 
+list_bullet	0	88.667	97.298	colonne
+list_bullet	0	115.333	109.947	Sous-élément
+list_bullet	0	115.333	122.596	Autre sous-élément
+list_bullet	0	88.667	135.245	Dernier
+list_bullet	circle	75.333	77	3.333
+list_bullet	circle	102	114.947	3.333
+list_bullet	circle	102	127.596	3.333
+list_bullet	circle	75.333	140.245	3.333
+list_bullet	end	72	147.894	1
+list_numbered	0	72	72	1.
+list_numbered	0	92	72	Un
+list_numbered	0	92	84.649	1.
+list_numbered	0	112	84.649	Un point un
+list_numbered	0	92	97.298	2.
+list_numbered	0	112	97.298	Un point deux, plus long, pour 
+list_numbered	0	112	109.947	couper la ligne ici même
+list_numbered	0	72	122.596	2.
+list_numbered	0	92	122.596	Deux
+list_numbered	end	72	135.245	1
+list_lettered	0	72	72	A.
+list_lettered	0	92	72	Alpha
+list_lettered	0	72	84.649	B.
+list_lettered	0	92	84.649	Bravo
+list_lettered	0	72	97.298	C.
+list_lettered	0	92	97.298	Charlie
+list_lettered	end	72	109.947	1
 horizontal_scaling	0	72	72	Les présentes conditions générales régissent l'ensemble des 
 horizontal_scaling	0	72	84.649	prestations fournies par l'entreprise à ses clients, qu'il 
 horizontal_scaling	0	72	97.298	s'agisse de travaux de rénovation, d'installations neuves ou 

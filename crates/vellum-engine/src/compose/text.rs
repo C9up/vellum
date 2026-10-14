@@ -102,6 +102,37 @@ pub struct TextOptions {
     pub destination: Option<String>,
 }
 
+/// What marks an item of a list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListMarker {
+    /// A filled circle of `radius`, centred `mid_line` below the line's top.
+    Bullet { radius: f32, mid_line: f32 },
+    /// `1.`, `A.`…
+    Label(String),
+}
+
+/// One item of pdfkit's `list()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListItem {
+    /// From 1.
+    pub level: u32,
+    pub marker: ListMarker,
+    /// From the marker's left to the text.
+    pub indent: f32,
+    /// What each level adds.
+    pub item_indent: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ListState {
+    item: ListItem,
+    /// pdfkit starts each item at level 1 and moves it on its first line.
+    level: u32,
+    marked: bool,
+    /// Whether a section's offset is applied, so it comes off once.
+    open: bool,
+}
+
 /// Whether a run of text finished or needs a page to go on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -223,6 +254,8 @@ pub(crate) struct TextRun {
     /// The rotation the text is drawn under, about where it started; gone
     /// after a page break, as pdfkit's transform is.
     rotation: Option<Matrix>,
+    /// Set when the run is an item of a list.
+    list: Option<ListState>,
     /// Set when suspended.
     resume: Option<Resume>,
     /// State a suspended word callback needs to finish.
@@ -448,6 +481,7 @@ impl Composer {
             content_width: 0.0,
             rotation: (options.rotation != 0.0)
                 .then(|| rotation_about(-options.rotation, self.x, self.y)),
+            list: None,
             resume: None,
             pending: None,
             started: false,
@@ -652,9 +686,11 @@ impl Composer {
                 run.resume = Some(Resume::Start);
                 return Ok(Step::NeedPage);
             }
+            self.section_start(run);
             run.continue_y = self.y;
         } else if let Some(resume) = run.resume.take() {
             self.after_page_break(run);
+            self.section_start(run);
             match resume {
                 Resume::Start => run.continue_y = self.y,
                 Resume::AfterLine => {
@@ -685,6 +721,7 @@ impl Composer {
             self.last_line(run);
             self.emit_line(run)?;
         }
+        self.section_end(run);
         self.end_wrap(run);
         Ok(Step::Done)
     }
@@ -803,6 +840,7 @@ impl Composer {
     ) -> Result<Flow, ComposeError> {
         if last.is_none_or(|last| last.required) {
             self.first_line(run);
+            self.mark_list_item(run)?;
             run.wrapper.space_left = run.wrapper.line_width;
         }
 
@@ -847,9 +885,10 @@ impl Composer {
         self.emit_line(run)?;
 
         if self.y + line_height > run.wrapper.max_y {
+            self.section_end(run);
             match self.next_section(run)? {
                 Some(false) => return Ok(Flow::Stop),
-                Some(true) => {}
+                Some(true) => self.section_start(run),
                 None => {
                     run.pending = Some(PendingWord {
                         word: word.to_string(),
@@ -896,6 +935,107 @@ impl Composer {
         let buffer = run.buffer.clone();
         run.text_width = self.word_width(run, &buffer)?;
         Ok(())
+    }
+
+    /// pdfkit's list `sectionStart`: the item's text starts past its marker
+    /// and its level's indent.
+    fn section_start(&mut self, run: &mut TextRun) {
+        let Some(list) = run.list.as_mut() else {
+            return;
+        };
+        if list.open {
+            return;
+        }
+        let offset = list.item.indent + list.item.item_indent * (list.level as f32 - 1.0);
+        self.x += offset;
+        run.wrapper.line_width -= offset;
+        list.open = true;
+    }
+
+    fn section_end(&mut self, run: &mut TextRun) {
+        let Some(list) = run.list.as_mut() else {
+            return;
+        };
+        if !list.open {
+            return;
+        }
+        let offset = list.item.indent + list.item.item_indent * (list.level as f32 - 1.0);
+        self.x -= offset;
+        run.wrapper.line_width += offset;
+        list.open = false;
+    }
+
+    /// pdfkit's list `firstLine`, once per item: move to the item's level,
+    /// then draw its bullet or its label.
+    fn mark_list_item(&mut self, run: &mut TextRun) -> Result<(), ComposeError> {
+        let Some(list) = run.list.as_mut() else {
+            return Ok(());
+        };
+        if list.marked {
+            return Ok(());
+        }
+        list.marked = true;
+        if list.item.level != list.level {
+            let difference = list.item.item_indent * (list.item.level as f32 - list.level as f32);
+            self.x += difference;
+            run.wrapper.line_width -= difference;
+            list.level = list.item.level;
+        }
+        let marker = list.item.marker.clone();
+        let indent = list.item.indent;
+        if run.sink != Sink::Draw {
+            return Ok(());
+        }
+        match marker {
+            ListMarker::Bullet { radius, mid_line } => {
+                let (cx, cy) = (self.x - indent + radius, self.y + mid_line);
+                let k = radius * 4.0 * (std::f32::consts::SQRT_2 - 1.0) / 3.0;
+                let circle = [
+                    Segment::Move(cx - radius, cy),
+                    Segment::Cubic(cx - radius, cy - k, cx - k, cy - radius, cx, cy - radius),
+                    Segment::Cubic(cx + k, cy - radius, cx + radius, cy - k, cx + radius, cy),
+                    Segment::Cubic(cx + radius, cy + k, cx + k, cy + radius, cx, cy + radius),
+                    Segment::Cubic(cx - k, cy + radius, cx - radius, cy + k, cx - radius, cy),
+                    Segment::Close,
+                ];
+                self.paint_path(&circle, Some(FillRule::NonZero), false)?;
+            }
+            ListMarker::Label(label) => {
+                let info = LineInfo {
+                    text_width: None,
+                    word_count: None,
+                    line_width: None,
+                    align: Align::Left,
+                    rtl: false,
+                };
+                self.fragment(&label, self.x - indent, self.y, run, &info)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Start one item of a list at the cursor; [`Step::NeedPage`] as for
+    /// [`Self::text`].
+    pub fn list_item(
+        &mut self,
+        text: &str,
+        options: &TextOptions,
+        item: ListItem,
+    ) -> Result<Step, ComposeError> {
+        self.page()?;
+        // pdfkit's list wrapper is always a fresh one, and a continued
+        // text's wrapper waits untouched.
+        let continued = self.wrapper.take();
+        let run = self.start_run(text, options, Sink::Draw);
+        self.wrapper = continued;
+        let mut run = run?;
+        run.list = Some(ListState {
+            item,
+            level: 1,
+            marked: false,
+            open: false,
+        });
+        self.drive(run)
     }
 
     /// pdfkit's `firstLine` listener: the paragraph indent, or the offset a
@@ -1419,12 +1559,15 @@ mod tests {
 
     struct Expected {
         fragments: Vec<Fragment>,
+        /// `(x, y, radius)` of each bullet.
+        circles: Vec<(f32, f32, f32)>,
         end: (f32, f32, usize),
         result: Option<f32>,
     }
 
     fn expected(name: &str) -> Expected {
         let mut fragments = Vec::new();
+        let mut circles = Vec::new();
         let mut end = None;
         let mut result = None;
         for line in FIXTURE.lines().filter(|line| !line.starts_with('#')) {
@@ -1433,7 +1576,9 @@ mod tests {
                 continue;
             }
             let number = |index: usize| fields[index].parse::<f32>().unwrap();
-            if fields[1] == "end" {
+            if fields[1] == "circle" {
+                circles.push((number(2), number(3), number(4)));
+            } else if fields[1] == "end" {
                 end = Some((number(2), number(3), fields[4].parse().unwrap()));
                 result = fields.get(5).map(|value| value.parse().unwrap());
             } else {
@@ -1448,6 +1593,7 @@ mod tests {
         }
         Expected {
             fragments,
+            circles,
             end: end.unwrap_or_else(|| panic!("no scenario {name}")),
             result,
         }
@@ -2064,6 +2210,136 @@ mod tests {
             },
         );
         assert_eq!(refused.unwrap_err().code, "INVALID_LINK");
+    }
+
+    /// What the TypeScript `list()` hands over: each item flattened with
+    /// its level, labelled, measured as pdfkit measures a list.
+    fn list(
+        document: &mut Composer,
+        items: &[(u32, &str)],
+        kind: &str,
+        at: (f32, f32),
+        width: Option<f32>,
+    ) {
+        document.x = at.0;
+        document.y = at.1;
+        let ascender = document.current_font().unwrap().vertical.ascender;
+        let unit = (ascender / 1000.0 * document.font_size()).round();
+        let radius = unit / 3.0;
+        let (indent, item_indent) = if kind == "bullet" {
+            (radius * 5.0, radius * 8.0)
+        } else {
+            (unit * 2.0, unit * 2.0)
+        };
+        let mut numbers: Vec<u32> = Vec::new();
+        for (level, text) in items {
+            let depth = *level as usize;
+            numbers.truncate(depth);
+            numbers.resize(depth, 0);
+            numbers[depth - 1] += 1;
+            let n = numbers[depth - 1];
+            let marker = match kind {
+                "bullet" => ListMarker::Bullet {
+                    radius,
+                    mid_line: unit / 2.0,
+                },
+                "numbered" => ListMarker::Label(format!("{n}.")),
+                _ => ListMarker::Label(format!(
+                    "{}.",
+                    char::from(b'A' + ((n - 1) % 26) as u8)
+                        .to_string()
+                        .repeat(((n - 1) / 26 + 1) as usize)
+                )),
+            };
+            let width = width.unwrap_or_else(|| {
+                let page = document.page().unwrap();
+                page.setup.width - document.x - page.setup.margins.right
+            });
+            let options = TextOptions {
+                width: Some(width),
+                ..defaults()
+            };
+            let item = ListItem {
+                level: *level,
+                marker,
+                indent,
+                item_indent,
+            };
+            let mut step = document.list_item(text, &options, item).unwrap();
+            while step == Step::NeedPage {
+                document.add_page(A4).unwrap();
+                step = document.resume_text().unwrap();
+            }
+        }
+    }
+
+    fn bullets(document: &Composer) -> Vec<(f32, f32)> {
+        document.pages[0]
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Path { segments, .. } => match segments.first() {
+                    Some(Segment::Move(x, y)) => Some((*x, *y)),
+                    _ => None,
+                },
+                Op::Glyphs { .. } | Op::Image { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lists_lay_out_as_pdfkit_lays_them_out() {
+        let items = [
+            (
+                1,
+                "Premier élément assez long pour passer à la ligne suivante de la colonne",
+            ),
+            (2, "Sous-élément"),
+            (2, "Autre sous-élément"),
+            (1, "Dernier"),
+        ];
+        let mut document = document();
+        document.set_font_size(11.0).unwrap();
+        list(&mut document, &items, "bullet", (72.0, 72.0), Some(200.0));
+        assert_layout("list_bullet", &document);
+        let expected = expected("list_bullet").circles;
+        let ours = bullets(&document);
+        assert_eq!(ours.len(), expected.len());
+        for ((x, y), (cx, cy, radius)) in ours.iter().zip(&expected) {
+            // A circle starts at its leftmost point.
+            assert!(
+                (x - (cx - radius)).abs() < 0.01 && (y - cy).abs() < 0.01,
+                "bullet at ({x}, {y}), pdfkit's centre ({cx}, {cy})"
+            );
+        }
+
+        let mut document = self::document();
+        document.set_font_size(11.0).unwrap();
+        let numbered = [
+            (1, "Un"),
+            (2, "Un point un"),
+            (2, "Un point deux, plus long, pour couper la ligne ici même"),
+            (1, "Deux"),
+        ];
+        list(
+            &mut document,
+            &numbered,
+            "numbered",
+            (72.0, 72.0),
+            Some(200.0),
+        );
+        assert_layout("list_numbered", &document);
+
+        let mut document = self::document();
+        document.set_font_size(11.0).unwrap();
+        list(
+            &mut document,
+            &[(1, "Alpha"), (1, "Bravo"), (1, "Charlie")],
+            "lettered",
+            (72.0, 72.0),
+            None,
+        );
+        assert_layout("list_lettered", &document);
     }
 
     #[test]

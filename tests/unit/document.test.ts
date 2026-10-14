@@ -450,3 +450,34 @@ describe("PdfDocument — more of pdfkit's surface", () => {
 		await expect(bytes).rejects.toThrow("disk full");
 	});
 });
+
+describe("PdfDocument — lists", () => {
+	it("numbers nested items from 1 at each level, and reads back in order", async () => {
+		const doc = new PdfDocument();
+		doc.list(["Un", ["Un point un", "Un point deux"], "Deux"], {
+			listType: "numbered",
+		});
+		doc.moveDown().list(["Alpha", "Bravo"], { listType: "lettered" });
+		doc.moveDown().list(["Puce", ["Sous-puce"]]);
+		// A label and its text are two runs: no space between them reads back.
+		const text = (await vellum.extractText(await bytesOf(doc))).replace(
+			/\s+/g,
+			"",
+		);
+		expect(text).toContain("1.Un1.Unpointun2.Unpointdeux2.Deux");
+		expect(text).toContain("A.AlphaB.Bravo");
+		expect(text).toContain("PuceSous-puce");
+	});
+
+	it("runs a long list onto the next page", async () => {
+		const doc = new PdfDocument({ size: "A5", bufferPages: true });
+		const items = Array.from(
+			{ length: 60 },
+			(_, index) => `Élément ${index + 1}`,
+		);
+		doc.list(items, 50, 50, { listType: "numbered" });
+		expect(doc.bufferedPageRange().count).toBeGreaterThan(1);
+		const pages = await vellum.extractTextAll(await bytesOf(doc));
+		expect(pages.join("").replace(/\s+/g, "")).toContain("60.Élément60");
+	});
+});
