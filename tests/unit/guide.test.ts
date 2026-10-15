@@ -8,15 +8,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { finished } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { PdfDocument, toBytes, Vellum } from "../../src/index.js";
 import { encodePng } from "./png.js";
 
 const vellum = new Vellum();
-const fontPath = new URL(
-	"../../fonts/LiberationSerif-Regular.ttf",
-	import.meta.url,
-).pathname;
+const fontPath = fileURLToPath(
+	new URL("../../fonts/LiberationSerif-Regular.ttf", import.meta.url),
+);
 const logo = encodePng(40, 20, (x) =>
 	x < 20 ? [0, 64, 133] : [204, 229, 255],
 );

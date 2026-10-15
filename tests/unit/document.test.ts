@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	PdfDocument,
@@ -156,7 +157,7 @@ describe("PdfDocument — fonts and text", () => {
 		const doc = new PdfDocument();
 		doc.registerFont("Body", "/virtual/Body.ttf");
 		doc.font(bytes).text("from bytes");
-		doc.font(sans.pathname).text("from a path");
+		doc.font(fileURLToPath(sans)).text("from a path");
 		doc.font("Body").text("from a registered name");
 		const text = await vellum.extractText(await bytesOf(doc));
 		for (const line of [
@@ -218,10 +219,9 @@ describe("PdfDocument — output", () => {
 
 describe("PdfDocument — boundsOfString", () => {
 	// pdfkit 0.20.2's answers for the same text, font and options.
-	const sans = new URL(
-		"../../fonts/LiberationSans-Regular.ttf",
-		import.meta.url,
-	).pathname;
+	const sans = fileURLToPath(
+		new URL("../../fonts/LiberationSans-Regular.ttf", import.meta.url),
+	);
 	const FR =
 		"Les présentes conditions générales régissent l'ensemble des prestations fournies par l'entreprise à ses clients, qu'il s'agisse de travaux de rénovation, d'installations neuves ou d'interventions de dépannage. Toute commande implique l'acceptation sans réserve des conditions ci-après, à l'exclusion de tout autre document. Les devis sont valables trente jours à compter de leur date d'émission ; passé ce délai, les prix peuvent être révisés en fonction de l'évolution du coût des matériaux et de la main-d'œuvre.";
 

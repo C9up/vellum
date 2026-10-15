@@ -4,15 +4,15 @@
  * declared, the run that every call draws.
  */
 
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { PdfDocument, toBytes, Vellum } from "../../src/index.js";
 import { encodePng } from "./png.js";
 
 const vellum = new Vellum();
-const SERIF = new URL(
-	"../../fonts/LiberationSerif-Regular.ttf",
-	import.meta.url,
-).pathname;
+const SERIF = fileURLToPath(
+	new URL("../../fonts/LiberationSerif-Regular.ttf", import.meta.url),
+);
 const PNG = encodePng(8, 8, (x, y) =>
 	(x + y) % 2 === 0 ? [20, 60, 200] : [255, 255, 255],
 );

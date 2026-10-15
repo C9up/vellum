@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { PdfDocument, toBytes, Vellum } from "../../src/index.js";
 import { decodePng, type Pixels } from "./png.js";
 
 const vellum = new Vellum();
-const SANS = new URL("../../fonts/LiberationSans-Regular.ttf", import.meta.url)
-	.pathname;
+const SANS = fileURLToPath(
+	new URL("../../fonts/LiberationSans-Regular.ttf", import.meta.url),
+);
 
 async function bytesOf(doc: PdfDocument): Promise<Buffer> {
 	const done = toBytes(doc);
