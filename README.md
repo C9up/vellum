@@ -512,7 +512,10 @@ checked, traced to an authority you accept and asked about at their issuer,
 are complete.
 
 Not provided when writing a document: `pattern()`, which would write raw PDF
-operators into the page.
+operators into the page; `addNamedJavaScript()`, a script the document runs
+when it opens — the only JavaScript written is the Acrobat format calls built
+from a field's checked parameters; and `ref()`, a raw object that would bypass
+the escaping and the PDF/A and PDF/UA checks.
 
 What remains needs something this package cannot supply itself: an adapter for
 a certified provider, which is a short function returning a `Signer` and
