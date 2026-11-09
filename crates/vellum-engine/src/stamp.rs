@@ -10,8 +10,11 @@
 //! interactive form, the annotations, the links. A signature is usually
 //! stamped onto exactly the kind of document that has all three.
 
+use std::io::Cursor;
+
 use lopdf::{dictionary, Document, Object, ObjectId, Stream};
 
+use crate::compose::images::MAX_IMAGE_PIXELS;
 use crate::edit::flatten_inheritance;
 use crate::page::{isolate_existing_contents, page_height, register_resources};
 
@@ -107,8 +110,23 @@ fn jpeg_frame(bytes: &[u8]) -> Result<(u32, u32, u8), String> {
     }
 }
 
+/// One image ceiling for the package: what authoring a document accepts is
+/// what stamping one accepts. A header is a few bytes and may claim
+/// anything; this is checked before anything is decoded from it.
+fn within_ceiling(width: u32, height: u32) -> Result<(), String> {
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err(format!(
+            "an image of {width} x {height} pixels is over the limit of {MAX_IMAGE_PIXELS}"
+        ));
+    }
+    Ok(())
+}
+
 fn jpeg_picture(bytes: &[u8]) -> Result<Picture, String> {
     let (width, height, components) = jpeg_frame(bytes)?;
+    // Passed through undecoded, but a renderer reading the stamped document
+    // later allocates what the header declares.
+    within_ceiling(width, height)?;
     let colour_space = match components {
         1 => "DeviceGray",
         3 => "DeviceRGB",
@@ -148,7 +166,18 @@ fn jpeg_picture(bytes: &[u8]) -> Result<Picture, String> {
 }
 
 fn png_picture(bytes: &[u8]) -> Result<Picture, String> {
-    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+    let claimed =
+        imagesize::blob_size(bytes).map_err(|error| format!("cannot read PNG: {error}"))?;
+    within_ceiling(
+        u32::try_from(claimed.width).unwrap_or(u32::MAX),
+        u32::try_from(claimed.height).unwrap_or(u32::MAX),
+    )?;
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_IMAGE_PIXELS * 8);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
         .map_err(|error| format!("cannot read PNG: {error}"))?;
     let (width, height) = (decoded.width(), decoded.height());
     let pixels = decoded.to_rgba8();
@@ -345,8 +374,6 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use hayro::vello_cpu::color::PremulRgba8;
     use hayro::vello_cpu::Pixmap;
 
@@ -742,6 +769,59 @@ mod tests {
             stamped.len() < raw_samples,
             "and certainly not as {raw_samples} bytes of samples"
         );
+    }
+
+    /// A PNG that is only its signature and header: what it claims, with
+    /// nothing behind it to decode.
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut chunk = b"IHDR".to_vec();
+        chunk.extend_from_slice(&width.to_be_bytes());
+        chunk.extend_from_slice(&height.to_be_bytes());
+        // 8 bits per channel, RGBA, no interlace.
+        chunk.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let mut crc = flate2::Crc::new();
+        crc.update(&chunk);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(&chunk);
+        png.extend_from_slice(&crc.sum().to_be_bytes());
+        png
+    }
+
+    fn stamp_bytes(image: &[u8]) -> Result<Vec<u8>, String> {
+        stamp_image(
+            &create_blank(&[A4]).unwrap(),
+            image,
+            &StampOptions::default(),
+        )
+    }
+
+    #[test]
+    fn a_png_claiming_more_pixels_than_the_ceiling_is_refused_before_decoding() {
+        // 11000 x 11000 is 484 MB of RGBA for a header of a few bytes.
+        let error = stamp_bytes(&png_header(11_000, 11_000)).expect_err("refused");
+        assert!(error.contains("over the limit"), "got: {error}");
+    }
+
+    #[test]
+    fn the_png_ceiling_is_the_one_authoring_applies() {
+        // 8000 x 8000 is exactly the ceiling: refused only for having no
+        // pixel data, not for its size; one row more is over it.
+        let at = stamp_bytes(&png_header(8000, 8000)).expect_err("no pixel data");
+        assert!(!at.contains("over the limit"), "got: {at}");
+        let over = stamp_bytes(&png_header(8000, 8001)).expect_err("refused");
+        assert!(over.contains("over the limit"), "got: {over}");
+    }
+
+    #[test]
+    fn a_jpeg_claiming_more_pixels_than_the_ceiling_is_refused() {
+        // SOI, then a baseline frame header declaring 65535 x 65535 in RGB.
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08];
+        jpeg.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x03]);
+        jpeg.extend_from_slice(&[1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        let error = stamp_bytes(&jpeg).expect_err("refused");
+        assert!(error.contains("over the limit"), "got: {error}");
     }
 
     #[test]
