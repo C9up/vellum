@@ -10,10 +10,17 @@
  */
 
 import { readFileSync } from "node:fs";
+import { createServer, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { fakeHttp } from "@c9up/ream/http-client";
+import { afterEach, describe, expect, it } from "vitest";
 import { A4, createBlank } from "../src/index.js";
-import { mayAsk } from "../src/responder.js";
+import {
+	askResponder,
+	mayAsk,
+	type ResponderPermit,
+} from "../src/responder.js";
 import { Vellum } from "../src/Vellum.js";
 
 const refusal = async (url: string, policy?: Parameters<typeof mayAsk>[1]) => {
@@ -21,47 +28,15 @@ const refusal = async (url: string, policy?: Parameters<typeof mayAsk>[1]) => {
 	return "refused" in answer ? answer.refused : undefined;
 };
 
-describe("vellum > which responder may be asked", () => {
-	it("asks a public authority over http", async () => {
-		expect(await mayAsk("http://ocsp.example-ca.test/")).toBeInstanceOf(URL);
-		expect(await mayAsk("https://ocsp.example-ca.test/x")).toBeInstanceOf(URL);
-	});
+const permit = async (url: string, policy?: Parameters<typeof mayAsk>[1]) => {
+	const answer = await mayAsk(url, policy);
+	return "refused" in answer ? undefined : answer;
+};
 
-	it("refuses the cloud metadata address", async () => {
-		// The one that hands out credentials to anyone who can make the server
-		// ask for them.
-		const why = await refusal(
-			"http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-		);
-		expect(why).toContain("169.254.169.254");
-		expect(why).toContain("an address on this network");
-	});
-
-	it("refuses loopback and the private ranges", async () => {
-		for (const url of [
-			"http://127.0.0.1:6379/",
-			"http://localhost:5432/",
-			"http://10.0.0.5/",
-			"http://172.16.4.1/",
-			"http://192.168.1.1/",
-			"http://100.64.0.1/", // carrier-grade NAT
-			"http://0.0.0.0/",
-		]) {
-			expect(await refusal(url), url).toBeDefined();
-		}
-	});
-
-	it("refuses the same addresses written as IPv6", async () => {
-		// `::ffff:127.0.0.1` is loopback under another spelling, and a check that
-		// only reads dotted quads waves it through.
-		for (const url of [
-			"http://[::1]:11211/",
-			"http://[::ffff:127.0.0.1]/",
-			"http://[fd00::1]/",
-			"http://[fe80::1]/",
-		]) {
-			expect(await refusal(url), url).toBeDefined();
-		}
+describe("vellum > which responder may be named", () => {
+	it("admits any http or https responder when no policy is set", async () => {
+		expect((await permit("http://ocsp.example-ca.test/"))?.named).toBe(false);
+		expect((await permit("https://ocsp.example-ca.test/x"))?.named).toBe(false);
 	});
 
 	it("refuses a scheme that is not how OCSP is asked", async () => {
@@ -77,26 +52,150 @@ describe("vellum > which responder may be asked", () => {
 		// An internal authority is legitimate — but the application says so, not
 		// the document.
 		expect(
-			await mayAsk("http://ocsp.internal", ["ocsp.internal"]),
-		).toBeInstanceOf(URL);
+			(await permit("http://ocsp.internal", ["ocsp.internal"]))?.named,
+		).toBe(true);
 		expect(
 			await refusal("http://169.254.169.254/", ["ocsp.internal"]),
 		).toContain("not among the responders");
 	});
 
+	it("does not open every port of a host it names", async () => {
+		// Naming the authority used to admit any scheme and port on it.
+		expect(
+			await refusal("http://ocsp.internal:6379/", ["ocsp.internal"]),
+		).toBeDefined();
+		expect(
+			await refusal("gopher://ocsp.internal/", ["ocsp.internal"]),
+		).toBeDefined();
+		expect(
+			await permit("https://ocsp.internal/", ["ocsp.internal"]),
+		).toBeDefined();
+	});
+
+	it("matches an origin on scheme, host and port", async () => {
+		const origin = ["https://ocsp.internal:8443"];
+		expect(
+			await permit("https://ocsp.internal:8443/check", origin),
+		).toBeDefined();
+		expect(await refusal("http://ocsp.internal:8443/", origin)).toBeDefined();
+		expect(await refusal("https://ocsp.internal:8444/", origin)).toBeDefined();
+		expect(await refusal("https://ocsp.internal/", origin)).toBeDefined();
+	});
+
 	it("takes a predicate for an application that needs one", async () => {
 		const onlyOurCa = (url: URL) => url.hostname.endsWith(".our-ca.test");
-		expect(await mayAsk("https://a.our-ca.test/", onlyOurCa)).toBeInstanceOf(
-			URL,
+		expect((await permit("https://a.our-ca.test/", onlyOurCa))?.named).toBe(
+			true,
 		);
 		expect(await refusal("https://evil.test/", onlyOurCa)).toContain("refused");
 	});
+});
 
-	it("does not let a public-looking host smuggle a private one", async () => {
-		// A hostname that RESOLVES to a private address still gets through: DNS
-		// is not consulted here. Named so nobody reads more into this than it
-		// does — `allowedResponders` is the airtight form.
-		expect(await mayAsk("http://rebind.example.test/")).toBeInstanceOf(URL);
+/** A local server counting what it was asked, answering with `respond`. */
+async function serve(
+	respond: (response: ServerResponse) => void,
+): Promise<{ origin: string; asked: string[]; server: Server }> {
+	const asked: string[] = [];
+	const server = createServer((request, response) => {
+		asked.push(`${request.method} ${request.url}`);
+		respond(response);
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address: AddressInfo | string | null = server.address();
+	const port =
+		typeof address === "object" && address !== null ? address.port : 0;
+	return { origin: `http://127.0.0.1:${port}`, asked, server };
+}
+
+const servers: Server[] = [];
+afterEach(async () => {
+	for (const server of servers.splice(0)) {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
+const QUERY = new Uint8Array([0x30, 0x00]);
+
+async function ask(url: string, named = false) {
+	const target: ResponderPermit = { url: new URL(url), named };
+	return askResponder(target, QUERY, { timeoutMs: 5_000 });
+}
+
+describe("vellum > the address a responder is asked at", () => {
+	it("refuses private and special addresses written in the URL", async () => {
+		for (const url of [
+			"http://127.0.0.1:6379/",
+			"http://10.0.0.5/",
+			"http://169.254.169.254/latest/meta-data/",
+			"http://100.64.0.1/",
+			"http://[::1]:11211/",
+			"http://[::ffff:127.0.0.1]/",
+			"http://[64:ff9b::a9fe:a9fe]/", // NAT64 of the metadata address
+			"http://[fec0::1]/", // site-local
+			"http://[fd00::1]/",
+		]) {
+			const answer = await ask(url);
+			expect(Buffer.isBuffer(answer), url).toBe(false);
+			if (Buffer.isBuffer(answer)) continue;
+			expect(answer.status, url).toBe("unknown");
+			expect(answer.detail, url).toContain("an address on this network");
+		}
+	});
+
+	it("refuses a name that resolves to this machine, at connect time", async () => {
+		// `localhost` spells no address; DNS answers loopback. The spelling
+		// check this replaced let every such name through.
+		const local = await serve((response) => response.end("secret"));
+		servers.push(local.server);
+		const port = new URL(local.origin).port;
+		const answer = await ask(`http://localhost:${port}/`);
+		expect(Buffer.isBuffer(answer) ? "answered" : answer.detail).toContain(
+			"an address on this network",
+		);
+		expect(local.asked).toEqual([]);
+	});
+
+	it("does not follow a redirect, even from a responder the application named", async () => {
+		const inner = await serve((response) => response.end("secret"));
+		const outer = await serve((response) => {
+			response.writeHead(302, {
+				location: `${inner.origin}/latest/meta-data/`,
+			});
+			response.end();
+		});
+		servers.push(inner.server, outer.server);
+		const answer = await ask(`${outer.origin}/`, true);
+		expect(Buffer.isBuffer(answer) ? "answered" : answer.detail).toContain(
+			"redirected",
+		);
+		expect(outer.asked).toEqual(["POST /"]);
+		expect(inner.asked).toEqual([]);
+	});
+
+	it("stops reading an answer larger than any OCSP answer", async () => {
+		const flood = await serve((response) => {
+			response.writeHead(200, { "content-type": "application/ocsp-response" });
+			const chunk = Buffer.alloc(1024 * 1024);
+			for (let sent = 0; sent < 10; sent++) response.write(chunk);
+			response.end();
+		});
+		servers.push(flood.server);
+		const answer = await ask(`${flood.origin}/`, true);
+		expect(Buffer.isBuffer(answer) ? "answered" : answer.detail).toContain(
+			"more than 64 KiB",
+		);
+	});
+
+	it("asks a responder the application named on its own network", async () => {
+		const local = await serve((response) =>
+			response.end(Buffer.from([0x30, 0x00])),
+		);
+		servers.push(local.server);
+		const answer = await ask(`${local.origin}/`, true);
+		expect(Buffer.isBuffer(answer) ? [...answer] : answer).toEqual([
+			0x30, 0x00,
+		]);
+		expect(local.asked).toEqual(["POST /"]);
 	});
 });
 
@@ -115,40 +214,29 @@ describe("vellum > the guard sits between the certificate and the network", () =
 
 	it("makes no request when the policy allows no responder", async () => {
 		// A policy the code never consults protects nothing, so this goes
-		// through `verifySignatures` and watches the socket rather than calling
+		// through `verifySignatures` and watches the client rather than calling
 		// the check again.
-		const attempted: string[] = [];
-		const realFetch = globalThis.fetch;
-		globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
-			attempted.push(String(input));
-			throw new Error("no request should have been made");
-		}) as typeof fetch;
+		const http = fakeHttp();
+		const authority = readFileSync(
+			fileURLToPath(new URL("./fixtures/authority.der", import.meta.url)),
+		);
+		const vellum = new Vellum({
+			signers: { internal: stubSigner() },
+			trustedAnchors: [authority],
+			allowedResponders: [],
+			httpClient: http,
+		});
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
 
-		try {
-			const authority = readFileSync(
-				fileURLToPath(new URL("./fixtures/authority.der", import.meta.url)),
-			);
-			const vellum = new Vellum({
-				signers: { internal: stubSigner() },
-				trustedAnchors: [authority],
-				allowedResponders: [],
-			});
-			const signed = await vellum.sign(createBlank([A4]), {
-				signer: "internal",
-			});
+		const [report] = await vellum.verifySignatures(signed, {
+			checkRevocation: true,
+		});
 
-			const [report] = await vellum.verifySignatures(signed, {
-				checkRevocation: true,
-			});
-
-			// The anchor is what gives the report an issuer, which is what takes
-			// `#revocationOf` past its early return and up to the network.
-			expect(report?.issuerCertificate).toBeDefined();
-			expect(attempted).toEqual([]);
-			expect(report?.revocation?.status).toBe("unknown");
-			expect(report?.revocation?.detail).toBeTruthy();
-		} finally {
-			globalThis.fetch = realFetch;
-		}
+		// The anchor is what gives the report an issuer, which is what takes
+		// `#revocationOf` past its early return and up to the network.
+		expect(report?.issuerCertificate).toBeDefined();
+		expect(http.requests).toEqual([]);
+		expect(report?.revocation?.status).toBe("unknown");
+		expect(report?.revocation?.detail).toContain("not among the responders");
 	});
 });

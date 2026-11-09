@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { fakeHttp } from "@c9up/ream/http-client";
 import { describe, expect, it, vi } from "vitest";
 import {
 	A4,
@@ -318,15 +319,16 @@ describe("trusting a signature", () => {
 
 describe("asking whether a certificate still stands", () => {
 	it("does not ask unless told to", async () => {
-		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
-		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
-		vi.stubGlobal("fetch", async () => {
-			throw new Error("nothing should have been asked");
+		const http = fakeHttp();
+		const vellum = new Vellum({
+			signers: { internal: stubCmsSigner() },
+			httpClient: http,
 		});
+		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
 
 		const [report] = await vellum.verifySignatures(signed);
 		expect(report?.revocation).toBeUndefined();
-		vi.unstubAllGlobals();
+		expect(http.requests).toEqual([]);
 	});
 
 	it("reports unknown rather than good when nobody can be asked", async () => {
@@ -340,22 +342,6 @@ describe("asking whether a certificate still stands", () => {
 		expect(report?.revocation?.status).toBe("unknown");
 		expect(report?.revocation?.detail).toMatch(/issuer .* is not known/);
 	});
-
-	it("reports unknown rather than good when the responder is unreachable", async () => {
-		const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
-		const signed = await vellum.sign(createBlank([A4]), { signer: "internal" });
-		vi.stubGlobal("fetch", async () => {
-			throw new Error("ECONNREFUSED");
-		});
-
-		// Without an issuer it stops earlier, so this pins the shape: whatever
-		// goes wrong, the answer is "unknown" and never "good".
-		const [report] = await vellum.verifySignatures(signed, {
-			checkRevocation: true,
-		});
-		expect(report?.revocation?.status).not.toBe("good");
-		vi.unstubAllGlobals();
-	});
 });
 
 /** The authority the fixture signature chains to. A certificate, nothing more. */
@@ -367,11 +353,14 @@ function testAuthority(): Buffer {
 
 describe("asking the issuer named by the certificate", () => {
 	async function signedUnderTheAuthority() {
+		const http = fakeHttp();
 		const vellum = new Vellum({
 			signers: { internal: stubCmsSigner() },
 			trustedAnchors: [testAuthority()],
+			httpClient: http,
 		});
 		return {
+			http,
 			vellum,
 			signed: await vellum.sign(createBlank([A4]), { signer: "internal" }),
 		};
@@ -386,30 +375,28 @@ describe("asking the issuer named by the certificate", () => {
 	});
 
 	it("asks the responder the certificate names", async () => {
-		const { vellum, signed } = await signedUnderTheAuthority();
-		let asked: { url: string; type: string | null } | undefined;
-		vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
-			asked = {
-				url: String(url),
-				type: new Headers(init?.headers).get("content-type"),
-			};
-			return new Response(new Uint8Array([0x30, 0x00]), { status: 200 });
+		const { http, vellum, signed } = await signedUnderTheAuthority();
+		http.on("POST", "http://ocsp.vellum.test/", {
+			body: new Uint8Array([0x30, 0x00]),
 		});
 
 		const [report] = await vellum.verifySignatures(signed, {
 			checkRevocation: true,
 		});
 
-		expect(asked?.url).toBe("http://ocsp.vellum.test/");
-		expect(asked?.type).toBe("application/ocsp-request");
+		expect(http.requests.map((request) => request.url)).toEqual([
+			"http://ocsp.vellum.test/",
+		]);
+		expect(http.requests[0]?.headers["content-type"]).toBe(
+			"application/ocsp-request",
+		);
 		// The answer was nonsense, and nonsense is never "good".
 		expect(report?.revocation?.status).toBe("unknown");
-		vi.unstubAllGlobals();
 	});
 
 	it("does not call an unanswered responder good", async () => {
-		const { vellum, signed } = await signedUnderTheAuthority();
-		vi.stubGlobal("fetch", async () => new Response("no", { status: 503 }));
+		const { http, vellum, signed } = await signedUnderTheAuthority();
+		http.on("POST", "http://ocsp.vellum.test/", { status: 503, body: "no" });
 
 		const [report] = await vellum.verifySignatures(signed, {
 			checkRevocation: true,
@@ -417,14 +404,11 @@ describe("asking the issuer named by the certificate", () => {
 
 		expect(report?.revocation?.status).toBe("unknown");
 		expect(report?.revocation?.detail).toMatch(/answered 503/);
-		vi.unstubAllGlobals();
 	});
 
 	it("does not call an unreachable responder good either", async () => {
+		// Nothing registered: the fake answers as an unreachable host does.
 		const { vellum, signed } = await signedUnderTheAuthority();
-		vi.stubGlobal("fetch", async () => {
-			throw new Error("ECONNREFUSED");
-		});
 
 		const [report] = await vellum.verifySignatures(signed, {
 			checkRevocation: true,
@@ -432,6 +416,35 @@ describe("asking the issuer named by the certificate", () => {
 
 		expect(report?.revocation?.status).toBe("unknown");
 		expect(report?.revocation?.detail).toMatch(/could not be reached/);
-		vi.unstubAllGlobals();
+	});
+
+	it("does not follow a responder that redirects", async () => {
+		const { http, vellum, signed } = await signedUnderTheAuthority();
+		http.on("POST", "http://ocsp.vellum.test/", {
+			status: 302,
+			headers: { location: "http://169.254.169.254/latest/meta-data/" },
+		});
+
+		const [report] = await vellum.verifySignatures(signed, {
+			checkRevocation: true,
+		});
+
+		expect(report?.revocation?.status).toBe("unknown");
+		expect(report?.revocation?.detail).toMatch(/redirected/);
+		expect(http.requests).toHaveLength(1);
+	});
+
+	it("does not read an answer larger than any OCSP answer", async () => {
+		const { http, vellum, signed } = await signedUnderTheAuthority();
+		http.on("POST", "http://ocsp.vellum.test/", {
+			body: new Uint8Array(10 * 1024 * 1024),
+		});
+
+		const [report] = await vellum.verifySignatures(signed, {
+			checkRevocation: true,
+		});
+
+		expect(report?.revocation?.status).toBe("unknown");
+		expect(report?.revocation?.detail).toMatch(/more than 64 KiB/);
 	});
 });

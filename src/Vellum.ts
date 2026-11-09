@@ -42,7 +42,12 @@ import {
 	stampTextNative,
 	verifySignaturesNative,
 } from "./native.js";
-import { mayAsk, type ResponderPolicy } from "./responder.js";
+import {
+	askResponder,
+	mayAsk,
+	type ResponderClient,
+	type ResponderPolicy,
+} from "./responder.js";
 
 /** Image encodings a page can be rasterised to. */
 export type ImageFormat = "png" | "jpeg";
@@ -135,12 +140,20 @@ export interface VellumConfig {
 	 * Which revocation responders may be contacted.
 	 *
 	 * The address comes out of the certificate inside the document being
-	 * checked — from whoever sent it. Left unset, only public hosts over
-	 * http/https are asked, which is what a real certificate authority is. Set
-	 * it to a list of hostnames, or a predicate, when your authority answers
-	 * somewhere those rules exclude.
+	 * checked — from whoever sent it. Left unset, only public addresses over
+	 * http/https are asked, which is what a real certificate authority is,
+	 * judged on the address connected to rather than on the URL's spelling.
+	 * Set it to a list of hosts (`ocsp.internal`, on the default ports) or
+	 * origins (`https://ocsp.internal:8443`), or a predicate, when your
+	 * authority answers somewhere those rules exclude.
 	 */
 	allowedResponders?: ResponderPolicy;
+	/**
+	 * The HTTP client revocation responders are asked through. By default
+	 * `HttpClient` from `@c9up/ream/http-client`, which refuses private
+	 * addresses at connect time; pass one of your own, or its test fake.
+	 */
+	httpClient?: ResponderClient;
 }
 
 /**
@@ -787,35 +800,17 @@ export class Vellum {
 		if ("refused" in allowed) {
 			return { status: "unknown", detail: allowed.refused };
 		}
-		const url = allowed.href;
-
-		let answer: Response;
-		try {
-			answer = await fetch(url, {
-				method: "POST",
-				headers: { "content-type": "application/ocsp-request" },
-				body: new Uint8Array(
-					revocationQueryNative(signerCertificate, issuerCertificate),
-				),
-				signal: AbortSignal.timeout(timeoutMs),
-			});
-		} catch (error) {
-			return {
-				status: "unknown",
-				detail: `the responder at ${url} could not be reached: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			};
-		}
-		if (!answer.ok) {
-			return {
-				status: "unknown",
-				detail: `the responder at ${url} answered ${answer.status}`,
-			};
-		}
+		const answer = await askResponder(
+			allowed,
+			new Uint8Array(
+				revocationQueryNative(signerCertificate, issuerCertificate),
+			),
+			{ timeoutMs, client: this.#config.httpClient },
+		);
+		if (!Buffer.isBuffer(answer)) return answer;
 
 		return readRevocationNative(
-			Buffer.from(await answer.arrayBuffer()),
+			answer,
 			signerCertificate,
 			issuerCertificate,
 			report.momentAt ?? null,

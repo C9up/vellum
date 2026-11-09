@@ -80,7 +80,7 @@ export type {
 	SignatureReport,
 } from "./native.js";
 export { isNativeAvailable, VellumNativeRequiredError } from "./native.js";
-export type { ResponderPolicy } from "./responder.js";
+export type { ResponderClient, ResponderPolicy } from "./responder.js";
 export type { Pkcs8SignerOptions, TimestampOptions } from "./signers.js";
 export { pkcs8Signer, timestamped } from "./signers.js";
 export type {

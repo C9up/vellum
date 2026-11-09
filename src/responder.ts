@@ -1,5 +1,5 @@
 /**
- * Deciding whether a revocation responder may be contacted.
+ * Asking a revocation responder, and deciding whether it may be asked.
  *
  * The address comes out of the certificate inside the document being checked,
  * which is to say: from whoever sent the document. Following it unconditionally
@@ -8,73 +8,105 @@
  * endpoint, a Redis on loopback, or simply a URL that confirms the document was
  * opened and reveals the address it was opened from.
  *
- * So the default is a public responder over HTTP, and an application whose
- * authority answers on the internal network says so by name. Everything
- * refused answers `"unknown"`, never `"good"`: a responder that was not asked
- * has told us nothing.
+ * Two gates stand in the way. The application's policy decides which
+ * responders may be named at all. The outbound client decides which address
+ * is connected to: it checks the address the socket actually connects to,
+ * after DNS, so a name that resolves to loopback, or that answers a public
+ * address and then a private one, is refused too. A spelling check on the
+ * URL could not see either. Redirects are not followed, and the answer is
+ * read up to a size an OCSP answer never reaches.
+ *
+ * Everything refused answers `"unknown"`, never `"good"`: a responder that was
+ * not asked has told us nothing.
  */
+
+import type { RevocationAnswer } from "./native.js";
 
 /** Who an application is willing to ask about revocation. */
 export type ResponderPolicy =
 	| ReadonlyArray<string>
 	| ((url: URL) => boolean | Promise<boolean>);
 
-/** Hosts that are never a public certificate authority. */
-function isPrivateHost(hostname: string): boolean {
-	const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-	if (host === "localhost" || host.endsWith(".localhost")) return true;
-	// IPv6 loopback, unspecified, unique-local (fc00::/7) and link-local (fe80::/10).
-	if (host === "::1" || host === "::") return true;
-	if (/^f[cd][0-9a-f]{2}:/.test(host)) return true;
-	if (/^fe[89ab][0-9a-f]:/.test(host)) return true;
-	// An IPv4-mapped IPv6 address is the same machine under another spelling,
-	// and the URL parser rewrites `::ffff:127.0.0.1` as `::ffff:7f00:1` — so a
-	// check that only reads dotted quads waves loopback straight through.
-	const mapped =
-		/^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host) ??
-		(() => {
-			const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
-			if (hex === null) return null;
-			const packed =
-				(Number.parseInt(hex[1] as string, 16) << 16) |
-				Number.parseInt(hex[2] as string, 16);
-			return [
-				host,
-				[24, 16, 8, 0].map((shift) => (packed >>> shift) & 0xff).join("."),
-			];
-		})();
-	const literal = mapped?.[1] ?? host;
-	const parts = literal.split(".");
-	if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p)))
-		return false;
-	const [a, b] = parts.map(Number) as [number, number, number, number];
-	return (
-		a === 0 || // this network
-		a === 127 || // loopback
-		a === 10 || // private
-		(a === 172 && b >= 16 && b <= 31) || // private
-		(a === 192 && b === 168) || // private
-		(a === 169 && b === 254) || // link-local, and the cloud metadata address
-		(a === 100 && b >= 64 && b <= 127) || // carrier-grade NAT
-		a >= 224 // multicast and reserved
-	);
+/**
+ * What asking a responder needs of an HTTP client: `HttpClient` from
+ * `@c9up/ream/http-client`, or anything with its `post`. A client given here
+ * is trusted to refuse private addresses the way that one does, and to follow
+ * no redirect to another host.
+ */
+export interface ResponderClient {
+	post(
+		url: URL,
+		options: {
+			headers: Record<string, string>;
+			body: Uint8Array;
+			timeout: number;
+			maxResponseBytes: number;
+		},
+	): Promise<{ status: number; body: Buffer }>;
 }
+
+/** The largest answer read, as the engine reads it. */
+export const MAX_RESPONDER_ANSWER = 64 * 1024;
 
 /** Why a responder was refused, in a sentence a caller can act on. */
 export interface ResponderRefusal {
 	refused: string;
 }
 
+/** A responder that may be asked, and whether the application named it. */
+export interface ResponderPermit {
+	url: URL;
+	/**
+	 * Named by the application rather than merely public: its address may be
+	 * on the application's own network.
+	 */
+	named: boolean;
+}
+
+/** The port a URL connects to, written or implied. */
+function portOf(url: URL): string {
+	return url.port || (url.protocol === "https:" ? "443" : "80");
+}
+
+/**
+ * Whether a list entry names `url`.
+ *
+ * An entry is an origin (`https://ocsp.internal:8443`), matched on scheme,
+ * host and port; or a bare host (`ocsp.internal`), matched over http or https
+ * on their own ports. A host alone used to admit any port and any scheme on
+ * it, so naming an authority also opened its Redis.
+ */
+function entryNames(entry: string, url: URL): boolean {
+	if (entry.includes("://")) {
+		try {
+			const origin = new URL(entry);
+			return (
+				origin.protocol === url.protocol &&
+				origin.hostname === url.hostname &&
+				portOf(origin) === portOf(url)
+			);
+		} catch {
+			return false;
+		}
+	}
+	return (
+		entry.toLowerCase() === url.hostname &&
+		(url.protocol === "http:" || url.protocol === "https:") &&
+		url.port === ""
+	);
+}
+
 /**
  * Decide whether `url` may be asked.
  *
- * @param policy What the application allows: a list of hostnames, or a
- *   predicate. Absent, only public hosts over http/https are contacted.
+ * @param policy What the application allows: a list of hosts or origins, or a
+ *   predicate. Absent, any responder over http or https may be named, and the
+ *   outbound client refuses every address that is not public.
  */
 export async function mayAsk(
 	url: string,
 	policy?: ResponderPolicy,
-): Promise<URL | ResponderRefusal> {
+): Promise<ResponderPermit | ResponderRefusal> {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
@@ -84,15 +116,15 @@ export async function mayAsk(
 
 	if (typeof policy === "function") {
 		return (await policy(parsed))
-			? parsed
+			? { url: parsed, named: true }
 			: { refused: `the configured policy refused ${parsed.origin}` };
 	}
 	if (policy !== undefined) {
-		return policy.includes(parsed.hostname)
-			? parsed
+		return policy.some((entry) => entryNames(entry, parsed))
+			? { url: parsed, named: true }
 			: {
 					refused:
-						`${parsed.hostname} is not among the responders this application allows` +
+						`${parsed.origin} is not among the responders this application allows` +
 						` (${policy.join(", ") || "none"})`,
 				};
 	}
@@ -104,13 +136,115 @@ export async function mayAsk(
 			refused: `the certificate names a ${parsed.protocol.replace(":", "")} responder, which is not asked`,
 		};
 	}
-	if (isPrivateHost(parsed.hostname)) {
-		return {
-			refused:
-				`the certificate names ${parsed.hostname}, an address on this network — ` +
-				"a document does not get to choose which of your own services is contacted. " +
-				"Name it in `allowedResponders` if that really is your authority.",
-		};
+	return { url: parsed, named: false };
+}
+
+type ClientModule = typeof import("@c9up/ream/http-client");
+
+let clientModule: Promise<ClientModule | undefined> | undefined;
+
+/**
+ * ream's outbound client, when it is installed. It is an optional peer: an
+ * application that never checks revocation does not need it.
+ */
+function loadClientModule(): Promise<ClientModule | undefined> {
+	clientModule ??= import("@c9up/ream/http-client").catch((error: unknown) => {
+		if (
+			error instanceof Error &&
+			"code" in error &&
+			error.code === "ERR_MODULE_NOT_FOUND"
+		) {
+			return undefined;
+		}
+		throw error;
+	});
+	return clientModule;
+}
+
+function redirected(url: URL): RevocationAnswer {
+	return {
+		status: "unknown",
+		detail: `the responder at ${url.origin} redirected, and a redirect is not followed: it would let the document's responder choose another address`,
+	};
+}
+
+/** Why an outbound request failed, if the client said. */
+function reasonOf(error: unknown): string | undefined {
+	if (!(error instanceof Error) || !("reason" in error)) return undefined;
+	return typeof error.reason === "string" ? error.reason : undefined;
+}
+
+/**
+ * POST an OCSP request to a responder `mayAsk` admitted, and hand back its
+ * answer, or why there is none.
+ */
+export async function askResponder(
+	permit: ResponderPermit,
+	query: Uint8Array,
+	options: { timeoutMs: number; client?: ResponderClient },
+): Promise<Buffer | RevocationAnswer> {
+	const { url } = permit;
+	let client = options.client;
+	let owned: { close(): void } | undefined;
+	if (client === undefined) {
+		const module = await loadClientModule();
+		if (module === undefined) {
+			return {
+				status: "unknown",
+				detail:
+					"checking revocation needs an outbound client that refuses private addresses: install @c9up/ream, or pass httpClient",
+			};
+		}
+		const made = new module.HttpClient({
+			maxRedirects: 0,
+			// A responder the application named may sit on its own network.
+			allowHosts: permit.named ? [`${url.hostname}:${portOf(url)}`] : [],
+		});
+		client = made;
+		owned = made;
 	}
-	return parsed;
+
+	try {
+		const answer = await client.post(url, {
+			headers: { "content-type": "application/ocsp-request" },
+			body: query,
+			timeout: options.timeoutMs,
+			maxResponseBytes: MAX_RESPONDER_ANSWER,
+		});
+		if (answer.status >= 300 && answer.status < 400) return redirected(url);
+		if (answer.status < 200 || answer.status >= 300) {
+			return {
+				status: "unknown",
+				detail: `the responder at ${url.origin} answered ${answer.status}`,
+			};
+		}
+		return answer.body;
+	} catch (error) {
+		const reason = reasonOf(error);
+		const message = error instanceof Error ? error.message : String(error);
+		if (reason === "privateAddress") {
+			return {
+				status: "unknown",
+				detail:
+					`the certificate names ${url.hostname}, an address on this network (${message}) — ` +
+					"a document does not get to choose which of your own services is contacted. " +
+					"Name it in `allowedResponders` if that really is your authority.",
+			};
+		}
+		// A client given by the application may follow redirects; its own rules
+		// then refused this one.
+		if (reason === "redirect") return redirected(url);
+		if (reason === "tooLarge") {
+			return {
+				status: "unknown",
+				detail: `the responder at ${url.origin} answered more than ${MAX_RESPONDER_ANSWER / 1024} KiB, which no OCSP answer needs`,
+			};
+		}
+		return {
+			status: "unknown",
+			detail: `the responder at ${url.origin} could not be reached: ${message}`,
+		};
+	} finally {
+		owned?.close();
+	}
 }
