@@ -125,6 +125,9 @@ export interface PdfDocumentOptions
 	/**
 	 * Encrypt the document with AES-256 (PDF 2.0). pdfkit picks RC4 for the
 	 * versions it writes by default; that cipher is not offered.
+	 *
+	 * With only `ownerPassword`, anyone opens the document and `permissions`
+	 * hold; with only `userPassword`, it is the owner password too.
 	 */
 	userPassword?: string;
 	ownerPassword?: string;
@@ -760,8 +763,11 @@ export class PdfDocument extends Readable {
 			const permissions = options.permissions ?? {};
 			compose(() =>
 				this.#native.setEncryption({
-					userPassword: options.userPassword ?? options.ownerPassword,
-					ownerPassword: options.ownerPassword ?? options.userPassword,
+					// As pdfkit: the owner password falls back to the user's, never
+					// the reverse, so an owner-only document opens for anyone and
+					// still holds its permissions.
+					userPassword: options.userPassword ?? "",
+					ownerPassword: options.ownerPassword ?? options.userPassword ?? "",
 					permissions: { ...permissions },
 				}),
 			);

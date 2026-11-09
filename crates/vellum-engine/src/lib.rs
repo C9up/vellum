@@ -76,7 +76,10 @@ pub fn inspect(bytes: &[u8]) -> Result<DocumentInfo, String> {
     Ok(DocumentInfo {
         page_count: document.get_pages().len() as u32,
         version: document.version.clone(),
-        encrypted: document.trailer.get(b"Encrypt").is_ok(),
+        // lopdf opens a document whose user password is empty on its own,
+        // and drops /Encrypt from the trailer as it does: the file is still
+        // encrypted, and its permissions still apply.
+        encrypted: document.trailer.get(b"Encrypt").is_ok() || document.encryption_state.is_some(),
     })
 }
 

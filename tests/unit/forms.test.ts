@@ -106,6 +106,34 @@ describe("PdfDocument — encryption", () => {
 		expect(pdf.includes(Buffer.from("Confidentiel"))).toBe(false);
 	});
 
+	it("opens without a password when only the owner's is set, as pdfkit does", async () => {
+		// The usual "anyone may read, nobody may print" setup: the owner
+		// password guards the permissions, and the user password stays empty.
+		const doc = new PdfDocument({
+			ownerPassword: "proprietaire",
+			permissions: { copying: false },
+		});
+		doc.text("Lisible par tous");
+		const pdf = await bytesOf(doc);
+		expect((await vellum.inspect(pdf)).encrypted).toBe(true);
+		expect(await vellum.extractText(pdf)).toContain("Lisible par tous");
+		expect((await vellum.render(pdf)).subarray(1, 4).toString("latin1")).toBe(
+			"PNG",
+		);
+	});
+
+	it("asks for the password when the user's is set", async () => {
+		for (const passwords of [
+			{ userPassword: "lecture" },
+			{ userPassword: "lecture", ownerPassword: "proprietaire" },
+		]) {
+			const doc = new PdfDocument(passwords);
+			doc.text("Confidentiel");
+			const pdf = await bytesOf(doc);
+			await expect(vellum.render(pdf)).rejects.toThrow(/PasswordProtected/);
+		}
+	});
+
 	it("refuses encryption in PDF/A, which forbids it", () => {
 		const doc = new PdfDocument({ subset: "PDF/A-2b", userPassword: "x" });
 		expect(() => doc.end()).toThrow(
