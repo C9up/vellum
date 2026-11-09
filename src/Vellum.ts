@@ -70,6 +70,31 @@ export interface VellumConfig {
 	 */
 	maxPixels?: number;
 	/**
+	 * The most pixels {@link Vellum.renderAll} may rasterise across every
+	 * page. 500 million by default — two hundred A4 pages at 150 DPI.
+	 *
+	 * `maxPixels` bounds one page, and the page count is the document's to
+	 * choose. Checked before the first page is drawn.
+	 */
+	maxTotalPixels?: number;
+	/**
+	 * Bytes of decoded stream data reading one page may need: its content,
+	 * images, fonts. 256 MiB by default.
+	 *
+	 * A document's size says nothing about this: a 1 MiB compressed stream
+	 * inflates to 1 GiB, once per reference to it. A page over the budget is
+	 * refused rather than drawn without the part that did not fit.
+	 */
+	maxDecodedBytes?: number;
+	/**
+	 * Content operators and glyphs drawing one page may take, nested forms
+	 * included. Ten million by default.
+	 *
+	 * Forms drawing one another ten times per level make a 2 KB file cost
+	 * hours; this bounds rendering and text extraction to seconds.
+	 */
+	maxOperations?: number;
+	/**
 	 * Fonts to write text with, by the name a caller asks for them by. Values
 	 * are paths to TrueType or OpenType files.
 	 *
@@ -357,7 +382,7 @@ export class Vellum {
 
 	/** The natural size of every page, in points, before any scaling. */
 	async dimensions(pdf: Buffer): Promise<PageDimensions[]> {
-		return pageDimensionsNative(pdf);
+		return pageDimensionsNative(pdf, this.#limits());
 	}
 
 	/** How many pages the document has, which format version, and whether it is encrypted. */
@@ -390,12 +415,12 @@ export class Vellum {
 	 * an empty string rather than an error — it has no text to give.
 	 */
 	async extractText(pdf: Buffer, options: PageOptions = {}): Promise<string> {
-		return extractTextNative(pdf, this.#pageIndex(options));
+		return extractTextNative(pdf, this.#pageIndex(options), this.#limits());
 	}
 
 	/** The text of every page, in document order. */
 	async extractTextAll(pdf: Buffer): Promise<string[]> {
-		return extractTextAllNative(pdf);
+		return extractTextAllNative(pdf, this.#limits());
 	}
 
 	/**
@@ -843,6 +868,9 @@ export class Vellum {
 		background?: string;
 		band?: Band;
 		maxPixels?: number;
+		maxTotalPixels?: number;
+		maxDecodedBytes?: number;
+		maxOperations?: number;
 	} {
 		const merged = { ...this.#config, ...options };
 		return {
@@ -853,6 +881,17 @@ export class Vellum {
 			background: merged.background,
 			band: merged.band,
 			maxPixels: merged.maxPixels,
+			maxTotalPixels: merged.maxTotalPixels,
+			maxDecodedBytes: merged.maxDecodedBytes,
+			maxOperations: merged.maxOperations,
+		};
+	}
+
+	/** What reading one page may cost, as configured. */
+	#limits(): { maxDecodedBytes?: number; maxOperations?: number } {
+		return {
+			maxDecodedBytes: this.#config.maxDecodedBytes,
+			maxOperations: this.#config.maxOperations,
 		};
 	}
 }

@@ -42,6 +42,10 @@ pub(crate) fn append_text_string<'a>(
 
     let mut cur_idx = 0;
     while cur_idx < bytes.len() {
+        // vellum: one string can show a million glyphs, each one drawn.
+        if !hayro_syntax::budget::charge_operation() {
+            break;
+        }
         let (code, adv) = font.read_code(bytes, cur_idx);
         cur_idx += adv;
 

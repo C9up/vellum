@@ -20,7 +20,7 @@ use hayro::hayro_interpret::{
 };
 use hayro::vello_cpu::kurbo::{BezPath, Rect};
 
-use crate::reader::on_reader_thread;
+use crate::reader::{metered, on_reader_thread, ReadLimits};
 
 /// Vertical distance, in points, beyond which two glyphs are taken to be on
 /// different lines.
@@ -177,32 +177,47 @@ fn load(bytes: &[u8]) -> Result<Pdf, String> {
 
 /// The text of one page, addressed from zero.
 pub fn extract_text(bytes: &[u8], page_index: u32) -> Result<String, String> {
-    on_reader_thread(|| read_text(bytes, page_index))
+    extract_text_with(bytes, page_index, &ReadLimits::default())
 }
 
-fn read_text(bytes: &[u8], page_index: u32) -> Result<String, String> {
-    let pdf = load(bytes)?;
-    let pages = pdf.pages();
-    let index = usize::try_from(page_index).map_err(|_| "page index out of range".to_string())?;
-    let page = pages.get(index).ok_or_else(|| {
-        format!(
-            "page {} does not exist — the document has {}",
-            page_index + 1,
-            pages.len()
-        )
-    })?;
-
-    Ok(page_text(page))
+/// [`extract_text`] under the given limits.
+pub fn extract_text_with(
+    bytes: &[u8],
+    page_index: u32,
+    limits: &ReadLimits,
+) -> Result<String, String> {
+    on_reader_thread(|| {
+        metered(limits, || {
+            let pdf = load(bytes)?;
+            let pages = pdf.pages();
+            let index =
+                usize::try_from(page_index).map_err(|_| "page index out of range".to_string())?;
+            let page = pages.get(index).ok_or_else(|| {
+                format!(
+                    "page {} does not exist — the document has {}",
+                    page_index + 1,
+                    pages.len()
+                )
+            })?;
+            Ok(page_text(page))
+        })
+    })
 }
 
 /// The text of every page, in document order.
 pub fn extract_text_all(bytes: &[u8]) -> Result<Vec<String>, String> {
-    on_reader_thread(|| read_all_text(bytes))
+    extract_text_all_with(bytes, &ReadLimits::default())
 }
 
-fn read_all_text(bytes: &[u8]) -> Result<Vec<String>, String> {
-    let pdf = load(bytes)?;
-    Ok(pdf.pages().iter().map(page_text).collect())
+/// [`extract_text_all`] under the given limits, each page under its own.
+pub fn extract_text_all_with(bytes: &[u8], limits: &ReadLimits) -> Result<Vec<String>, String> {
+    on_reader_thread(|| {
+        let pdf = metered(limits, || load(bytes))?;
+        pdf.pages()
+            .iter()
+            .map(|page| metered(limits, || Ok(page_text(page))))
+            .collect()
+    })
 }
 
 #[cfg(test)]

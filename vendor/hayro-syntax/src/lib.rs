@@ -88,6 +88,7 @@ pub(crate) mod pdf;
 pub(crate) mod trivia;
 pub(crate) mod util;
 
+pub mod budget;
 pub mod content;
 mod crypto;
 pub mod metadata;

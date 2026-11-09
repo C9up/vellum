@@ -30,6 +30,20 @@ pub(crate) fn decode(
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(&*data), options);
     decoder.decode_headers().ok()?;
 
+    // vellum: zune-jpeg allocates what the header declares, so the declared
+    // size is checked against the decode budget before decoding.
+    if let Some(limit) = crate::budget::decode_allowance() {
+        let (width, height) = decoder.dimensions()?;
+        let components = decoder.info()?.components.max(1);
+        let declared = width
+            .saturating_mul(height)
+            .saturating_mul(usize::from(components));
+        if declared > limit {
+            crate::budget::charge_decoded(declared);
+            return None;
+        }
+    }
+
     let color_transform = params.get::<u8>(COLOR_TRANSFORM);
     let input_color_space = decoder.input_colorspace().unwrap();
 

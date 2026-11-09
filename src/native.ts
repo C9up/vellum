@@ -21,6 +21,7 @@ import type {
 	PageDimensions,
 	PageSize,
 	PreparedSignature,
+	ReadLimits,
 	RenderOptions,
 	RevocationAnswer,
 	SignatureReport,
@@ -152,8 +153,11 @@ export async function renderAllNative(
 	}
 }
 
-export function pageDimensionsNative(pdf: Buffer): PageDimensions[] {
-	return run("INVALID_PDF", (loaded) => loaded.pageDimensions(pdf));
+export function pageDimensionsNative(
+	pdf: Buffer,
+	limits: ReadLimits,
+): PageDimensions[] {
+	return run("INVALID_PDF", (loaded) => loaded.pageDimensions(pdf, limits));
 }
 
 export function metadataNative(pdf: Buffer): DocumentMetadata {
@@ -163,10 +167,11 @@ export function metadataNative(pdf: Buffer): DocumentMetadata {
 export async function extractTextNative(
 	pdf: Buffer,
 	pageIndex: number,
+	limits: ReadLimits,
 ): Promise<string> {
 	const loaded = engine();
 	try {
-		return await loaded.extractText(pdf, pageIndex);
+		return await loaded.extractText(pdf, pageIndex, limits);
 	} catch (error) {
 		throw new VellumError(
 			"EXTRACT_FAILED",
@@ -176,10 +181,13 @@ export async function extractTextNative(
 	}
 }
 
-export async function extractTextAllNative(pdf: Buffer): Promise<string[]> {
+export async function extractTextAllNative(
+	pdf: Buffer,
+	limits: ReadLimits,
+): Promise<string[]> {
 	const loaded = engine();
 	try {
-		return await loaded.extractTextAll(pdf);
+		return await loaded.extractTextAll(pdf, limits);
 	} catch (error) {
 		throw new VellumError(
 			"EXTRACT_FAILED",

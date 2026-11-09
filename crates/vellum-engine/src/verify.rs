@@ -17,10 +17,12 @@
 //! after a signature is not covered by it, and a reader that only verifies the
 //! arithmetic will happily call such a document signed.
 
+use std::collections::HashMap;
+
 use cms::content_info::ContentInfo;
 use cms::signed_data::SignedData;
 use der::{Decode, Encode, Reader};
-use lopdf::{Document, Object};
+use lopdf::{Document, Object, ObjectId};
 use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
 
@@ -127,6 +129,7 @@ fn verify_one(
     field: String,
     signature: &lopdf::Dictionary,
     anchors: &[Certificate],
+    digests: &mut HashMap<[usize; 4], [u8; 32]>,
 ) -> SignatureReport {
     let Some(range) = byte_range(signature) else {
         return SignatureReport::failed(field, "the signature declares no byte range".to_string());
@@ -174,10 +177,14 @@ fn verify_one(
         ));
     }
 
-    let mut hasher = Sha256::new();
-    hasher.update(&pdf[start..first]);
-    hasher.update(&pdf[second..end]);
-    let digest: [u8; 32] = hasher.finalize().into();
+    // Signatures sharing a byte range share its digest: hashing it once per
+    // signature let thousands of them over one large range cost minutes.
+    let digest = *digests.entry(range).or_insert_with(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(&pdf[start..first]);
+        hasher.update(&pdf[second..end]);
+        hasher.finalize().into()
+    });
 
     let cms = match first_object(value).and_then(|der| {
         ContentInfo::from_der(der)
@@ -356,6 +363,10 @@ fn verify_one(
     report
 }
 
+/// How many distinct signatures one call checks. Each costs a hash of up to
+/// the whole file and a certificate path; real documents carry a handful.
+const MAX_SIGNATURES: usize = 100;
+
 /// Report on every signature the document carries, in field order.
 ///
 /// A document with no signatures reports none; that is an answer, not a
@@ -368,30 +379,54 @@ pub fn verify_signatures(
 
     let (anchors, anchor_problems) = read_anchors(&options.anchors);
     let mut reports = Vec::new();
+    let mut digests = HashMap::new();
+    // Fields naming one signature dictionary share its report.
+    let mut checked: HashMap<ObjectId, SignatureReport> = HashMap::new();
+    let mut distinct = 0;
     for (field_id, field) in fields_of(&document)? {
         if field.kind != crate::FieldKind::Signature {
             continue;
         }
-        let signature = document
+        let value = document
             .get_dictionary(field_id)
             .ok()
-            .and_then(|dictionary| dictionary.get(b"V").ok().cloned())
-            .and_then(|value| match value {
-                Object::Reference(id) => document.get_dictionary(id).ok().cloned(),
-                Object::Dictionary(dictionary) => Some(dictionary),
-                _ => None,
+            .and_then(|dictionary| dictionary.get(b"V").ok().cloned());
+        let shared = match &value {
+            Some(Object::Reference(id)) => Some(*id),
+            _ => None,
+        };
+        if let Some(report) = shared.and_then(|id| checked.get(&id)) {
+            reports.push(SignatureReport {
+                field: field.name,
+                ..report.clone()
             });
-
-        match signature {
-            Some(signature) => {
-                let mut report = verify_one(pdf, field.name, &signature, &anchors);
-                report.problems.extend(anchor_problems.iter().cloned());
-                reports.push(report);
-            }
-            // A signature field with no value is an empty place for one, not a
-            // broken signature.
-            None => continue,
+            continue;
         }
+        let signature = value.and_then(|value| match value {
+            Object::Reference(id) => document.get_dictionary(id).ok().cloned(),
+            Object::Dictionary(dictionary) => Some(dictionary),
+            _ => None,
+        });
+        // A signature field with no value is an empty place for one, not a
+        // broken signature.
+        let Some(signature) = signature else {
+            continue;
+        };
+
+        distinct += 1;
+        if distinct > MAX_SIGNATURES {
+            reports.push(SignatureReport::failed(
+                field.name,
+                format!("not checked: the document carries more than {MAX_SIGNATURES} signatures"),
+            ));
+            continue;
+        }
+        let mut report = verify_one(pdf, field.name, &signature, &anchors, &mut digests);
+        report.problems.extend(anchor_problems.iter().cloned());
+        if let Some(id) = shared {
+            checked.insert(id, report.clone());
+        }
+        reports.push(report);
     }
     Ok(reports)
 }

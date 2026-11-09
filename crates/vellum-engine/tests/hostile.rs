@@ -5,9 +5,13 @@
 //! process. Each case below once did, and each must now come back as an error
 //! or as a bounded result.
 
+use std::io::Write;
+use std::time::{Duration, Instant};
+
 use vellum_engine::{
-    extract_text, fill_form, flatten_form, form_fields, page_dimensions, render_page,
-    verify_signatures, FieldValue, RenderOptions, TrustOptions,
+    extract_text, extract_text_all_with, extract_text_with, fill_form, flatten_form, form_fields,
+    page_dimensions, render_all, render_page, verify_signatures, FieldValue, ReadLimits,
+    RenderOptions, TrustOptions,
 };
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -286,4 +290,272 @@ fn a_parent_chain_without_end_does_not_loop() {
         b"<< /T (b) /Parent 4 0 R >>".to_vec(),
     ]);
     assert_eq!(form_fields(&pdf), Ok(Vec::new()));
+}
+
+fn deflate(data: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(data).expect("compressing in memory");
+    encoder.finish().expect("compressing in memory")
+}
+
+const MIB: usize = 1024 * 1024;
+
+/// A budget small enough that the tests never allocate much themselves.
+fn one_mib() -> ReadLimits {
+    ReadLimits {
+        max_decoded_bytes: MIB as u64,
+        ..ReadLimits::default()
+    }
+}
+
+fn render_with(limits: ReadLimits) -> RenderOptions {
+    RenderOptions {
+        limits,
+        ..RenderOptions::default()
+    }
+}
+
+/// A page whose content is `copies` references to one Flate stream of
+/// `inflated` bytes of whitespace.
+fn flate_bomb(inflated: usize, copies: usize) -> Vec<u8> {
+    let compressed = deflate(&vec![b' '; inflated]);
+    let contents = vec!["4 0 R"; copies].join(" ");
+    build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents [{contents}] /Resources << {HELVETICA} >> >>"
+        )
+        .into_bytes(),
+        stream("/Filter /FlateDecode", &compressed),
+    ])
+}
+
+#[test]
+fn a_flate_stream_inflating_past_the_budget_is_refused() {
+    let pdf = flate_bomb(16 * MIB, 1);
+    let rendered = render_page(&pdf, 0, &render_with(one_mib())).expect_err("refused");
+    assert!(rendered.contains("more than 1 MiB"), "got {rendered}");
+    let text = extract_text_with(&pdf, 0, &one_mib()).expect_err("refused");
+    assert!(text.contains("raise maxDecodedBytes"), "got {text}");
+}
+
+#[test]
+fn one_stream_referenced_many_times_is_charged_every_time() {
+    // 256 KiB fits the budget once; eight references to it do not.
+    let pdf = flate_bomb(256 * 1024, 8);
+    assert!(render_page(&pdf, 0, &render_with(one_mib())).is_err());
+    let single = flate_bomb(256 * 1024, 1);
+    assert!(render_page(&single, 0, &render_with(one_mib())).is_ok());
+}
+
+#[test]
+fn a_run_length_stream_inflating_past_the_budget_is_refused() {
+    // Each pair of bytes repeats a space 128 times: 32 KiB become 2 MiB.
+    let encoded: Vec<u8> = [129u8, b' '].repeat(16 * 1024);
+    let pdf = one_page_with_filter("/Filter /RunLengthDecode", &encoded);
+    assert!(render_page(&pdf, 0, &render_with(one_mib())).is_err());
+}
+
+fn one_page_with_filter(dictionary: &str, data: &[u8]) -> Vec<u8> {
+    build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << {HELVETICA} >> >>"
+        )
+        .into_bytes(),
+        stream(dictionary, data),
+    ])
+}
+
+#[test]
+fn an_image_declaring_more_pixels_than_the_budget_is_refused() {
+    // 60 000 x 60 000 RGB declared, a few kilobytes on the wire.
+    let image = stream(
+        "/Type /XObject /Subtype /Image /Width 60000 /Height 60000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+        &deflate(&vec![0u8; 4 * MIB]),
+    );
+    let pdf = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /XObject << /Im 5 0 R >> >> >>".to_vec(),
+        stream("", b"q 595 0 0 842 0 0 cm /Im Do Q"),
+        image,
+    ]);
+    assert!(render_page(&pdf, 0, &render_with(one_mib())).is_err());
+}
+
+#[test]
+fn an_ordinary_page_reads_within_the_default_budget() {
+    let pdf = flate_bomb(64 * 1024, 2);
+    assert!(render_page(&pdf, 0, &RenderOptions::default()).is_ok());
+}
+
+/// Form XObjects each drawing the next ten times, `levels` deep: 10^levels
+/// leaf drawings from a file of two kilobytes.
+fn xobject_fan_out(levels: usize) -> Vec<u8> {
+    let mut forms = Vec::new();
+    for level in 0..levels {
+        let last = level + 1 == levels;
+        let body = if last {
+            "BT /F1 1 Tf (a) Tj ET 0 0 1 1 re f".to_string()
+        } else {
+            ["/X Do"; 10].join(" ")
+        };
+        let resources = if last {
+            HELVETICA.to_string()
+        } else {
+            format!("/XObject << /X {} 0 R >>", 6 + level)
+        };
+        forms.push(stream(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << {resources} >>"
+            ),
+            body.as_bytes(),
+        ));
+    }
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /XObject << /X 5 0 R >> >> >>".to_vec(),
+        stream("", b"/X Do"),
+    ];
+    objects.extend(forms);
+    build_pdf(&objects)
+}
+
+#[test]
+fn an_xobject_fan_out_is_refused_once_the_operations_run_out() {
+    // A billion leaf drawings; the budget stops the interpretation after a
+    // million operations, instead of minutes later.
+    let pdf = xobject_fan_out(9);
+    let limits = ReadLimits {
+        max_operations: 1_000_000,
+        ..ReadLimits::default()
+    };
+    let started = Instant::now();
+    let rendered = render_page(&pdf, 0, &render_with(limits)).expect_err("refused");
+    assert!(rendered.contains("raise maxOperations"), "got {rendered}");
+    let text = extract_text_with(&pdf, 0, &limits).expect_err("refused");
+    assert!(text.contains("more than 1000000 operations"), "got {text}");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn the_operation_budget_is_the_callers_to_set() {
+    let pdf = xobject_fan_out(3);
+    let tight = ReadLimits {
+        max_operations: 100,
+        ..ReadLimits::default()
+    };
+    assert!(render_page(&pdf, 0, &render_with(tight)).is_err());
+    assert!(render_page(&pdf, 0, &RenderOptions::default()).is_ok());
+}
+
+#[test]
+fn each_page_of_a_long_document_has_a_budget_of_its_own() {
+    // Three pages of 512 KiB each: 1.5 MiB in all, under 1 MiB per page.
+    let compressed = deflate(&vec![b' '; 512 * 1024]);
+    let pdf = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 6 0 R >>".to_vec(),
+        stream("/Filter /FlateDecode", &compressed),
+    ]);
+    assert_eq!(
+        render_all(&pdf, &render_with(one_mib())).map(|pages| pages.len()),
+        Ok(3)
+    );
+    assert_eq!(
+        extract_text_all_with(&pdf, &one_mib()).map(|pages| pages.len()),
+        Ok(3)
+    );
+}
+
+#[test]
+fn render_all_refuses_a_document_whose_pages_add_up_past_the_ceiling() {
+    // Forty pages of 7000 x 7000 points: each just under the per-page
+    // ceiling, two billion pixels between them.
+    let kids: Vec<String> = (0..40).map(|page| format!("{} 0 R", 4 + page)).collect();
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!("<< /Type /Pages /Kids [{}] /Count 40 >>", kids.join(" ")).into_bytes(),
+        stream("", b"0 0 7000 7000 re f"),
+    ];
+    for _ in 0..40 {
+        objects.push(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 7000 7000] /Contents 3 0 R >>".to_vec(),
+        );
+    }
+    let started = Instant::now();
+    let refused = render_all(&build_pdf(&objects), &RenderOptions::default()).expect_err("refused");
+    assert!(refused.contains("raise maxTotalPixels"), "got {refused}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "it was refused only after drawing: {:?}",
+        started.elapsed()
+    );
+}
+
+/// A form of `fields` signature fields, whose values are built by `value`,
+/// over a document padded to more than 4 MB so that hashing it costs.
+fn signature_fields(fields: usize, value: impl Fn(usize) -> String) -> Vec<u8> {
+    let names: Vec<String> = (0..fields)
+        .map(|field| format!("{} 0 R", 6 + field))
+        .collect();
+    let mut objects = vec![
+        format!(
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{}] /SigFlags 3 >> >>",
+            names.join(" ")
+        )
+        .into_bytes(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_vec(),
+        stream("", &vec![b' '; 4 * MIB + 1024]),
+        b"<< /Type /Sig /ByteRange [0 10 20 4000000] /Contents <00> >>".to_vec(),
+    ];
+    for field in 0..fields {
+        objects.push(format!("<< /FT /Sig /T (s{field}) /V {} >>", value(field)).into_bytes());
+    }
+    build_pdf(&objects)
+}
+
+#[test]
+fn thousands_of_fields_sharing_one_signature_hash_it_once() {
+    let pdf = signature_fields(5000, |_| "5 0 R".to_string());
+    let started = Instant::now();
+    let reports = verify_signatures(&pdf, &TrustOptions::default()).expect("verified");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(reports.len(), 5000);
+    assert_eq!(reports[4999].field, "s4999");
+    assert_eq!(reports[0].problems, reports[4999].problems);
+}
+
+#[test]
+fn signatures_past_the_hundredth_are_reported_unchecked() {
+    let pdf = signature_fields(150, |_| {
+        "<< /Type /Sig /ByteRange [0 10 20 4000000] /Contents <00> >>".to_string()
+    });
+    let reports = verify_signatures(&pdf, &TrustOptions::default()).expect("verified");
+    assert_eq!(reports.len(), 150);
+    assert!(!reports[99]
+        .problems
+        .iter()
+        .any(|p| p.starts_with("not checked")));
+    assert!(
+        reports[100].problems[0].starts_with("not checked"),
+        "{:?}",
+        reports[100].problems
+    );
 }

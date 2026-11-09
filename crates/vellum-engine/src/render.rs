@@ -11,7 +11,7 @@ use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
 use image::codecs::jpeg::JpegEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 
-use crate::reader::on_reader_thread;
+use crate::reader::{metered, on_reader_thread, ReadLimits};
 
 /// How the rasterised page should be encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +112,14 @@ pub struct RenderOptions {
     /// for that. The default leaves room for A4 at 600 DPI (35 Mpx) and A3 at
     /// 400 (31 Mpx); a caller rendering something larger raises it knowingly.
     pub max_pixels: u32,
+    /// The most pixels `render_all` may rasterise across every page.
+    ///
+    /// `max_pixels` bounds one page, and the page count is the document's to
+    /// choose: forty pages just under the ceiling were twenty seconds of work
+    /// from a 5 KB file. Checked before the first page is drawn.
+    pub max_total_pixels: u64,
+    /// What reading one page may cost in decoding and interpretation.
+    pub limits: ReadLimits,
 }
 
 /// A rectangle of a page, in points from the top-left corner.
@@ -126,6 +134,9 @@ pub struct Band {
 /// 50 megapixels — 200 MiB of RGBA.
 pub const DEFAULT_MAX_PIXELS: u32 = 50_000_000;
 
+/// 500 megapixels across a whole document: two hundred A4 pages at 150 DPI.
+pub const DEFAULT_MAX_TOTAL_PIXELS: u64 = 500_000_000;
+
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
@@ -135,6 +146,8 @@ impl Default for RenderOptions {
             background: [255, 255, 255, 255],
             band: None,
             max_pixels: DEFAULT_MAX_PIXELS,
+            max_total_pixels: DEFAULT_MAX_TOTAL_PIXELS,
+            limits: ReadLimits::default(),
         }
     }
 }
@@ -161,19 +174,27 @@ fn load(bytes: &[u8]) -> Result<Pdf, String> {
 
 /// The natural size of every page, in points.
 pub fn page_dimensions(bytes: &[u8]) -> Result<Vec<PageDimensions>, String> {
-    on_reader_thread(|| read_dimensions(bytes))
+    page_dimensions_with(bytes, &ReadLimits::default())
 }
 
-fn read_dimensions(bytes: &[u8]) -> Result<Vec<PageDimensions>, String> {
-    let pdf = load(bytes)?;
-    Ok(pdf
-        .pages()
-        .iter()
-        .map(|page| {
-            let (width, height) = page.render_dimensions();
-            PageDimensions { width, height }
+/// [`page_dimensions`] under the given limits.
+pub fn page_dimensions_with(
+    bytes: &[u8],
+    limits: &ReadLimits,
+) -> Result<Vec<PageDimensions>, String> {
+    on_reader_thread(|| {
+        metered(limits, || {
+            let pdf = load(bytes)?;
+            Ok(pdf
+                .pages()
+                .iter()
+                .map(|page| {
+                    let (width, height) = page.render_dimensions();
+                    PageDimensions { width, height }
+                })
+                .collect())
         })
-        .collect())
+    })
 }
 
 /// Rasterise one page, addressed from zero.
@@ -182,7 +203,7 @@ pub fn render_page(
     page_index: u32,
     options: &RenderOptions,
 ) -> Result<Vec<u8>, String> {
-    on_reader_thread(|| read_page(bytes, page_index, options))
+    on_reader_thread(|| metered(&options.limits, || read_page(bytes, page_index, options)))
 }
 
 fn read_page(bytes: &[u8], page_index: u32, options: &RenderOptions) -> Result<Vec<u8>, String> {
@@ -203,16 +224,35 @@ fn read_page(bytes: &[u8], page_index: u32, options: &RenderOptions) -> Result<V
 }
 
 /// Rasterise every page, in document order.
+///
+/// Each page is read under its own [`ReadLimits`], so a long document is not
+/// refused for being long; what the pages add up to is bounded by
+/// `max_total_pixels`, before any of them is drawn.
 pub fn render_all(bytes: &[u8], options: &RenderOptions) -> Result<Vec<Vec<u8>>, String> {
-    on_reader_thread(|| read_all(bytes, options))
-}
-
-fn read_all(bytes: &[u8], options: &RenderOptions) -> Result<Vec<Vec<u8>>, String> {
-    let pdf = load(bytes)?;
-    pdf.pages()
-        .iter()
-        .map(|page| encode(&rasterise(page, options)?, options))
-        .collect()
+    on_reader_thread(|| {
+        let pdf = metered(&options.limits, || load(bytes))?;
+        let pages = pdf.pages();
+        let mut total = 0f64;
+        for page in pages.iter() {
+            total += plan(page, options)?.pixels;
+        }
+        if total > options.max_total_pixels as f64 {
+            return Err(format!(
+                "rendering all {} pages needs {:.0} million pixels, over the {:.0} million allowed — render them one at a time, or raise maxTotalPixels if you meant it",
+                pages.len(),
+                total / 1e6,
+                options.max_total_pixels as f64 / 1e6
+            ));
+        }
+        pages
+            .iter()
+            .map(|page| {
+                metered(&options.limits, || {
+                    encode(&rasterise(page, options)?, options)
+                })
+            })
+            .collect()
+    })
 }
 
 /// A rasterised page: premultiplied RGBA pixels and their dimensions.
@@ -222,10 +262,17 @@ struct Raster {
     height: u16,
 }
 
-fn rasterise(
+/// The scale a page renders at, and how many pixels that is.
+struct Plan {
+    scale: f32,
+    pixels: f64,
+}
+
+/// Check a page against the size limits without drawing it.
+fn plan(
     page: &hayro::hayro_interpret::hayro_syntax::page::Page<'_>,
     options: &RenderOptions,
-) -> Result<Raster, String> {
+) -> Result<Plan, String> {
     let (natural_width, natural_height) = page.render_dimensions();
     if !is_usable(natural_width) || !is_usable(natural_height) {
         return Err("page has no renderable area".to_string());
@@ -268,6 +315,14 @@ fn rasterise(
             f64::from(options.max_pixels) / 1e6
         ));
     }
+    Ok(Plan { scale, pixels })
+}
+
+fn rasterise(
+    page: &hayro::hayro_interpret::hayro_syntax::page::Page<'_>,
+    options: &RenderOptions,
+) -> Result<Raster, String> {
+    let Plan { scale, .. } = plan(page, options)?;
 
     let [red, green, blue, alpha] = background_for(options);
     let pixmap_settings = PixmapSettings {

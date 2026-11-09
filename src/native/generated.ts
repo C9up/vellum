@@ -358,6 +358,30 @@ export interface RenderOptions {
 	 * ceiling a document alone could ask for gigabytes.
 	 */
 	maxPixels?: number;
+	/**
+	 * The most pixels `renderAll` may rasterise across every page. 500
+	 * million by default; checked before the first page is drawn.
+	 */
+	maxTotalPixels?: number;
+	/** Bytes of decoded stream data one page may need. 256 MiB by default. */
+	maxDecodedBytes?: number;
+	/**
+	 * Content operators and glyphs one page may take to draw. Ten million
+	 * by default.
+	 */
+	maxOperations?: number;
+}
+
+/** What reading one page may cost, for the calls that do not rasterise. */
+
+export interface ReadLimits {
+	/** Bytes of decoded stream data one page may need. 256 MiB by default. */
+	maxDecodedBytes?: number;
+	/**
+	 * Content operators and glyphs one page may take to draw. Ten million
+	 * by default.
+	 */
+	maxOperations?: number;
 }
 
 export interface PageDimensions {
@@ -723,16 +747,23 @@ export declare function renderAll(
 	options?: RenderOptions | undefined | null,
 ): Promise<Buffer[]>;
 
-export declare function pageDimensions(bytes: Buffer): Array<PageDimensions>;
+export declare function pageDimensions(
+	bytes: Buffer,
+	limits?: ReadLimits | undefined | null,
+): Array<PageDimensions>;
 
 export declare function metadata(bytes: Buffer): DocumentMetadata;
 
 export declare function extractText(
 	bytes: Buffer,
 	pageIndex: number,
+	limits?: ReadLimits | undefined | null,
 ): Promise<string>;
 
-export declare function extractTextAll(bytes: Buffer): Promise<string[]>;
+export declare function extractTextAll(
+	bytes: Buffer,
+	limits?: ReadLimits | undefined | null,
+): Promise<string[]>;
 
 export declare function merge(documents: Array<Buffer>): Promise<Buffer>;
 

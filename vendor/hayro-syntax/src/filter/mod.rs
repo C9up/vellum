@@ -68,6 +68,43 @@ impl Filter {
         params: &Dict<'_>,
         #[cfg_attr(not(feature = "images"), allow(unused))] image_params: &ImageDecodeParams,
     ) -> Result<FilterResult<'static>, DecodeFailure> {
+        // vellum: an image decoder allocates what the image declares, before
+        // the result can be charged, so the declared size is checked first.
+        if matches!(
+            self,
+            Self::CcittFaxDecode | Self::Jbig2Decode | Self::JpxDecode
+        ) && let Some(limit) = crate::budget::decode_allowance()
+        {
+            let components = u64::from(image_params.num_components.unwrap_or(4).max(1));
+            let declared = u64::from(image_params.width)
+                .saturating_mul(u64::from(image_params.height))
+                .saturating_mul(components);
+            if declared > u64::try_from(limit).unwrap_or(u64::MAX) {
+                crate::budget::charge_decoded(usize::try_from(declared).unwrap_or(usize::MAX));
+                return Err(DecodeFailure::ImageDecode);
+            }
+        }
+
+        let result = self.apply_unmetered(data, params, image_params)?;
+        // vellum: every stage of a filter chain is charged, so a stream
+        // referenced many times, or decoded twice, costs each time it is.
+        if !crate::budget::charge_decoded(result.data.len()) {
+            return Err(match self {
+                Self::DctDecode | Self::CcittFaxDecode | Self::Jbig2Decode | Self::JpxDecode => {
+                    DecodeFailure::ImageDecode
+                }
+                _ => DecodeFailure::StreamDecode,
+            });
+        }
+        Ok(result)
+    }
+
+    fn apply_unmetered(
+        &self,
+        data: &[u8],
+        params: &Dict<'_>,
+        #[cfg_attr(not(feature = "images"), allow(unused))] image_params: &ImageDecodeParams,
+    ) -> Result<FilterResult<'static>, DecodeFailure> {
         match self {
             Self::AsciiHexDecode => ascii_hex::decode(data)
                 .map(FilterResult::from_data)

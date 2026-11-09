@@ -9,8 +9,66 @@
 
 use std::any::Any;
 
+use hayro::hayro_syntax::budget::Budget;
+
 /// Comfortably above what the depth limits need in a debug build.
 const STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// 256 MiB: a page scanned at 600 DPI decodes to about 100.
+pub const DEFAULT_MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Ten million operators and glyphs: a dense technical drawing uses well
+/// under one.
+pub const DEFAULT_MAX_OPERATIONS: u64 = 10_000_000;
+
+/// What reading one page may cost.
+///
+/// The size of a document says nothing about the work it asks for: a 1 MiB
+/// Flate stream inflates to 1 GiB, once per reference to it, and Form
+/// XObjects drawing one another ten times per level multiply a 2 KB file into
+/// hours. Each page is read under these bounds, and refused past them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadLimits {
+    /// Bytes of decoded stream data: content, images, fonts, object streams.
+    pub max_decoded_bytes: u64,
+    /// Content operators and glyphs interpreted, nested forms included.
+    pub max_operations: u64,
+}
+
+impl Default for ReadLimits {
+    fn default() -> Self {
+        Self {
+            max_decoded_bytes: DEFAULT_MAX_DECODED_BYTES,
+            max_operations: DEFAULT_MAX_OPERATIONS,
+        }
+    }
+}
+
+/// Run `work` under `limits`, on the reader thread it is called from.
+///
+/// hayro answers an exhausted budget the way it answers a broken stream: it
+/// draws without it. That would hand back a page that silently lacks its
+/// content, so running out is an error here instead.
+pub(crate) fn metered<T>(
+    limits: &ReadLimits,
+    work: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let budget = Budget::open(limits.max_decoded_bytes, limits.max_operations);
+    let result = work();
+    if budget.decoded_exhausted() {
+        return Err(format!(
+            "the document decodes to more than {} MiB for one page — raise maxDecodedBytes if you meant it",
+            limits.max_decoded_bytes / (1024 * 1024)
+        ));
+    }
+    if budget.operations_exhausted() {
+        return Err(format!(
+            "drawing the page takes more than {} operations — raise maxOperations if you meant it",
+            limits.max_operations
+        ));
+    }
+    result
+}
 
 /// Run `work` on a reader thread and wait for it.
 ///

@@ -4,15 +4,21 @@ members = ["crates/vellum-engine", "crates/vellum-engine-napi"]
 # Upstream crates carried with a patch, not ours to format or lint.
 exclude = ["vendor"]
 
-# hayro reads every document an upload hands us, and a stack overflow ends
-# the process rather than return an error: it is not a panic, so no
-# `catch_unwind` nets it. Each crate below is the published 0.9.0 source,
-# unchanged except where a comment marked `vellum:` says why:
+# hayro reads every document an upload hands us, and three of its failure
+# modes end the process or pin a worker rather than return an error: a stack
+# overflow and an allocation failure are not panics, so no `catch_unwind`
+# nets them, and an endless interpretation cannot be cancelled. Each crate
+# below is the published 0.9.0 source, unchanged except where a comment
+# marked `vellum:` says why:
 #
-# - hayro-syntax: unchanged; carried so its patches land beside the others.
+# - hayro-syntax: `budget` holds per-thread limits on decoded bytes and on
+#   operations; every filter charges what it decodes and stops when the
+#   budget runs out, so a 1 MiB Flate stream cannot inflate to 1 GiB.
 # - hayro-interpret: a PostScript calculator function is refused past a
 #   nesting depth, and so is a chain of colour spaces or functions naming one
-#   another, instead of recursing once per level.
+#   another, instead of recursing once per level; every operator and glyph
+#   charges the operation budget, so a fan-out of Form XObjects cannot turn
+#   a 2 KB file into hours of work.
 #
 # Drop a patch once upstream carries the same bound.
 [patch.crates-io]

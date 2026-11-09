@@ -38,18 +38,20 @@ pub use fill::{fill_form, FieldValue};
 pub use flatten::flatten_form;
 pub use form::{form_fields, FieldKind, FormField};
 pub use metadata::{metadata, DocumentMetadata};
+pub use reader::{ReadLimits, DEFAULT_MAX_DECODED_BYTES, DEFAULT_MAX_OPERATIONS};
 pub use revocation::{read_revocation, responder_url, revocation_query, Revocation};
 pub use sign::{embed_signature, prepare, Prepared, SignatureOptions, DEFAULT_CAPACITY};
 pub use stamp::{stamp_image, StampOptions};
 pub use stamp_text::{stamp_text, FontChoice, StandardFont, TextStampOptions};
-pub use text::{extract_text, extract_text_all};
+pub use text::{extract_text, extract_text_all, extract_text_all_with, extract_text_with};
 pub use timestamp::{attach_timestamp, timestamp_query};
 pub use trust::TrustOptions;
 pub use verify::{verify_signatures, SignatureReport};
 
 pub use render::{
-    page_dimensions, parse_color, render_all, render_page, Band, ImageFormat, PageDimensions,
-    RenderOptions, DEFAULT_JPEG_QUALITY,
+    page_dimensions, page_dimensions_with, parse_color, render_all, render_page, Band, ImageFormat,
+    PageDimensions, RenderOptions, DEFAULT_JPEG_QUALITY, DEFAULT_MAX_PIXELS,
+    DEFAULT_MAX_TOTAL_PIXELS,
 };
 
 use krilla::Document as Authored;

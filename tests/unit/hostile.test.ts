@@ -105,3 +105,109 @@ describe("vellum > a form tree deep enough to overflow the stack", () => {
 		expect(fields.map((field) => field.name)).toEqual(["a.a.a.leaf"]);
 	});
 });
+
+const MIB = 1024 * 1024;
+
+/** A page whose content is `copies` references to one Flate stream. */
+function flateBomb(inflated: number, copies: number): Buffer {
+	const contents = Array.from({ length: copies }, () => "4 0 R").join(" ");
+	return buildPdf([
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents [${contents}] /Resources << ${HELVETICA} >> >>`,
+		stream("", Buffer.alloc(inflated, " "), true),
+	]);
+}
+
+describe("vellum > a stream that inflates past the decoding budget", () => {
+	const vellum = new Vellum({ maxDecodedBytes: MIB });
+
+	it("is refused when rendering and reading text", async () => {
+		const pdf = flateBomb(16 * MIB, 1);
+		await expect(vellum.render(pdf)).rejects.toThrow(/more than 1 MiB/);
+		await expect(vellum.renderAll(pdf)).rejects.toThrow(
+			/raise maxDecodedBytes/,
+		);
+		await expect(vellum.extractText(pdf)).rejects.toThrow(/more than 1 MiB/);
+		await expect(vellum.extractTextAll(pdf)).rejects.toThrow(/more than 1 MiB/);
+	});
+
+	it("is charged for every reference to it", async () => {
+		await expect(vellum.render(flateBomb(256 * 1024, 8))).rejects.toThrow(
+			/more than 1 MiB/,
+		);
+		await expect(
+			vellum.render(flateBomb(256 * 1024, 1)),
+		).resolves.toBeInstanceOf(Buffer);
+	});
+
+	it("can be raised for one call", async () => {
+		const pdf = flateBomb(2 * MIB, 1);
+		await expect(vellum.render(pdf)).rejects.toThrow(/more than 1 MiB/);
+		await expect(
+			vellum.render(pdf, { maxDecodedBytes: 4 * MIB }),
+		).resolves.toBeInstanceOf(Buffer);
+	});
+});
+
+/** Form XObjects each drawing the next ten times, `levels` deep. */
+function fanOut(levels: number): Buffer {
+	const forms: Buffer[] = [];
+	for (let level = 0; level < levels; level++) {
+		const last = level + 1 === levels;
+		const body = last
+			? "BT /F1 1 Tf (a) Tj ET 0 0 1 1 re f"
+			: Array(10).fill("/X Do").join(" ");
+		const resources = last ? HELVETICA : `/XObject << /X ${6 + level} 0 R >>`;
+		forms.push(
+			stream(
+				`/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << ${resources} >>`,
+				body,
+			),
+		);
+	}
+	return buildPdf([
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /XObject << /X 5 0 R >> >> >>",
+		stream("", "/X Do"),
+		...forms,
+	]);
+}
+
+describe("vellum > a document that asks for unbounded work", () => {
+	it("stops a fan-out of forms once the operations run out", async () => {
+		const vellum = new Vellum({ maxOperations: 1_000_000 });
+		const pdf = fanOut(9);
+		const started = performance.now();
+		await expect(vellum.render(pdf)).rejects.toThrow(
+			/more than 1000000 operations/,
+		);
+		await expect(vellum.extractText(pdf)).rejects.toThrow(
+			/raise maxOperations/,
+		);
+		expect(performance.now() - started).toBeLessThan(10_000);
+	});
+
+	it("refuses renderAll before drawing pages that add up past the ceiling", async () => {
+		const kids = Array.from(
+			{ length: 40 },
+			(_, page) => `${4 + page} 0 R`,
+		).join(" ");
+		const pdf = buildPdf([
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			`<< /Type /Pages /Kids [${kids}] /Count 40 >>`,
+			stream("", "0 0 7000 7000 re f"),
+			...Array.from(
+				{ length: 40 },
+				() =>
+					"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 7000 7000] /Contents 3 0 R >>",
+			),
+		]);
+		const started = performance.now();
+		await expect(new Vellum().renderAll(pdf)).rejects.toThrow(
+			/raise maxTotalPixels/,
+		);
+		expect(performance.now() - started).toBeLessThan(2_000);
+	});
+});

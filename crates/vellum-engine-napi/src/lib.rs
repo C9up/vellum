@@ -105,6 +105,52 @@ pub struct RenderOptions {
     /// room for A4 at 600 DPI. A page declares its own size, so without a
     /// ceiling a document alone could ask for gigabytes.
     pub max_pixels: Option<u32>,
+    /// The most pixels `renderAll` may rasterise across every page. 500
+    /// million by default; checked before the first page is drawn.
+    pub max_total_pixels: Option<u32>,
+    /// Bytes of decoded stream data one page may need. 256 MiB by default.
+    pub max_decoded_bytes: Option<u32>,
+    /// Content operators and glyphs one page may take to draw. Ten million
+    /// by default.
+    pub max_operations: Option<u32>,
+}
+
+/// What reading one page may cost, for the calls that do not rasterise.
+#[napi(object)]
+pub struct ReadLimits {
+    /// Bytes of decoded stream data one page may need. 256 MiB by default.
+    pub max_decoded_bytes: Option<u32>,
+    /// Content operators and glyphs one page may take to draw. Ten million
+    /// by default.
+    pub max_operations: Option<u32>,
+}
+
+fn positive(name: &str, value: u32) -> std::result::Result<u64, String> {
+    if value == 0 {
+        return Err(format!("{name} must be greater than zero"));
+    }
+    Ok(u64::from(value))
+}
+
+fn to_engine_limits(
+    max_decoded_bytes: Option<u32>,
+    max_operations: Option<u32>,
+) -> std::result::Result<vellum_engine::ReadLimits, String> {
+    let mut limits = vellum_engine::ReadLimits::default();
+    if let Some(value) = max_decoded_bytes {
+        limits.max_decoded_bytes = positive("maxDecodedBytes", value)?;
+    }
+    if let Some(value) = max_operations {
+        limits.max_operations = positive("maxOperations", value)?;
+    }
+    Ok(limits)
+}
+
+fn read_limits(limits: Option<ReadLimits>) -> Result<vellum_engine::ReadLimits> {
+    let (bytes, operations) = limits.map_or((None, None), |limits| {
+        (limits.max_decoded_bytes, limits.max_operations)
+    });
+    to_engine_limits(bytes, operations).map_err(Error::from_reason)
 }
 
 fn to_engine_options(
@@ -131,6 +177,10 @@ fn to_engine_options(
         }
         engine.max_pixels = max;
     }
+    if let Some(max) = options.max_total_pixels {
+        engine.max_total_pixels = positive("maxTotalPixels", max)?;
+    }
+    engine.limits = to_engine_limits(options.max_decoded_bytes, options.max_operations)?;
 
     let quality = match options.quality {
         Some(value) => Some(
@@ -244,10 +294,11 @@ pub struct PageDimensions {
 }
 
 #[napi]
-pub fn page_dimensions(bytes: Buffer) -> Result<Vec<PageDimensions>> {
+pub fn page_dimensions(bytes: Buffer, limits: Option<ReadLimits>) -> Result<Vec<PageDimensions>> {
     let owned = bytes.to_vec();
+    let limits = read_limits(limits)?;
     wrap(move || {
-        vellum_engine::page_dimensions(&owned).map(|pages| {
+        vellum_engine::page_dimensions_with(&owned, &limits).map(|pages| {
             pages
                 .into_iter()
                 .map(|page| PageDimensions {
@@ -298,6 +349,7 @@ pub fn metadata(bytes: Buffer) -> Result<DocumentMetadata> {
 pub struct ExtractTextTask {
     bytes: Vec<u8>,
     page_index: u32,
+    limits: vellum_engine::ReadLimits,
 }
 
 impl Task for ExtractTextTask {
@@ -306,7 +358,7 @@ impl Task for ExtractTextTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("extracting text", || {
-            vellum_engine::extract_text(&self.bytes, self.page_index)
+            vellum_engine::extract_text_with(&self.bytes, self.page_index, &self.limits)
         })
     }
 
@@ -317,6 +369,7 @@ impl Task for ExtractTextTask {
 
 pub struct ExtractTextAllTask {
     bytes: Vec<u8>,
+    limits: vellum_engine::ReadLimits,
 }
 
 impl Task for ExtractTextAllTask {
@@ -325,7 +378,7 @@ impl Task for ExtractTextAllTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("extracting text", || {
-            vellum_engine::extract_text_all(&self.bytes)
+            vellum_engine::extract_text_all_with(&self.bytes, &self.limits)
         })
     }
 
@@ -335,18 +388,27 @@ impl Task for ExtractTextAllTask {
 }
 
 #[napi(ts_return_type = "Promise<string>")]
-pub fn extract_text(bytes: Buffer, page_index: u32) -> AsyncTask<ExtractTextTask> {
-    AsyncTask::new(ExtractTextTask {
+pub fn extract_text(
+    bytes: Buffer,
+    page_index: u32,
+    limits: Option<ReadLimits>,
+) -> Result<AsyncTask<ExtractTextTask>> {
+    Ok(AsyncTask::new(ExtractTextTask {
         bytes: bytes.to_vec(),
         page_index,
-    })
+        limits: read_limits(limits)?,
+    }))
 }
 
 #[napi(ts_return_type = "Promise<string[]>")]
-pub fn extract_text_all(bytes: Buffer) -> AsyncTask<ExtractTextAllTask> {
-    AsyncTask::new(ExtractTextAllTask {
+pub fn extract_text_all(
+    bytes: Buffer,
+    limits: Option<ReadLimits>,
+) -> Result<AsyncTask<ExtractTextAllTask>> {
+    Ok(AsyncTask::new(ExtractTextAllTask {
         bytes: bytes.to_vec(),
-    })
+        limits: read_limits(limits)?,
+    }))
 }
 
 /// Rewriting a document parses and re-serialises the whole object tree, so it

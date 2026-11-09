@@ -5,8 +5,14 @@ use alloc::vec::Vec;
 pub(crate) fn decode(data: &[u8]) -> Option<Vec<u8>> {
     let mut reader = Reader::new(data);
     let mut decoded = vec![];
+    // vellum: two bytes of input are 128 of output.
+    let allowance = crate::budget::decode_allowance();
 
     loop {
+        if allowance.is_some_and(|limit| decoded.len() > limit) {
+            crate::budget::charge_decoded(decoded.len());
+            return None;
+        }
         let length = reader.read_byte()?;
 
         match length {

@@ -257,6 +257,11 @@ pub fn interpret<'a>(
     context.save_state();
 
     while let Some(op) = ops.next() {
+        // vellum: a Form XObject drawing another ten times per level makes a
+        // 2 KB file cost hours; every operator, at any nesting, is charged.
+        if !hayro_syntax::budget::charge_operation() {
+            break;
+        }
         match op {
             TypedInstruction::SaveState(_) => context.save_state(),
             TypedInstruction::StrokeColorDeviceRgb(s) => {

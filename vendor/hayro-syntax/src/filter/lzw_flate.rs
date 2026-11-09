@@ -15,21 +15,34 @@ pub(crate) mod flate {
         use flate2::read::{DeflateDecoder, ZlibDecoder};
         use std::io::Read;
 
-        fn zlib_stream(data: &[u8]) -> Option<Vec<u8>> {
-            let mut decoder = ZlibDecoder::new(data);
+        // vellum: read at most one byte past what the budget allows, and
+        // stop there instead of trying the next decoder on the same bomb.
+        fn bounded(reader: impl Read) -> Option<Option<Vec<u8>>> {
             let mut result = Vec::new();
-            decoder.read_to_end(&mut result).ok().map(|_| result)
+            let allowance = crate::budget::decode_allowance();
+            let read = match allowance {
+                Some(limit) => reader
+                    .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+                    .read_to_end(&mut result),
+                None => {
+                    let mut reader = reader;
+                    reader.read_to_end(&mut result)
+                }
+            };
+            if allowance.is_some_and(|limit| result.len() > limit) {
+                crate::budget::charge_decoded(result.len());
+                return None;
+            }
+            Some(read.ok().map(|_| result))
         }
 
-        fn deflate_stream(data: &[u8]) -> Option<Vec<u8>> {
-            let mut decoder = DeflateDecoder::new(data);
-            let mut result = Vec::new();
-            decoder.read_to_end(&mut result).ok().map(|_| result)
-        }
-
-        let decoded = zlib_stream(data)
-            .or_else(|| deflate_stream(data))
-            .or_else(|| fallback::decode(data))?;
+        let decoded = match bounded(ZlibDecoder::new(data))? {
+            Some(decoded) => decoded,
+            None => match bounded(DeflateDecoder::new(data))? {
+                Some(decoded) => decoded,
+                None => fallback::decode(data)?,
+            },
+        };
         let params = PredictorParams::from_params(params);
         apply_predictor(decoded, &params)
     }
@@ -94,8 +107,18 @@ pub(crate) mod flate {
                 while !self.eof && self.pos < self.data.len() {
                     self.read_block();
                 }
+                if self.over_budget() {
+                    crate::budget::charge_decoded(self.output.len());
+                    return None;
+                }
 
                 Some(core::mem::take(&mut self.output))
+            }
+
+            // vellum: one compressed block can expand without bound, so the
+            // budget is checked per symbol, not per block.
+            fn over_budget(&self) -> bool {
+                crate::budget::decode_allowance().is_some_and(|limit| self.output.len() > limit)
             }
 
             fn get_byte(&mut self) -> Option<u8> {
@@ -243,6 +266,10 @@ pub(crate) mod flate {
                 } else {
                     let block = self.get_bytes(block_len as usize);
                     self.output.extend_from_slice(&block);
+                    if self.over_budget() {
+                        self.eof = true;
+                        return;
+                    }
                     if block.len() < block_len as usize {
                         self.eof = true;
                     }
@@ -270,6 +297,11 @@ pub(crate) mod flate {
                             return;
                         }
                     };
+
+                    if self.over_budget() {
+                        self.eof = true;
+                        return;
+                    }
 
                     if code1 < 256 {
                         self.output.push(code1 as u8);
@@ -576,8 +608,15 @@ pub(crate) mod lzw {
         let mut reader = BitReader::new(data);
         let mut decoded = vec![];
         let mut prev = None;
+        // vellum: a few kilobytes of LZW codes can name thousands of bytes
+        // each.
+        let allowance = crate::budget::decode_allowance();
 
         loop {
+            if allowance.is_some_and(|limit| decoded.len() > limit) {
+                crate::budget::charge_decoded(decoded.len());
+                return None;
+            }
             let next = match reader.read(bit_size) {
                 Some(code) => code as usize,
                 None => {
