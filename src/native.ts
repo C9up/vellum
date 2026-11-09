@@ -12,6 +12,7 @@ import type {
 	DocumentInfo,
 	DocumentMetadata,
 	DocumentSettingsInput,
+	EditOptions,
 	FormField,
 	NativeDocument,
 	SignatureOptions as NativeSignatureOptions,
@@ -197,6 +198,9 @@ export async function extractTextAllNative(
 	}
 }
 
+/** Failures the engine names itself, whatever the operation. */
+const NAMED_FAILURE = /^(SIGNED_DOCUMENT): ([\s\S]*)$/;
+
 async function edit<T>(
 	code: string,
 	work: (engine: NativeVellum) => Promise<T>,
@@ -205,38 +209,53 @@ async function edit<T>(
 	try {
 		return await work(loaded);
 	} catch (error) {
-		throw new VellumError(
-			code,
-			error instanceof Error ? error.message : String(error),
-			{ cause: error },
-		);
+		const message = error instanceof Error ? error.message : String(error);
+		const named = NAMED_FAILURE.exec(message);
+		throw new VellumError(named?.[1] ?? code, named?.[2] ?? message, {
+			cause: error,
+		});
 	}
 }
 
-export function mergeNative(documents: ReadonlyArray<Buffer>): Promise<Buffer> {
-	return edit("MERGE_FAILED", (loaded) => loaded.merge([...documents]));
+export function mergeNative(
+	documents: ReadonlyArray<Buffer>,
+	options: EditOptions,
+): Promise<Buffer> {
+	return edit("MERGE_FAILED", (loaded) =>
+		loaded.merge([...documents], options),
+	);
 }
 
 export function selectPagesNative(
 	pdf: Buffer,
 	pageIndexes: ReadonlyArray<number>,
+	options: EditOptions,
 ): Promise<Buffer> {
 	return edit("SELECT_FAILED", (loaded) =>
-		loaded.selectPages(pdf, [...pageIndexes]),
+		loaded.selectPages(pdf, [...pageIndexes], options),
 	);
 }
 
-export function splitNative(pdf: Buffer): Promise<Buffer[]> {
-	return edit("SPLIT_FAILED", (loaded) => loaded.split(pdf));
+export function splitNative(
+	pdf: Buffer,
+	options: EditOptions,
+): Promise<Buffer[]> {
+	return edit("SPLIT_FAILED", (loaded) => loaded.split(pdf, options));
 }
 
 export function rotateNative(
 	pdf: Buffer,
 	degrees: number,
-	pageIndexes?: ReadonlyArray<number>,
+	pageIndexes: ReadonlyArray<number> | undefined,
+	options: EditOptions,
 ): Promise<Buffer> {
 	return edit("ROTATE_FAILED", (loaded) =>
-		loaded.rotate(pdf, degrees, pageIndexes ? [...pageIndexes] : undefined),
+		loaded.rotate(
+			pdf,
+			degrees,
+			pageIndexes ? [...pageIndexes] : undefined,
+			options,
+		),
 	);
 }
 
@@ -265,12 +284,16 @@ export function formFieldsNative(pdf: Buffer): Promise<FormField[]> {
 export function fillFormNative(
 	pdf: Buffer,
 	values: Record<string, string>,
+	options: EditOptions,
 ): Promise<Buffer> {
-	return edit("FILL_FAILED", (loaded) => loaded.fillForm(pdf, values));
+	return edit("FILL_FAILED", (loaded) => loaded.fillForm(pdf, values, options));
 }
 
-export function flattenFormNative(pdf: Buffer): Promise<Buffer> {
-	return edit("FLATTEN_FAILED", (loaded) => loaded.flattenForm(pdf));
+export function flattenFormNative(
+	pdf: Buffer,
+	options: EditOptions,
+): Promise<Buffer> {
+	return edit("FLATTEN_FAILED", (loaded) => loaded.flattenForm(pdf, options));
 }
 
 export function prepareSignatureNative(

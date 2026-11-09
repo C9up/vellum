@@ -353,6 +353,38 @@ pub fn form_fields(bytes: &[u8]) -> Result<Vec<FormField>, String> {
         .collect())
 }
 
+/// Whether the document carries a signature: a signature field holding a
+/// value.
+///
+/// A signature's value sits as raw bytes between the two ranges it signs, so
+/// its dictionary cannot be inside a compressed object stream: a file with no
+/// `/ByteRange` anywhere in its bytes carries none, without being parsed.
+pub fn is_signed(bytes: &[u8]) -> Result<bool, String> {
+    if !bytes.windows(10).any(|window| window == b"/ByteRange") {
+        return Ok(false);
+    }
+    let document =
+        Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
+    Ok(fields_of(&document)?.iter().any(|(id, field)| {
+        field.kind == FieldKind::Signature
+            && document
+                .get_dictionary(*id)
+                .is_ok_and(|dictionary| dictionary.get(b"V").is_ok())
+    }))
+}
+
+/// Refuse to rewrite a signed document unless told the signatures may go.
+///
+/// Every edit here writes the whole file anew, and a signature covers bytes:
+/// rewritten, it no longer verifies, and flattening even removes the field
+/// that held it. Nothing about the result says so, so the caller is asked.
+pub fn refuse_if_signed(bytes: &[u8], discard_signatures: bool) -> Result<(), String> {
+    if !discard_signatures && is_signed(bytes)? {
+        return Err("SIGNED_DOCUMENT: the document is signed, and rewriting it would invalidate the signature — pass discardSignatures: true to do it anyway".to_string());
+    }
+    Ok(())
+}
+
 /// The same walk, keeping each field's object id.
 ///
 /// Filling needs the id to write back to; resolving names a second time would
@@ -413,6 +445,66 @@ pub(crate) fn fields_of(document: &Document) -> Result<Vec<(ObjectId, FormField)
 mod tests {
     use super::*;
     use lopdf::dictionary;
+
+    /// A one-page document whose form holds one signature field, filled with
+    /// a value or left empty.
+    fn signature_field(filled: bool) -> Vec<u8> {
+        let mut document = Document::with_version("1.7");
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+            }),
+        );
+        let mut field = dictionary! {
+            "FT" => "Sig",
+            "T" => lopdf::text_string("signature"),
+        };
+        if filled {
+            let value = document.add_object(dictionary! {
+                "Type" => "Sig",
+                "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()],
+                "Contents" => Object::String(vec![0], lopdf::StringFormat::Hexadecimal),
+            });
+            field.set("V", value);
+        } else {
+            // The key alone, so the fast path does not decide.
+            field.set("Note", Object::Name(b"ByteRange".to_vec()));
+        }
+        let field_id = document.add_object(field);
+        let catalog = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+            "AcroForm" => dictionary! { "Fields" => vec![Object::Reference(field_id)] },
+        });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("saves");
+        bytes
+    }
+
+    #[test]
+    fn a_signature_field_with_a_value_is_a_signed_document() {
+        assert_eq!(is_signed(&signature_field(true)), Ok(true));
+        let refused = refuse_if_signed(&signature_field(true), false).expect_err("refused");
+        assert!(refused.starts_with("SIGNED_DOCUMENT: "), "{refused}");
+        assert_eq!(refuse_if_signed(&signature_field(true), true), Ok(()));
+    }
+
+    #[test]
+    fn an_empty_signature_field_is_a_place_for_one_not_a_signature() {
+        let bytes = signature_field(false);
+        assert!(bytes.windows(10).any(|window| window == b"/ByteRange"));
+        assert_eq!(is_signed(&bytes), Ok(false));
+    }
 
     /// Build a document carrying an interactive form.
     ///

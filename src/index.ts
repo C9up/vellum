@@ -86,6 +86,7 @@ export { pkcs8Signer, timestamped } from "./signers.js";
 export type {
 	Band,
 	CheckedSignature,
+	EditOptions,
 	ImageFormat,
 	PageOptions,
 	RenderOptions,

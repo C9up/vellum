@@ -466,8 +466,25 @@ pub fn extract_text_all(
 
 /// Rewriting a document parses and re-serialises the whole object tree, so it
 /// belongs on the thread pool alongside rendering.
+/// How an edit treats a document that is already signed.
+#[napi(object)]
+pub struct EditOptions {
+    /// Rewrite a signed document anyway. Every edit writes the file anew,
+    /// which invalidates its signatures; without this, a signed document is
+    /// refused with `SIGNED_DOCUMENT`.
+    pub discard_signatures: Option<bool>,
+}
+
+fn discards(options: &Option<EditOptions>) -> bool {
+    options
+        .as_ref()
+        .and_then(|options| options.discard_signatures)
+        .unwrap_or(false)
+}
+
 pub struct MergeTask {
     documents: Vec<Vec<u8>>,
+    discard_signatures: bool,
 }
 
 impl Task for MergeTask {
@@ -476,6 +493,9 @@ impl Task for MergeTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("merging documents", || {
+            for document in &self.documents {
+                vellum_engine::refuse_if_signed(document, self.discard_signatures)?;
+            }
             vellum_engine::merge(&self.documents)
         })
     }
@@ -488,6 +508,7 @@ impl Task for MergeTask {
 pub struct SelectPagesTask {
     bytes: Vec<u8>,
     pages: Vec<u32>,
+    discard_signatures: bool,
 }
 
 impl Task for SelectPagesTask {
@@ -496,6 +517,7 @@ impl Task for SelectPagesTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("selecting pages", || {
+            vellum_engine::refuse_if_signed(&self.bytes, self.discard_signatures)?;
             vellum_engine::select_pages(&self.bytes, &self.pages)
         })
     }
@@ -507,6 +529,7 @@ impl Task for SelectPagesTask {
 
 pub struct SplitTask {
     bytes: Vec<u8>,
+    discard_signatures: bool,
 }
 
 impl Task for SplitTask {
@@ -514,7 +537,10 @@ impl Task for SplitTask {
     type JsValue = Vec<Buffer>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        guarded("splitting a document", || vellum_engine::split(&self.bytes))
+        guarded("splitting a document", || {
+            vellum_engine::refuse_if_signed(&self.bytes, self.discard_signatures)?;
+            vellum_engine::split(&self.bytes)
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -526,6 +552,7 @@ pub struct RotateTask {
     bytes: Vec<u8>,
     degrees: i64,
     pages: Option<Vec<u32>>,
+    discard_signatures: bool,
 }
 
 impl Task for RotateTask {
@@ -534,6 +561,7 @@ impl Task for RotateTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("rotating pages", || {
+            vellum_engine::refuse_if_signed(&self.bytes, self.discard_signatures)?;
             vellum_engine::rotate(&self.bytes, self.degrees, self.pages.as_deref())
         })
     }
@@ -544,33 +572,46 @@ impl Task for RotateTask {
 }
 
 #[napi(ts_return_type = "Promise<Buffer>")]
-pub fn merge(documents: Vec<Buffer>) -> AsyncTask<MergeTask> {
+pub fn merge(documents: Vec<Buffer>, options: Option<EditOptions>) -> AsyncTask<MergeTask> {
     AsyncTask::new(MergeTask {
         documents: documents.iter().map(|document| document.to_vec()).collect(),
+        discard_signatures: discards(&options),
     })
 }
 
 #[napi(ts_return_type = "Promise<Buffer>")]
-pub fn select_pages(bytes: Buffer, pages: Vec<u32>) -> AsyncTask<SelectPagesTask> {
+pub fn select_pages(
+    bytes: Buffer,
+    pages: Vec<u32>,
+    options: Option<EditOptions>,
+) -> AsyncTask<SelectPagesTask> {
     AsyncTask::new(SelectPagesTask {
         bytes: bytes.to_vec(),
         pages,
+        discard_signatures: discards(&options),
     })
 }
 
 #[napi(ts_return_type = "Promise<Buffer[]>")]
-pub fn split(bytes: Buffer) -> AsyncTask<SplitTask> {
+pub fn split(bytes: Buffer, options: Option<EditOptions>) -> AsyncTask<SplitTask> {
     AsyncTask::new(SplitTask {
         bytes: bytes.to_vec(),
+        discard_signatures: discards(&options),
     })
 }
 
 #[napi(ts_return_type = "Promise<Buffer>")]
-pub fn rotate(bytes: Buffer, degrees: i64, pages: Option<Vec<u32>>) -> AsyncTask<RotateTask> {
+pub fn rotate(
+    bytes: Buffer,
+    degrees: i64,
+    pages: Option<Vec<u32>>,
+    options: Option<EditOptions>,
+) -> AsyncTask<RotateTask> {
     AsyncTask::new(RotateTask {
         bytes: bytes.to_vec(),
         degrees,
         pages,
+        discard_signatures: discards(&options),
     })
 }
 
@@ -589,12 +630,15 @@ pub struct StampOptions {
     pub height: Option<f64>,
     /// 0 is invisible, 1 is opaque. Default 1.
     pub opacity: Option<f64>,
+    /// Stamp a signed document anyway, invalidating its signatures.
+    pub discard_signatures: Option<bool>,
 }
 
 pub struct StampTask {
     pdf: Vec<u8>,
     image: Vec<u8>,
     options: vellum_engine::StampOptions,
+    discard_signatures: bool,
 }
 
 impl Task for StampTask {
@@ -603,6 +647,7 @@ impl Task for StampTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("stamping a document", || {
+            vellum_engine::refuse_if_signed(&self.pdf, self.discard_signatures)?;
             vellum_engine::stamp_image(&self.pdf, &self.image, &self.options)
         })
     }
@@ -614,6 +659,10 @@ impl Task for StampTask {
 
 #[napi(ts_return_type = "Promise<Buffer>")]
 pub fn stamp(pdf: Buffer, image: Buffer, options: Option<StampOptions>) -> AsyncTask<StampTask> {
+    let discard_signatures = options
+        .as_ref()
+        .and_then(|options| options.discard_signatures)
+        .unwrap_or(false);
     let defaults = vellum_engine::StampOptions::default();
     let options = options.map_or(defaults, |given| vellum_engine::StampOptions {
         page: given.page,
@@ -628,6 +677,7 @@ pub fn stamp(pdf: Buffer, image: Buffer, options: Option<StampOptions>) -> Async
         pdf: pdf.to_vec(),
         image: image.to_vec(),
         options,
+        discard_signatures,
     })
 }
 
@@ -653,12 +703,15 @@ pub struct TextStampOptions {
     pub color: Option<String>,
     /// 0 is invisible, 1 is opaque. Default 1.
     pub opacity: Option<f64>,
+    /// Write onto a signed document anyway, invalidating its signatures.
+    pub discard_signatures: Option<bool>,
 }
 
 pub struct StampTextTask {
     pdf: Vec<u8>,
     text: String,
     options: vellum_engine::TextStampOptions,
+    discard_signatures: bool,
 }
 
 impl Task for StampTextTask {
@@ -667,6 +720,7 @@ impl Task for StampTextTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("writing text onto a document", || {
+            vellum_engine::refuse_if_signed(&self.pdf, self.discard_signatures)?;
             vellum_engine::stamp_text(&self.pdf, &self.text, &self.options)
         })
     }
@@ -682,6 +736,10 @@ pub fn stamp_text(
     text: String,
     options: Option<TextStampOptions>,
 ) -> Result<AsyncTask<StampTextTask>> {
+    let discard_signatures = options
+        .as_ref()
+        .and_then(|options| options.discard_signatures)
+        .unwrap_or(false);
     let defaults = vellum_engine::TextStampOptions::default();
     let options = match options {
         None => defaults,
@@ -720,6 +778,7 @@ pub fn stamp_text(
         pdf: pdf.to_vec(),
         text,
         options,
+        discard_signatures,
     }))
 }
 
@@ -784,6 +843,7 @@ pub fn form_fields(bytes: Buffer) -> AsyncTask<FormFieldsTask> {
 pub struct FillFormTask {
     pdf: Vec<u8>,
     values: Vec<vellum_engine::FieldValue>,
+    discard_signatures: bool,
 }
 
 impl Task for FillFormTask {
@@ -792,6 +852,7 @@ impl Task for FillFormTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("filling a form", || {
+            vellum_engine::refuse_if_signed(&self.pdf, self.discard_signatures)?;
             vellum_engine::fill_form(&self.pdf, &self.values)
         })
     }
@@ -804,18 +865,24 @@ impl Task for FillFormTask {
 /// Fill the named fields. Keys are the fully qualified names `formFields`
 /// reports.
 #[napi(ts_return_type = "Promise<Buffer>")]
-pub fn fill_form(pdf: Buffer, values: HashMap<String, String>) -> AsyncTask<FillFormTask> {
+pub fn fill_form(
+    pdf: Buffer,
+    values: HashMap<String, String>,
+    options: Option<EditOptions>,
+) -> AsyncTask<FillFormTask> {
     AsyncTask::new(FillFormTask {
         pdf: pdf.to_vec(),
         values: values
             .into_iter()
             .map(|(name, value)| vellum_engine::FieldValue { name, value })
             .collect(),
+        discard_signatures: discards(&options),
     })
 }
 
 pub struct FlattenFormTask {
     pdf: Vec<u8>,
+    discard_signatures: bool,
 }
 
 impl Task for FlattenFormTask {
@@ -824,6 +891,9 @@ impl Task for FlattenFormTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded("flattening a form", || {
+            // Flattening drops the signature field itself, not only its
+            // validity: refused unless the caller means it.
+            vellum_engine::refuse_if_signed(&self.pdf, self.discard_signatures)?;
             vellum_engine::flatten_form(&self.pdf)
         })
     }
@@ -835,8 +905,11 @@ impl Task for FlattenFormTask {
 
 /// Paint every field into the page and drop the interactive layer.
 #[napi(ts_return_type = "Promise<Buffer>")]
-pub fn flatten_form(pdf: Buffer) -> AsyncTask<FlattenFormTask> {
-    AsyncTask::new(FlattenFormTask { pdf: pdf.to_vec() })
+pub fn flatten_form(pdf: Buffer, options: Option<EditOptions>) -> AsyncTask<FlattenFormTask> {
+    AsyncTask::new(FlattenFormTask {
+        pdf: pdf.to_vec(),
+        discard_signatures: discards(&options),
+    })
 }
 
 /// What the signature says about itself.

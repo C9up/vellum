@@ -410,6 +410,21 @@ export interface DocumentMetadata {
 	modifiedAt?: string;
 }
 
+/**
+ * Rewriting a document parses and re-serialises the whole object tree, so it
+ * belongs on the thread pool alongside rendering.
+ * How an edit treats a document that is already signed.
+ */
+
+export interface EditOptions {
+	/**
+	 * Rewrite a signed document anyway. Every edit writes the file anew,
+	 * which invalidates its signatures; without this, a signed document is
+	 * refused with `SIGNED_DOCUMENT`.
+	 */
+	discardSignatures?: boolean;
+}
+
 /** Where and how an image is laid onto a page. */
 
 export interface StampOptions {
@@ -425,6 +440,8 @@ export interface StampOptions {
 	height?: number;
 	/** 0 is invisible, 1 is opaque. Default 1. */
 	opacity?: number;
+	/** Stamp a signed document anyway, invalidating its signatures. */
+	discardSignatures?: boolean;
 }
 
 /** Where and how a line of text is written onto a page. */
@@ -453,6 +470,8 @@ export interface TextStampOptions {
 	color?: string;
 	/** 0 is invisible, 1 is opaque. Default 1. */
 	opacity?: number;
+	/** Write onto a signed document anyway, invalidating its signatures. */
+	discardSignatures?: boolean;
 }
 
 /** One interactive field of a document's form. */
@@ -765,19 +784,27 @@ export declare function extractTextAll(
 	limits?: ReadLimits | undefined | null,
 ): Promise<string[]>;
 
-export declare function merge(documents: Array<Buffer>): Promise<Buffer>;
+export declare function merge(
+	documents: Array<Buffer>,
+	options?: EditOptions | undefined | null,
+): Promise<Buffer>;
 
 export declare function selectPages(
 	bytes: Buffer,
 	pages: Array<number>,
+	options?: EditOptions | undefined | null,
 ): Promise<Buffer>;
 
-export declare function split(bytes: Buffer): Promise<Buffer[]>;
+export declare function split(
+	bytes: Buffer,
+	options?: EditOptions | undefined | null,
+): Promise<Buffer[]>;
 
 export declare function rotate(
 	bytes: Buffer,
 	degrees: number,
 	pages?: Array<number> | undefined | null,
+	options?: EditOptions | undefined | null,
 ): Promise<Buffer>;
 
 export declare function stamp(
@@ -802,11 +829,15 @@ export declare function formFields(bytes: Buffer): Promise<FormField[]>;
 export declare function fillForm(
 	pdf: Buffer,
 	values: Record<string, string>,
+	options?: EditOptions | undefined | null,
 ): Promise<Buffer>;
 
 /** Paint every field into the page and drop the interactive layer. */
 
-export declare function flattenForm(pdf: Buffer): Promise<Buffer>;
+export declare function flattenForm(
+	pdf: Buffer,
+	options?: EditOptions | undefined | null,
+): Promise<Buffer>;
 
 /** Write a document with room for a signature, and say what has to be signed. */
 

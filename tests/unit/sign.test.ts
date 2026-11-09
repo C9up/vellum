@@ -12,6 +12,7 @@ import {
 	Vellum,
 	VellumError,
 } from "../../src/index.js";
+import { encodePng } from "./png.js";
 
 /**
  * A signer that records what it was asked to sign. It is not a real one — the
@@ -446,5 +447,52 @@ describe("asking the issuer named by the certificate", () => {
 
 		expect(report?.revocation?.status).toBe("unknown");
 		expect(report?.revocation?.detail).toMatch(/more than 64 KiB/);
+	});
+});
+
+describe("editing a document that is already signed", () => {
+	const vellum = new Vellum({ signers: { internal: stubCmsSigner() } });
+	const signedDocument = () =>
+		vellum.sign(createBlank([A4, A4]), { signer: "internal" });
+	const PNG = encodePng(2, 2, () => [200, 0, 0]);
+
+	/** Every operation that rewrites the file, given the options to pass. */
+	function edits(
+		pdf: Buffer,
+		options: { discardSignatures?: boolean },
+	): Array<[string, () => Promise<unknown>]> {
+		return [
+			["stamp", () => vellum.stamp(pdf, PNG, options)],
+			["stampText", () => vellum.stampText(pdf, "REÇU", options)],
+			["rotate", () => vellum.rotate(pdf, 90, options)],
+			["selectPages", () => vellum.selectPages(pdf, [1], options)],
+			["split", () => vellum.split(pdf, options)],
+			["merge", () => vellum.merge([createBlank([A4]), pdf], options)],
+			["fillForm", () => vellum.fillForm(pdf, {}, options)],
+			["flattenForm", () => vellum.flattenForm(pdf, options)],
+		];
+	}
+
+	it("refuses to rewrite it, which would invalidate the signature without a word", async () => {
+		const signed = await signedDocument();
+		for (const [name, edit] of edits(signed, {})) {
+			await expect(edit(), name).rejects.toMatchObject({
+				code: "E_VELLUM_SIGNED_DOCUMENT",
+			});
+		}
+	});
+
+	it("rewrites it when the caller says the signatures may go", async () => {
+		const signed = await signedDocument();
+		for (const [name, edit] of edits(signed, { discardSignatures: true })) {
+			await expect(edit(), name).resolves.toBeDefined();
+		}
+	});
+
+	it("edits an unsigned document as before", async () => {
+		const pdf = createBlank([A4, A4]);
+		for (const [name, edit] of edits(pdf, {})) {
+			await expect(edit(), name).resolves.toBeDefined();
+		}
 	});
 });

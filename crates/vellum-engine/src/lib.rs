@@ -36,7 +36,7 @@ pub use cms::sign_cms;
 pub use edit::{merge, rotate, select_pages, split};
 pub use fill::{fill_form, FieldValue};
 pub use flatten::flatten_form;
-pub use form::{form_fields, FieldKind, FormField};
+pub use form::{form_fields, is_signed, refuse_if_signed, FieldKind, FormField};
 pub use metadata::{metadata, DocumentMetadata};
 pub use reader::{ReadLimits, DEFAULT_MAX_DECODED_BYTES, DEFAULT_MAX_OPERATIONS};
 pub use revocation::{read_revocation, responder_url, revocation_query, Revocation};

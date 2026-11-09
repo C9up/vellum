@@ -244,7 +244,7 @@ export type StandardFont =
 	| "Courier-Bold";
 
 /** Where and how a line of text is written onto a page. */
-export interface TextStampOptions extends PageOptions {
+export interface TextStampOptions extends PageOptions, EditOptions {
 	/** Points from the left edge. Default 0. */
 	x?: number;
 	/**
@@ -267,8 +267,22 @@ export interface TextStampOptions extends PageOptions {
 	opacity?: number;
 }
 
+/**
+ * How an edit treats a document that is already signed.
+ *
+ * Every edit writes the file anew, and a signature covers bytes: rewritten,
+ * it no longer verifies, and flattening removes the field that held it.
+ * Nothing in the result would say so, so a signed document is refused with
+ * `E_VELLUM_SIGNED_DOCUMENT` unless the caller says the signatures may go.
+ * Draw on a document before signing it, not after.
+ */
+export interface EditOptions {
+	/** Edit a signed document anyway, invalidating its signatures. */
+	discardSignatures?: boolean;
+}
+
 /** Where and how an image is laid onto a page. */
-export interface StampOptions extends PageOptions {
+export interface StampOptions extends PageOptions, EditOptions {
 	/**
 	 * Points from the left edge. Default 0.
 	 *
@@ -447,14 +461,17 @@ export class Vellum {
 	 * materialised onto it first, so a page keeps its own size instead of
 	 * falling back to Letter.
 	 */
-	async merge(pdfs: ReadonlyArray<Buffer>): Promise<Buffer> {
+	async merge(
+		pdfs: ReadonlyArray<Buffer>,
+		options: EditOptions = {},
+	): Promise<Buffer> {
 		if (pdfs.length === 0) {
 			throw new VellumError(
 				"EMPTY_MERGE",
 				"Merging needs at least one document.",
 			);
 		}
-		return mergeNative(pdfs);
+		return mergeNative(pdfs, edits(options));
 	}
 
 	/**
@@ -467,6 +484,7 @@ export class Vellum {
 	async selectPages(
 		pdf: Buffer,
 		pages: ReadonlyArray<number>,
+		options: EditOptions = {},
 	): Promise<Buffer> {
 		if (pages.length === 0) {
 			throw new VellumError(
@@ -474,12 +492,12 @@ export class Vellum {
 				"Selecting needs at least one page.",
 			);
 		}
-		return selectPagesNative(pdf, this.#pageIndexes(pages));
+		return selectPagesNative(pdf, this.#pageIndexes(pages), edits(options));
 	}
 
 	/** One single-page document per page, in document order. */
-	async split(pdf: Buffer): Promise<Buffer[]> {
-		return splitNative(pdf);
+	async split(pdf: Buffer, options: EditOptions = {}): Promise<Buffer[]> {
+		return splitNative(pdf, edits(options));
 	}
 
 	/**
@@ -495,7 +513,7 @@ export class Vellum {
 	async rotate(
 		pdf: Buffer,
 		degrees: number,
-		options: { pages?: ReadonlyArray<number> } = {},
+		options: { pages?: ReadonlyArray<number> } & EditOptions = {},
 	): Promise<Buffer> {
 		if (!Number.isInteger(degrees) || degrees % 90 !== 0) {
 			throw new VellumError(
@@ -507,6 +525,7 @@ export class Vellum {
 			pdf,
 			degrees,
 			options.pages ? this.#pageIndexes(options.pages) : undefined,
+			edits(options),
 		);
 	}
 
@@ -536,6 +555,7 @@ export class Vellum {
 			width: options.width,
 			height: options.height,
 			opacity: options.opacity,
+			discardSignatures: options.discardSignatures,
 		});
 	}
 
@@ -581,6 +601,7 @@ export class Vellum {
 			fontData,
 			color: options.color,
 			opacity: options.opacity,
+			discardSignatures: options.discardSignatures,
 		});
 	}
 
@@ -627,8 +648,12 @@ export class Vellum {
 	 * failure. The same goes for a read-only field, a value over the field's
 	 * maximum length, and a checkbox state the document does not accept.
 	 */
-	async fillForm(pdf: Buffer, values: Record<string, string>): Promise<Buffer> {
-		return fillFormNative(pdf, values);
+	async fillForm(
+		pdf: Buffer,
+		values: Record<string, string>,
+		options: EditOptions = {},
+	): Promise<Buffer> {
+		return fillFormNative(pdf, values, edits(options));
 	}
 
 	/**
@@ -650,8 +675,8 @@ export class Vellum {
 	 * an error: the answer would vanish from a document that still looks
 	 * complete.
 	 */
-	async flattenForm(pdf: Buffer): Promise<Buffer> {
-		return flattenFormNative(pdf);
+	async flattenForm(pdf: Buffer, options: EditOptions = {}): Promise<Buffer> {
+		return flattenFormNative(pdf, edits(options));
 	}
 
 	/**
@@ -889,4 +914,9 @@ export class Vellum {
 			maxOperations: this.#config.maxOperations,
 		};
 	}
+}
+
+/** The engine's form of {@link EditOptions}. */
+function edits(options: EditOptions): { discardSignatures?: boolean } {
+	return { discardSignatures: options.discardSignatures };
 }
