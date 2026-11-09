@@ -39,7 +39,8 @@ pub struct SignatureReport {
     /// The field the signature sits in.
     pub field: String,
     /// The signed byte range runs from the first byte to the last, so nothing
-    /// was appended after the signature was made.
+    /// was appended after the signature was made, and the one region it
+    /// leaves out is this signature's own value.
     pub covers_whole_document: bool,
     /// The document's bytes hash to what the signature committed to.
     pub digest_matches: bool,
@@ -103,6 +104,40 @@ fn byte_range(signature: &lopdf::Dictionary) -> Option<[usize; 4]> {
         *slot = usize::try_from(value.as_i64().ok()?).ok()?;
     }
     Some(range)
+}
+
+/// Whether the region a byte range leaves out is exactly the `/Contents`
+/// value of the signature, as ISO 32000-2 §12.8.1 requires.
+///
+/// The value is reserved larger than it needs and padded, and the padding is
+/// unsigned. Without this check it could be rewritten — closing the
+/// signature dictionary early, with a /Reason and /Name of anyone's choosing
+/// — while every signed byte stayed the same.
+fn gap_is_value(pdf: &[u8], first: usize, second: usize, value: &[u8]) -> bool {
+    let Some([b'<', inner @ .., b'>']) = pdf.get(first..second) else {
+        return false;
+    };
+    // The key it is the value of, right before it.
+    if !pdf[..first].trim_ascii_end().ends_with(b"/Contents") {
+        return false;
+    }
+    let mut digits = inner.iter().filter(|byte| !byte.is_ascii_whitespace());
+    let mut decoded = Vec::with_capacity(value.len());
+    while let Some(&high) = digits.next() {
+        // An odd digit count ends as if followed by a 0 (§7.3.4.3).
+        let low = digits.next().copied().unwrap_or(b'0');
+        let (Some(high), Some(low)) = (hex_value(high), hex_value(low)) else {
+            return false;
+        };
+        decoded.push(high << 4 | low);
+    }
+    decoded == value
+}
+
+fn hex_value(digit: u8) -> Option<u8> {
+    char::from(digit)
+        .to_digit(16)
+        .and_then(|value| u8::try_from(value).ok())
 }
 
 /// Take the first DER object out of a buffer, ignoring the padding after it.
@@ -175,6 +210,13 @@ fn verify_one(
             "{} bytes were added after this signature and are not covered by it",
             pdf.len() - end
         ));
+    }
+    if !gap_is_value(pdf, first, second, value) {
+        report.covers_whole_document = false;
+        report.problems.push(
+            "the unsigned region is not this signature's value, so bytes outside it are not covered"
+                .to_string(),
+        );
     }
 
     // Signatures sharing a byte range share its digest: hashing it once per
@@ -548,6 +590,49 @@ mod tests {
         );
         assert!(report.signed_at.is_some());
         assert!(!report.timestamped, "nothing timestamped this one");
+    }
+
+    /// The signed byte range of a document's only signature.
+    fn gap_of(pdf: &[u8]) -> (usize, usize) {
+        let document = Document::load_mem(pdf).expect("it reads");
+        let signature = document
+            .objects
+            .values()
+            .filter_map(|object| object.as_dict().ok())
+            .find(|dictionary| dictionary.get(b"ByteRange").is_ok())
+            .expect("a signature dictionary");
+        let [_, first, second, _] = byte_range(signature).expect("a byte range");
+        (first, second)
+    }
+
+    /// The reservation for the value is mostly padding, outside the signed
+    /// bytes. Rewritten to close the dictionary early, it hands the signer's
+    /// /Reason and /Name to whoever edits it, without touching a signed byte.
+    #[test]
+    fn rewriting_the_unsigned_gap_is_caught() {
+        let mut forged = signed_document();
+        let (first, second) = gap_of(&forged);
+        // The value's own digits, without the zero padding after them.
+        let hex_digits = forged[first + 1..second - 1]
+            .iter()
+            .rposition(|byte| *byte != b'0')
+            .map_or(0, |at| at + 1);
+        let mut gap = forged[first..first + 1 + hex_digits].to_vec();
+        gap.extend_from_slice(b"> /Reason (FORGED: amount changed) /Name (Mallory) >>\nendobj\n%");
+        gap.resize(second - first, b' ');
+        forged[first..second].copy_from_slice(&gap);
+
+        let reports = verify_signatures(&forged, &TrustOptions::default()).expect("it reads");
+        let report = &reports[0];
+        assert!(!report.covers_whole_document, "{:?}", report.problems);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("not this signature's value")),
+            "{:?}",
+            report.problems
+        );
     }
 
     /// The trap everyone meets first. Content appended after a signature is
