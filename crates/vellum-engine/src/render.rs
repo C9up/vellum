@@ -7,9 +7,11 @@
 use hayro::hayro_interpret::hayro_syntax::Pdf;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::vello_cpu::color::{AlphaColor, PremulRgba8, Srgb};
-use hayro::{render, RenderCache, RenderSettings};
+use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
 use image::codecs::jpeg::JpegEncoder;
 use image::{ExtendedColorType, ImageEncoder};
+
+use crate::reader::on_reader_thread;
 
 /// How the rasterised page should be encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +161,10 @@ fn load(bytes: &[u8]) -> Result<Pdf, String> {
 
 /// The natural size of every page, in points.
 pub fn page_dimensions(bytes: &[u8]) -> Result<Vec<PageDimensions>, String> {
+    on_reader_thread(|| read_dimensions(bytes))
+}
+
+fn read_dimensions(bytes: &[u8]) -> Result<Vec<PageDimensions>, String> {
     let pdf = load(bytes)?;
     Ok(pdf
         .pages()
@@ -176,6 +182,10 @@ pub fn render_page(
     page_index: u32,
     options: &RenderOptions,
 ) -> Result<Vec<u8>, String> {
+    on_reader_thread(|| read_page(bytes, page_index, options))
+}
+
+fn read_page(bytes: &[u8], page_index: u32, options: &RenderOptions) -> Result<Vec<u8>, String> {
     let pdf = load(bytes)?;
     let pages = pdf.pages();
     let index = usize::try_from(page_index).map_err(|_| "page index out of range".to_string())?;
@@ -194,6 +204,10 @@ pub fn render_page(
 
 /// Rasterise every page, in document order.
 pub fn render_all(bytes: &[u8], options: &RenderOptions) -> Result<Vec<Vec<u8>>, String> {
+    on_reader_thread(|| read_all(bytes, options))
+}
+
+fn read_all(bytes: &[u8], options: &RenderOptions) -> Result<Vec<Vec<u8>>, String> {
     let pdf = load(bytes)?;
     pdf.pages()
         .iter()
@@ -256,16 +270,27 @@ fn rasterise(
     }
 
     let [red, green, blue, alpha] = background_for(options);
-    let settings = RenderSettings {
+    let pixmap_settings = PixmapSettings {
         x_scale: scale,
         y_scale: scale,
-        width: None,
-        height: None,
         bg_color: AlphaColor::<Srgb>::from_rgba8(red, green, blue, alpha),
     };
 
     let cache = RenderCache::new();
-    let pixmap = render(page, &cache, &InterpreterSettings::default(), &settings);
+    let pixmap = render(
+        page,
+        &cache,
+        &InterpreterSettings::default(),
+        // Unhinted, as hayro drew before 0.9: hinting snaps an embedded
+        // TrueType font to the pixel grid and leaves a standard font as it
+        // is, so the same text would look different depending on which of
+        // the two a producer used.
+        &RenderSettings {
+            hinting: false,
+            ..RenderSettings::default()
+        },
+        &pixmap_settings,
+    );
 
     let raster = Raster {
         width: pixmap.width(),

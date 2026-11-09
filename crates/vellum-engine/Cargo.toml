@@ -20,7 +20,7 @@ unicode-bidi = "0.3.18"
 unicode-segmentation = "1.13"
 # Rasterising a page. Pure Rust, so the binary stays self-contained — the
 # reason pdfium was not used despite being more complete.
-hayro = "0.7.1"
+hayro = "0.9.0"
 # Reading a font a caller supplies: its character map, its glyph advances and
 # the metrics a PDF font descriptor has to declare.
 skrifa = "0.42"

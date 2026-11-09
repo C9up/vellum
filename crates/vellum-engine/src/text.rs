@@ -9,16 +9,18 @@
 //! A `Device` normally rasterises what the interpreter walks over. This one
 //! discards every drawing operation and keeps only the glyphs' text.
 
-use hayro::hayro_interpret::font::Glyph;
+use hayro::hayro_interpret::font::GlyphRun;
 use hayro::hayro_interpret::hayro_cmap::BfString;
 use hayro::hayro_interpret::hayro_syntax::page::Page;
 use hayro::hayro_interpret::hayro_syntax::Pdf;
 use hayro::hayro_interpret::util::TransformExt;
 use hayro::hayro_interpret::{
-    interpret_page, BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache,
-    InterpreterSettings, Paint, PathDrawMode, SoftMask,
+    interpret_page, BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image,
+    ImageDrawProps, InterpreterCache, InterpreterSettings, SoftMask,
 };
-use hayro::vello_cpu::kurbo::{Affine, BezPath, Rect};
+use hayro::vello_cpu::kurbo::{BezPath, Rect};
+
+use crate::reader::on_reader_thread;
 
 /// Vertical distance, in points, beyond which two glyphs are taken to be on
 /// different lines.
@@ -34,9 +36,10 @@ const LINE_TOLERANCE: f64 = 3.0;
 struct TextCollector {
     /// Baseline y and text, in the order the content stream emits them.
     glyphs: Vec<(f64, String)>,
-    /// The last glyph filled, with its position: text drawn filled and
-    /// stroked (render mode 2) comes through twice, a fill then a stroke.
-    last_filled: Option<(f64, f64, String)>,
+    /// The last run filled, glyph by glyph with its position: text drawn
+    /// filled and stroked (render mode 2) comes through twice, the run filled
+    /// then the same run stroked.
+    last_filled: Option<Vec<(f64, f64, String)>>,
 }
 
 impl TextCollector {
@@ -92,57 +95,50 @@ fn logical_order(line: &str) -> String {
 }
 
 impl<'a> Device<'a> for TextCollector {
-    fn draw_glyph(
+    fn draw_glyph_run(
         &mut self,
-        glyph: &Glyph<'a>,
-        transform: Affine,
-        glyph_transform: Affine,
-        _paint: &Paint<'a>,
-        draw_mode: &GlyphDrawMode,
+        glyph_run: &GlyphRun<'_, 'a>,
+        props: DrawProps<'a>,
+        draw_mode: &DrawMode,
     ) {
-        // A glyph with no unicode mapping cannot be turned into text: the font
-        // has neither a /ToUnicode map nor a recognisable encoding. Skipped
-        // rather than guessed at.
-        let Some(text) = glyph.as_unicode() else {
-            return;
-        };
+        let mut run = Vec::new();
+        for glyph in glyph_run.glyphs() {
+            // A glyph with no unicode mapping cannot be turned into text: the
+            // font has neither a /ToUnicode map nor a recognisable encoding.
+            // Skipped rather than guessed at.
+            let Some(text) = glyph.as_unicode() else {
+                continue;
+            };
 
-        // The position is the COMPOSITION of the two transforms — hayro's own
-        // renderer fills a glyph at `transform * glyph_transform`. Reading
-        // `transform` alone gives the text-object origin, identical for every
-        // line, so every baseline change went undetected.
-        let position = (transform * glyph_transform).translation();
-        let text = match text {
-            BfString::Char(character) => character.to_string(),
-            BfString::String(string) => string,
-        };
+            // The position is the COMPOSITION of the two transforms — hayro's
+            // own renderer fills a glyph at `transform * glyph_transform`.
+            // Reading `transform` alone gives the text-object origin,
+            // identical for every line, so every baseline change went
+            // undetected.
+            let position = (props.transform * glyph.transform()).translation();
+            let text = match text {
+                BfString::Char(character) => character.to_string(),
+                BfString::String(string) => string,
+            };
+            run.push((position.x, position.y, text));
+        }
+
         match draw_mode {
-            GlyphDrawMode::Fill => {
-                self.last_filled = Some((position.x, position.y, text.clone()));
+            DrawMode::Fill(_) | DrawMode::FillAndStroke(..) => {
+                self.last_filled = Some(run.clone());
             }
-            GlyphDrawMode::Stroke(_) => {
-                let repeat = self.last_filled.take().is_some_and(|(x, y, filled)| {
-                    x == position.x && y == position.y && filled == text
-                });
-                if repeat {
+            DrawMode::Stroke(_) => {
+                if self.last_filled.take().is_some_and(|filled| filled == run) {
                     return;
                 }
             }
-            GlyphDrawMode::Invisible => self.last_filled = None,
+            DrawMode::Invisible => self.last_filled = None,
         }
-        self.glyphs.push((position.y, text));
+        self.glyphs
+            .extend(run.into_iter().map(|(_, y, text)| (y, text)));
     }
 
-    fn set_soft_mask(&mut self, _mask: Option<SoftMask<'a>>) {}
-    fn set_blend_mode(&mut self, _blend_mode: BlendMode) {}
-    fn draw_path(
-        &mut self,
-        _path: &BezPath,
-        _transform: Affine,
-        _paint: &Paint<'a>,
-        _draw_mode: &PathDrawMode,
-    ) {
-    }
+    fn draw_path(&mut self, _path: &BezPath, _props: DrawProps<'a>, _draw_mode: &DrawMode) {}
     fn push_clip_path(&mut self, _clip_path: &ClipPath) {}
     fn push_transparency_group(
         &mut self,
@@ -151,8 +147,8 @@ impl<'a> Device<'a> for TextCollector {
         _blend_mode: BlendMode,
     ) {
     }
-    fn draw_image(&mut self, _image: Image<'a, '_>, _transform: Affine) {}
-    fn pop_clip_path(&mut self) {}
+    fn draw_image(&mut self, _image: Image<'a, '_>, _props: ImageDrawProps<'a>) {}
+    fn pop_clip(&mut self) {}
     fn pop_transparency_group(&mut self) {}
 }
 
@@ -181,6 +177,10 @@ fn load(bytes: &[u8]) -> Result<Pdf, String> {
 
 /// The text of one page, addressed from zero.
 pub fn extract_text(bytes: &[u8], page_index: u32) -> Result<String, String> {
+    on_reader_thread(|| read_text(bytes, page_index))
+}
+
+fn read_text(bytes: &[u8], page_index: u32) -> Result<String, String> {
     let pdf = load(bytes)?;
     let pages = pdf.pages();
     let index = usize::try_from(page_index).map_err(|_| "page index out of range".to_string())?;
@@ -197,6 +197,10 @@ pub fn extract_text(bytes: &[u8], page_index: u32) -> Result<String, String> {
 
 /// The text of every page, in document order.
 pub fn extract_text_all(bytes: &[u8]) -> Result<Vec<String>, String> {
+    on_reader_thread(|| read_all_text(bytes))
+}
+
+fn read_all_text(bytes: &[u8]) -> Result<Vec<String>, String> {
     let pdf = load(bytes)?;
     Ok(pdf.pages().iter().map(page_text).collect())
 }

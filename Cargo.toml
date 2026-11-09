@@ -1,6 +1,23 @@
 [workspace]
 resolver = "2"
 members = ["crates/vellum-engine", "crates/vellum-engine-napi"]
+# Upstream crates carried with a patch, not ours to format or lint.
+exclude = ["vendor"]
+
+# hayro reads every document an upload hands us, and a stack overflow ends
+# the process rather than return an error: it is not a panic, so no
+# `catch_unwind` nets it. Each crate below is the published 0.9.0 source,
+# unchanged except where a comment marked `vellum:` says why:
+#
+# - hayro-syntax: unchanged; carried so its patches land beside the others.
+# - hayro-interpret: a PostScript calculator function is refused past a
+#   nesting depth, and so is a chain of colour spaces or functions naming one
+#   another, instead of recursing once per level.
+#
+# Drop a patch once upstream carries the same bound.
+[patch.crates-io]
+hayro-syntax = { path = "vendor/hayro-syntax" }
+hayro-interpret = { path = "vendor/hayro-interpret" }
 
 # Production build.
 #
@@ -20,3 +37,11 @@ members = ["crates/vellum-engine", "crates/vellum-engine-napi"]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+# The hostile-input tests feed hayro megabytes of nesting it has to refuse;
+# unoptimised, refusing them takes minutes instead of a second.
+[profile.dev.package.hayro-syntax]
+opt-level = 3
+
+[profile.dev.package.hayro-interpret]
+opt-level = 3

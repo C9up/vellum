@@ -21,6 +21,7 @@ mod kerning;
 mod metadata;
 mod metrics;
 mod page;
+mod reader;
 mod render;
 mod revocation;
 mod sign;
