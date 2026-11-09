@@ -13,8 +13,23 @@
 //!   the name a caller uses to fill it in.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
+
+/// How deep the field tree may go. Fully qualified names this deep do not
+/// occur in real forms, and the bound is what keeps a crafted /Kids or
+/// /Parent chain from costing work quadratic in its length.
+pub(crate) const MAX_FIELD_DEPTH: usize = 64;
+
+/// How many field nodes, groups included, one walk may visit: ten times the
+/// fields this package writes into a document of its own.
+const MAX_FIELD_NODES: usize = 100_000;
+
+/// How much text — names, values, options — one walk may produce. Every
+/// field repeats its ancestors' names and may inherit a shared /Opt array,
+/// so without a budget a small document could expand into gigabytes.
+const MAX_FORM_TEXT: usize = 32 * 1024 * 1024;
 
 /// Field flags, as PDF 32000-1 Table 227 numbers them. Adobe counts bits from
 /// 1, so bit 1 is the least significant.
@@ -89,19 +104,15 @@ pub(crate) fn inherited<'a>(
     key: &[u8],
 ) -> Option<&'a Object> {
     let mut current = field;
-    let mut seen: HashSet<ObjectId> = HashSet::new();
-
-    loop {
+    // No deeper than the tree itself may go, which also ends a /Parent cycle.
+    for _ in 0..=MAX_FIELD_DEPTH {
         if let Ok(value) = current.get(key) {
             return resolve(document, value);
         }
         let parent_id = current.get(b"Parent").and_then(Object::as_reference).ok()?;
-        // A crafted document can point a parent back at its own child.
-        if !seen.insert(parent_id) {
-            return None;
-        }
         current = document.get_dictionary(parent_id).ok()?;
     }
+    None
 }
 
 /// Decode a PDF text string, whatever encoding it was written in.
@@ -149,6 +160,7 @@ fn choice_options(document: &Document, field: &Dictionary) -> Vec<String> {
 /// names live in the widget's `/AP /N` dictionary, alongside `/Off`.
 fn button_states(document: &Document, field_id: ObjectId, field: &Dictionary) -> Vec<String> {
     let mut states = Vec::new();
+    let mut known = HashSet::new();
 
     let mut collect = |widget: &Dictionary| {
         let Some(Object::Dictionary(appearances)) =
@@ -165,7 +177,7 @@ fn button_states(document: &Document, field_id: ObjectId, field: &Dictionary) ->
         };
         for (name, _) in normal.iter() {
             let name = String::from_utf8_lossy(name).to_string();
-            if name != "Off" && !states.contains(&name) {
+            if name != "Off" && known.insert(name.clone()) {
                 states.push(name);
             }
         }
@@ -214,20 +226,43 @@ fn kind_of(document: &Document, field: &Dictionary, flags: i64) -> Option<FieldK
     })
 }
 
-/// Walk a field and its children, collecting the terminal ones.
-fn collect_fields(
-    document: &Document,
-    field_id: ObjectId,
-    prefix: &str,
-    seen: &mut HashSet<ObjectId>,
-    out: &mut Vec<(ObjectId, FormField)>,
-) {
-    // Guards a /Kids cycle, which a crafted document can carry.
-    if !seen.insert(field_id) {
-        return;
+/// What one walk has spent so far.
+struct Walk {
+    nodes: usize,
+    text: usize,
+}
+
+impl Walk {
+    fn charge(&mut self, bytes: usize) -> Result<(), String> {
+        self.text = self.text.saturating_add(bytes);
+        if self.text > MAX_FORM_TEXT {
+            return Err(format!(
+                "the form's fields describe more than {} MiB of text",
+                MAX_FORM_TEXT / (1024 * 1024)
+            ));
+        }
+        Ok(())
     }
-    let Ok(field) = document.get_dictionary(field_id) else {
-        return;
+}
+
+/// A field still to visit, with the qualified name of its parent.
+struct Pending {
+    id: ObjectId,
+    prefix: Rc<str>,
+    depth: usize,
+}
+
+/// Visit one field: either queue its child fields, or describe it.
+fn visit(
+    document: &Document,
+    pending: Pending,
+    walk: &mut Walk,
+    stack: &mut Vec<Pending>,
+    out: &mut Vec<(ObjectId, FormField)>,
+) -> Result<(), String> {
+    let Pending { id, prefix, depth } = pending;
+    let Ok(field) = document.get_dictionary(id) else {
+        return Ok(());
     };
 
     let partial = field.get(b"T").ok().and_then(text_of).unwrap_or_default();
@@ -236,6 +271,7 @@ fn collect_fields(
         (true, false) => partial,
         (false, false) => format!("{prefix}.{partial}"),
     };
+    walk.charge(name.len())?;
 
     // A kid carrying /T is another field; one without is a widget — the
     // annotation that draws this field on a page.
@@ -252,10 +288,21 @@ fn collect_fields(
     };
 
     if !child_fields.is_empty() {
-        for child in child_fields {
-            collect_fields(document, child, &name, seen, out);
+        if depth + 1 >= MAX_FIELD_DEPTH {
+            return Err(format!(
+                "the form's field tree is deeper than {MAX_FIELD_DEPTH} levels"
+            ));
         }
-        return;
+        let name: Rc<str> = Rc::from(name);
+        // Reversed, so that the stack pops them in declaration order.
+        for child in child_fields.into_iter().rev() {
+            stack.push(Pending {
+                id: child,
+                prefix: Rc::clone(&name),
+                depth: depth + 1,
+            });
+        }
+        return Ok(());
     }
 
     let flags = inherited(document, field, b"Ff")
@@ -264,21 +311,24 @@ fn collect_fields(
     let Some(kind) = kind_of(document, field, flags) else {
         // A node with no /FT anywhere up the chain is a grouping node, not a
         // control. Skipped rather than reported as an unknown field.
-        return;
+        return Ok(());
     };
 
     let options = match kind {
         FieldKind::Dropdown | FieldKind::ListBox => choice_options(document, field),
-        FieldKind::Checkbox | FieldKind::Radio => button_states(document, field_id, field),
+        FieldKind::Checkbox | FieldKind::Radio => button_states(document, id, field),
         _ => Vec::new(),
     };
+    let value = value_of(document, field);
+    walk.charge(options.iter().map(String::len).sum::<usize>())?;
+    walk.charge(value.as_ref().map_or(0, String::len))?;
 
     out.push((
-        field_id,
+        id,
         FormField {
             name,
             kind,
-            value: value_of(document, field),
+            value,
             options,
             read_only: flags & READ_ONLY != 0,
             required: flags & REQUIRED != 0,
@@ -289,6 +339,7 @@ fn collect_fields(
                 .and_then(|value| u32::try_from(value).ok()),
         },
     ));
+    Ok(())
 }
 
 /// Every interactive field in the document, in the order the form declares
@@ -296,7 +347,7 @@ fn collect_fields(
 pub fn form_fields(bytes: &[u8]) -> Result<Vec<FormField>, String> {
     let document =
         Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
-    Ok(fields_of(&document)
+    Ok(fields_of(&document)?
         .into_iter()
         .map(|(_, field)| field)
         .collect())
@@ -306,34 +357,56 @@ pub fn form_fields(bytes: &[u8]) -> Result<Vec<FormField>, String> {
 ///
 /// Filling needs the id to write back to; resolving names a second time would
 /// be a second implementation of §12.7.3's hierarchy rules, free to drift.
-pub(crate) fn fields_of(document: &Document) -> Vec<(ObjectId, FormField)> {
+///
+/// Walked with a stack of our own rather than by recursion: the depth of the
+/// tree is the document's to choose, and a thread's stack is not.
+pub(crate) fn fields_of(document: &Document) -> Result<Vec<(ObjectId, FormField)>, String> {
     let Ok(catalog) = document.catalog() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(Object::Dictionary(acro_form)) = catalog
         .get(b"AcroForm")
         .ok()
         .and_then(|form| resolve(document, form))
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(Object::Array(roots)) = acro_form
         .get(b"Fields")
         .ok()
         .and_then(|fields| resolve(document, fields))
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
+    let root_prefix: Rc<str> = Rc::from("");
+    let mut stack: Vec<Pending> = roots
+        .iter()
+        .rev()
+        .filter_map(|root| root.as_reference().ok())
+        .map(|id| Pending {
+            id,
+            prefix: Rc::clone(&root_prefix),
+            depth: 0,
+        })
+        .collect();
+
     let mut fields = Vec::new();
+    // Guards a /Kids cycle, which a crafted document can carry.
     let mut seen = HashSet::new();
-    for root in roots {
-        if let Ok(id) = root.as_reference() {
-            collect_fields(document, id, "", &mut seen, &mut fields);
+    let mut walk = Walk { nodes: 0, text: 0 };
+    while let Some(pending) = stack.pop() {
+        if !seen.insert(pending.id) {
+            continue;
         }
+        walk.nodes += 1;
+        if walk.nodes > MAX_FIELD_NODES {
+            return Err(format!("the form has more than {MAX_FIELD_NODES} fields"));
+        }
+        visit(document, pending, &mut walk, &mut stack, &mut fields)?;
     }
 
-    fields
+    Ok(fields)
 }
 
 #[cfg(test)]

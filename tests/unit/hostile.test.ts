@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { Vellum } from "../../src/Vellum.js";
-import { HELVETICA, onePage, stream } from "./rawPdf.js";
+import { buildPdf, HELVETICA, onePage, stream } from "./rawPdf.js";
 
 const DEEP = 200_000;
 
@@ -66,3 +66,42 @@ describe("vellum > documents nested to overflow the stack", () => {
 	});
 });
 
+/** A form that is a chain of `depth` fields, each the only child of the last. */
+function fieldChain(depth: number): Buffer {
+	const objects: string[] = [
+		"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>",
+	];
+	for (let level = 0; level < depth; level++) {
+		objects.push(`<< /T (a) /Kids [${5 + level} 0 R] >>`);
+	}
+	objects.push("<< /T (leaf) /FT /Tx /V (x) >>");
+	return buildPdf(objects);
+}
+
+describe("vellum > a form tree deep enough to overflow the stack", () => {
+	const vellum = new Vellum();
+	const deep = fieldChain(30_000);
+
+	it("refuses to read it", async () => {
+		await expect(vellum.formFields(deep)).rejects.toThrow(
+			/deeper than 64 levels/,
+		);
+	});
+
+	it("refuses to fill, flatten or verify it", async () => {
+		await expect(vellum.fillForm(deep, { "a.leaf": "y" })).rejects.toThrow(
+			/deeper than 64/,
+		);
+		await expect(vellum.flattenForm(deep)).rejects.toThrow(/deeper than 64/);
+		await expect(vellum.verifySignatures(deep)).rejects.toThrow(
+			/deeper than 64/,
+		);
+	});
+
+	it("still reads a form of ordinary depth", async () => {
+		const fields = await vellum.formFields(fieldChain(3));
+		expect(fields.map((field) => field.name)).toEqual(["a.a.a.leaf"]);
+	});
+});

@@ -459,7 +459,7 @@ pub fn fill_form(bytes: &[u8], values: &[FieldValue]) -> Result<Vec<u8>, String>
     let mut document =
         Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
 
-    let known: BTreeMap<String, (ObjectId, crate::form::FormField)> = fields_of(&document)
+    let known: BTreeMap<String, (ObjectId, crate::form::FormField)> = fields_of(&document)?
         .into_iter()
         .map(|(id, field)| (field.name.clone(), (id, field)))
         .collect();

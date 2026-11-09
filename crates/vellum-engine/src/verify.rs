@@ -368,7 +368,7 @@ pub fn verify_signatures(
 
     let (anchors, anchor_problems) = read_anchors(&options.anchors);
     let mut reports = Vec::new();
-    for (field_id, field) in fields_of(&document) {
+    for (field_id, field) in fields_of(&document)? {
         if field.kind != crate::FieldKind::Signature {
             continue;
         }

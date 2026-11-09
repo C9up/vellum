@@ -5,7 +5,10 @@
 //! process. Each case below once did, and each must now come back as an error
 //! or as a bounded result.
 
-use vellum_engine::{extract_text, page_dimensions, render_page, RenderOptions};
+use vellum_engine::{
+    extract_text, fill_form, flatten_form, form_fields, page_dimensions, render_page,
+    verify_signatures, FieldValue, RenderOptions, TrustOptions,
+};
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
@@ -196,4 +199,91 @@ fn a_long_chain_of_references_does_not_overflow_the_stack() {
 #[test]
 fn a_colour_space_naming_itself_does_not_loop() {
     assert_renders(&page_with_colour_space(b"[/Indexed 5 0 R 0 <00>]", &[]));
+}
+
+/// A document whose form is a chain of `depth` fields, each the only child of
+/// the one before, ending in a text field. The field tree is the document's to
+/// choose; walking it by recursion made its depth the stack's problem.
+fn field_chain(depth: usize) -> Vec<u8> {
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_vec(),
+    ];
+    for level in 0..depth {
+        objects.push(format!("<< /T (a) /Kids [{} 0 R] >>", 5 + level).into_bytes());
+    }
+    objects.push(b"<< /T (leaf) /FT /Tx /V (x) >>".to_vec());
+    build_pdf(&objects)
+}
+
+fn assert_form_refused(pdf: &[u8], reason: &str) {
+    let fields = form_fields(pdf).expect_err("reading the form should be refused");
+    assert!(fields.contains(reason), "got {fields}");
+    let value = FieldValue {
+        name: "a.leaf".to_string(),
+        value: "y".to_string(),
+    };
+    let filled = fill_form(pdf, &[value]).expect_err("filling should be refused");
+    assert!(filled.contains(reason), "got {filled}");
+    let flattened = flatten_form(pdf).expect_err("flattening should be refused");
+    assert!(flattened.contains(reason), "got {flattened}");
+    let verified =
+        verify_signatures(pdf, &TrustOptions::default()).expect_err("verifying should be refused");
+    assert!(verified.contains(reason), "got {verified}");
+}
+
+#[test]
+fn a_field_chain_30_000_deep_is_refused_without_overflowing_the_stack() {
+    assert_form_refused(&field_chain(30_000), "deeper than 64 levels");
+}
+
+#[test]
+fn a_field_chain_10_000_deep_is_refused_before_its_names_grow_quadratically() {
+    assert_form_refused(&field_chain(10_000), "deeper than 64 levels");
+}
+
+#[test]
+fn a_field_tree_of_ordinary_depth_is_still_read() {
+    let fields = form_fields(&field_chain(10)).expect("a ten-level form is read");
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].name, format!("{}leaf", "a.".repeat(10)));
+    assert_eq!(fields[0].value.as_deref(), Some("x"));
+}
+
+#[test]
+fn fields_inheriting_one_huge_option_list_are_refused() {
+    // One megabyte of options, inherited by a hundred fields, would be a
+    // hundred megabytes of strings handed back for a one-megabyte file.
+    let options: Vec<String> = (0..1000).map(|i| format!("({i:0>1000})")).collect();
+    let kids: Vec<String> = (0..100).map(|i| format!("{} 0 R", 6 + i)).collect();
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_vec(),
+        format!("[{}]", options.join(" ")).into_bytes(),
+        format!(
+            "<< /T (list) /FT /Ch /Opt 4 0 R /Kids [{}] >>",
+            kids.join(" ")
+        )
+        .into_bytes(),
+    ];
+    for i in 0..100 {
+        objects.push(format!("<< /T (f{i}) /Parent 5 0 R >>").into_bytes());
+    }
+    let refused = form_fields(&build_pdf(&objects)).expect_err("the form should be refused");
+    assert!(refused.contains("MiB of text"), "got {refused}");
+}
+
+#[test]
+fn a_parent_chain_without_end_does_not_loop() {
+    // Two fields naming each other as /Parent, neither declaring a type.
+    let pdf = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_vec(),
+        b"<< /T (a) /Parent 5 0 R >>".to_vec(),
+        b"<< /T (b) /Parent 4 0 R >>".to_vec(),
+    ]);
+    assert_eq!(form_fields(&pdf), Ok(Vec::new()));
 }

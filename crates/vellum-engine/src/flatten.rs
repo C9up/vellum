@@ -293,7 +293,7 @@ pub fn flatten_form(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
     // Which widgets carry an answer, so losing one can be reported by name.
     let mut answered: HashMap<ObjectId, String> = HashMap::new();
-    for (field_id, field) in fields_of(&document) {
+    for (field_id, field) in fields_of(&document)? {
         let Some(value) = &field.value else { continue };
         if value.is_empty() || value == "Off" {
             continue;
