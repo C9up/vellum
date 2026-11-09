@@ -35,6 +35,7 @@ import {
 import {
 	describeSource,
 	type FileSource,
+	isDataUrl,
 	readSource,
 	standardFontBytes,
 } from "./files.js";
@@ -1778,9 +1779,14 @@ export class PdfDocument extends Readable {
 	}
 
 	/**
-	 * Draw an SVG as vectors — its markup, a path, a `data:` URL or its
-	 * bytes. pdfkit draws only path data (`path()`); this is in addition.
-	 * The SVG reads no file and no network, whatever it names.
+	 * Draw an SVG as vectors — its markup or a `data:` URL as a string, a
+	 * file as a `URL`, or its bytes. pdfkit draws only path data (`path()`);
+	 * this is in addition. The SVG reads no file and no network, whatever it
+	 * names.
+	 *
+	 * A string is never taken for a path: markup often comes from a user, and
+	 * reading it as a file name whenever it did not start with `<` let them
+	 * name any file on the server. A file is passed as `new URL('file:…')`.
 	 */
 	svg(
 		src: FileSource,
@@ -1796,8 +1802,7 @@ export class PdfDocument extends Readable {
 		const key = typeof src === "string" ? src : undefined;
 		let info = key === undefined ? undefined : this.#svgs.get(key);
 		if (info === undefined) {
-			const markup = typeof src === "string" && src.trimStart().startsWith("<");
-			const bytes = markup ? Buffer.from(src) : readSource(src);
+			const bytes = typeof src === "string" ? svgString(src) : readSource(src);
 			info = compose(() => this.#native.loadSvg(bytes));
 			if (key !== undefined) this.#svgs.set(key, info);
 		}
@@ -2495,4 +2500,23 @@ export function toBytes(document: PdfDocument): Promise<Uint8Array> {
 		document.on("end", onEnd);
 		document.on("error", onError);
 	});
+}
+
+/** The bytes of SVG given as a string: its markup, or a `data:` URL. */
+function svgString(src: string): Buffer {
+	// Markup may open with a byte order mark and whitespace before its first
+	// tag, which is the declaration, a comment, a doctype or <svg> itself.
+	if (
+		src
+			.replace(/^\ufeff/, "")
+			.trimStart()
+			.startsWith("<")
+	) {
+		return Buffer.from(src);
+	}
+	if (isDataUrl(src)) return readSource(src);
+	throw new VellumError(
+		"INVALID_SVG",
+		"a string given to svg() is SVG markup or a data: URL; pass a file as a URL or as its bytes",
+	);
 }

@@ -42,6 +42,11 @@ export function registerFile(
 
 const DATA_URL = /^data:[^,;]*(?:;[^,;]*)*;base64,/;
 
+/** Whether a string is a `data:` URL in base64, which is bytes, not a path. */
+export function isDataUrl(source: string): boolean {
+	return DATA_URL.test(source);
+}
+
 /** The bytes of a source: bytes, a `data:` URL in base64, or a path. */
 export function readSource(source: FileSource): Buffer {
 	if (source instanceof Uint8Array) return Buffer.from(source);

@@ -1,3 +1,7 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { PdfDocument, toBytes, Vellum, VellumError } from "../../src/index.js";
 import { decodePng, type Pixels } from "./png.js";
@@ -389,6 +393,57 @@ describe("PdfDocument — SVG and raw path content", () => {
 		expect(() => page().svg("<html></html>")).toThrow(
 			expect.objectContaining({ code: "E_VELLUM_INVALID_SVG" }),
 		);
+	});
+
+	it("never reads a string as a file, so markup from a user cannot name one", async () => {
+		// A file that is a valid SVG: read as a path, it would be drawn.
+		const directory = await mkdtemp(join(tmpdir(), "vellum-svg-"));
+		const path = join(directory, "secret.svg");
+		await writeFile(path, SQUARE);
+		for (const given of [
+			path,
+			` \n${path}`,
+			"/etc/hostname",
+			"/no/such/file.svg",
+		]) {
+			let refused: unknown;
+			try {
+				page().svg(given);
+			} catch (error) {
+				refused = error;
+			}
+			// The same refusal whether the file exists or not, naming no path.
+			expect(refused).toBeInstanceOf(VellumError);
+			if (!(refused instanceof VellumError)) continue;
+			expect(refused.code).toBe("E_VELLUM_INVALID_SVG");
+			expect(refused.message).not.toContain(given.trim());
+		}
+	});
+
+	it("reads a file given as a URL", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "vellum-svg-"));
+		const path = join(directory, "logo.svg");
+		await writeFile(path, SQUARE);
+		const doc = page();
+		doc.svg(pathToFileURL(path), 0, 0);
+		const image = await pixels(doc);
+		expect(near(image.at(5, 5), [255, 0, 0])).toBe(true);
+	});
+
+	it("reads markup after a byte order mark, an XML declaration or a comment", () => {
+		for (const prefix of [
+			"\ufeff",
+			'<?xml version="1.0"?>\n',
+			"<!-- logo -->",
+			"  \n",
+		]) {
+			expect(() => page().svg(`${prefix}${SQUARE}`)).not.toThrow();
+		}
+	});
+
+	it("reads a data: URL", () => {
+		const url = `data:image/svg+xml;base64,${Buffer.from(SQUARE).toString("base64")}`;
+		expect(() => page().svg(url)).not.toThrow();
 	});
 
 	it("takes PDF path operators through addContent, and nothing else", async () => {
