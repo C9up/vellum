@@ -732,7 +732,7 @@ export declare class NativeDocument {
 
 export declare function standardFontFile(name: string): string | null;
 
-export declare function inspect(bytes: Buffer): DocumentInfo;
+export declare function inspect(bytes: Buffer): Promise<DocumentInfo>;
 
 export declare function createBlank(pages: Array<PageSize>): Buffer;
 
@@ -750,9 +750,9 @@ export declare function renderAll(
 export declare function pageDimensions(
 	bytes: Buffer,
 	limits?: ReadLimits | undefined | null,
-): Array<PageDimensions>;
+): Promise<PageDimensions[]>;
 
-export declare function metadata(bytes: Buffer): DocumentMetadata;
+export declare function metadata(bytes: Buffer): Promise<DocumentMetadata>;
 
 export declare function extractText(
 	bytes: Buffer,
@@ -792,7 +792,7 @@ export declare function stampText(
 	options?: TextStampOptions | undefined | null,
 ): Promise<Buffer>;
 
-export declare function formFields(bytes: Buffer): Array<FormField>;
+export declare function formFields(bytes: Buffer): Promise<FormField[]>;
 
 /**
  * Fill the named fields. Keys are the fully qualified names `formFields`

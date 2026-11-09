@@ -211,3 +211,47 @@ describe("vellum > a document that asks for unbounded work", () => {
 		expect(performance.now() - started).toBeLessThan(2_000);
 	});
 });
+
+describe("vellum > reading a large document", () => {
+	const pages = 100_000;
+	const kids = Array.from(
+		{ length: pages },
+		(_, page) => `${page + 3} 0 R`,
+	).join(" ");
+	const pdf = buildPdf([
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		`<< /Type /Pages /Kids [${kids}] /Count ${pages} >>`,
+		...Array.from(
+			{ length: pages },
+			() => "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>",
+		),
+	]);
+	const vellum = new Vellum();
+
+	/** How many times a 5 ms timer fires while `work` runs. */
+	async function ticksDuring(work: () => Promise<unknown>): Promise<number> {
+		let ticks = 0;
+		const timer = setInterval(() => {
+			ticks++;
+		}, 5);
+		try {
+			await work();
+		} finally {
+			clearInterval(timer);
+		}
+		return ticks;
+	}
+
+	it("leaves the event loop free while it is parsed", async () => {
+		expect(await ticksDuring(() => vellum.inspect(pdf))).toBeGreaterThan(0);
+		expect(await ticksDuring(() => vellum.dimensions(pdf))).toBeGreaterThan(0);
+		expect(await ticksDuring(() => vellum.metadata(pdf))).toBeGreaterThan(0);
+		expect(await ticksDuring(() => vellum.formFields(pdf))).toBeGreaterThan(0);
+	});
+
+	it("still answers", async () => {
+		expect(await vellum.pageCount(pdf)).toBe(pages);
+		expect((await vellum.dimensions(pdf)).length).toBe(pages);
+		expect(await vellum.formFields(pdf)).toEqual([]);
+	});
+});

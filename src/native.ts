@@ -105,8 +105,8 @@ function run<T>(code: string, work: (engine: NativeVellum) => T): T {
 	}
 }
 
-export function inspectNative(pdf: Buffer): DocumentInfo {
-	return run("INVALID_PDF", (loaded) => loaded.inspect(pdf));
+export function inspectNative(pdf: Buffer): Promise<DocumentInfo> {
+	return edit("INVALID_PDF", (loaded) => loaded.inspect(pdf));
 }
 
 export function createBlankNative(pages: ReadonlyArray<PageSize>): Buffer {
@@ -156,12 +156,12 @@ export async function renderAllNative(
 export function pageDimensionsNative(
 	pdf: Buffer,
 	limits: ReadLimits,
-): PageDimensions[] {
-	return run("INVALID_PDF", (loaded) => loaded.pageDimensions(pdf, limits));
+): Promise<PageDimensions[]> {
+	return edit("INVALID_PDF", (loaded) => loaded.pageDimensions(pdf, limits));
 }
 
-export function metadataNative(pdf: Buffer): DocumentMetadata {
-	return run("INVALID_PDF", (loaded) => loaded.metadata(pdf));
+export function metadataNative(pdf: Buffer): Promise<DocumentMetadata> {
+	return edit("INVALID_PDF", (loaded) => loaded.metadata(pdf));
 }
 
 export async function extractTextNative(
@@ -258,8 +258,8 @@ export function stampTextNative(
 	);
 }
 
-export function formFieldsNative(pdf: Buffer): FormField[] {
-	return run("INVALID_PDF", (loaded) => loaded.formFields(pdf));
+export function formFieldsNative(pdf: Buffer): Promise<FormField[]> {
+	return edit("INVALID_PDF", (loaded) => loaded.formFields(pdf));
 }
 
 export function fillFormNative(

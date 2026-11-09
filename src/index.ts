@@ -106,11 +106,15 @@ import { createBlankNative, inspectNative } from "./native.js";
  * Report the shape of a PDF: how many pages it has, which version of the
  * format it claims, and whether it is encrypted.
  *
+ * Asynchronous because parsing costs in proportion to the document, and the
+ * document is an upload's to size: it runs on the thread pool, never on the
+ * thread serving requests.
+ *
  * The `/Info` strings are read by {@link Vellum.metadata} instead, which has
  * the decoder they need: they are stored in UTF-16BE, UTF-8 or
  * PDFDocEncoding, and guessing between them mangles every accent.
  */
-export function inspect(pdf: Buffer): DocumentInfo {
+export function inspect(pdf: Buffer): Promise<DocumentInfo> {
 	return inspectNative(pdf);
 }
 

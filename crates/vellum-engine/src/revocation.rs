@@ -300,6 +300,11 @@ fn answered_by(
     }
 }
 
+/// The largest responder answer read. An answer about one certificate,
+/// with the responder's own certificates, is a few kilobytes; the responder is
+/// named by the document, so it may be anyone's server.
+pub const MAX_REVOCATION_RESPONSE: usize = 64 * 1024;
+
 /// Read a responder's answer about one certificate.
 ///
 /// `at` is the instant the document was signed, which is what the answer has
@@ -313,6 +318,9 @@ pub fn read_revocation(
     let unknown = |reason: &str| Revocation::Unknown {
         reason: reason.to_string(),
     };
+    if response.len() > MAX_REVOCATION_RESPONSE {
+        return unknown("the responder's answer is larger than 64 KiB");
+    }
 
     let (Ok(certificate), Ok(issuer)) = (
         Certificate::from_der(certificate),
@@ -575,6 +583,15 @@ mod tests {
             Revocation::Unknown { reason } => assert!(reason.contains("TryLater")),
             other => panic!("a refusal is not an answer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_answer_too_large_to_be_one_is_not_read() {
+        let answer = read(&vec![0x30; MAX_REVOCATION_RESPONSE + 1], Some(SIGNED_AT));
+        assert!(
+            matches!(&answer, Revocation::Unknown { reason } if reason.contains("64 KiB")),
+            "{answer:?}"
+        );
     }
 
     #[test]

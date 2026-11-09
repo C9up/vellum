@@ -51,17 +51,34 @@ pub struct PageSize {
     pub height: f64,
 }
 
-#[napi]
-pub fn inspect(bytes: Buffer) -> Result<DocumentInfo> {
-    // Own the bytes before the unwind-safe closure — a napi Buffer is not
-    // UnwindSafe, and it borrows memory the JS heap still owns.
-    let owned = bytes.to_vec();
-    wrap(move || {
-        vellum_engine::inspect(&owned).map(|info| DocumentInfo {
+/// Parsing a document is work proportional to its size, which the upload
+/// chooses; it goes to the thread pool like rendering does, so a large file
+/// never stalls the requests served alongside it.
+pub struct InspectTask {
+    bytes: Vec<u8>,
+}
+
+impl Task for InspectTask {
+    type Output = vellum_engine::DocumentInfo;
+    type JsValue = DocumentInfo;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("reading a PDF", || vellum_engine::inspect(&self.bytes))
+    }
+
+    fn resolve(&mut self, _env: Env, info: Self::Output) -> Result<Self::JsValue> {
+        Ok(DocumentInfo {
             page_count: info.page_count,
             version: info.version,
             encrypted: info.encrypted,
         })
+    }
+}
+
+#[napi(ts_return_type = "Promise<DocumentInfo>")]
+pub fn inspect(bytes: Buffer) -> AsyncTask<InspectTask> {
+    AsyncTask::new(InspectTask {
+        bytes: bytes.to_vec(),
     })
 }
 
@@ -293,21 +310,41 @@ pub struct PageDimensions {
     pub height: f64,
 }
 
-#[napi]
-pub fn page_dimensions(bytes: Buffer, limits: Option<ReadLimits>) -> Result<Vec<PageDimensions>> {
-    let owned = bytes.to_vec();
-    let limits = read_limits(limits)?;
-    wrap(move || {
-        vellum_engine::page_dimensions_with(&owned, &limits).map(|pages| {
-            pages
-                .into_iter()
-                .map(|page| PageDimensions {
-                    width: f64::from(page.width),
-                    height: f64::from(page.height),
-                })
-                .collect()
+pub struct PageDimensionsTask {
+    bytes: Vec<u8>,
+    limits: vellum_engine::ReadLimits,
+}
+
+impl Task for PageDimensionsTask {
+    type Output = Vec<vellum_engine::PageDimensions>;
+    type JsValue = Vec<PageDimensions>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("reading a PDF", || {
+            vellum_engine::page_dimensions_with(&self.bytes, &self.limits)
         })
-    })
+    }
+
+    fn resolve(&mut self, _env: Env, pages: Self::Output) -> Result<Self::JsValue> {
+        Ok(pages
+            .into_iter()
+            .map(|page| PageDimensions {
+                width: f64::from(page.width),
+                height: f64::from(page.height),
+            })
+            .collect())
+    }
+}
+
+#[napi(ts_return_type = "Promise<PageDimensions[]>")]
+pub fn page_dimensions(
+    bytes: Buffer,
+    limits: Option<ReadLimits>,
+) -> Result<AsyncTask<PageDimensionsTask>> {
+    Ok(AsyncTask::new(PageDimensionsTask {
+        bytes: bytes.to_vec(),
+        limits: read_limits(limits)?,
+    }))
 }
 
 /// What the `/Info` dictionary says about a document.
@@ -327,11 +364,20 @@ pub struct DocumentMetadata {
     pub modified_at: Option<String>,
 }
 
-#[napi]
-pub fn metadata(bytes: Buffer) -> Result<DocumentMetadata> {
-    let owned = bytes.to_vec();
-    wrap(move || {
-        vellum_engine::metadata(&owned).map(|info| DocumentMetadata {
+pub struct MetadataTask {
+    bytes: Vec<u8>,
+}
+
+impl Task for MetadataTask {
+    type Output = vellum_engine::DocumentMetadata;
+    type JsValue = DocumentMetadata;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("reading a PDF", || vellum_engine::metadata(&self.bytes))
+    }
+
+    fn resolve(&mut self, _env: Env, info: Self::Output) -> Result<Self::JsValue> {
+        Ok(DocumentMetadata {
             title: info.title,
             author: info.author,
             subject: info.subject,
@@ -341,6 +387,13 @@ pub fn metadata(bytes: Buffer) -> Result<DocumentMetadata> {
             created_at: info.created_at,
             modified_at: info.modified_at,
         })
+    }
+}
+
+#[napi(ts_return_type = "Promise<DocumentMetadata>")]
+pub fn metadata(bytes: Buffer) -> AsyncTask<MetadataTask> {
+    AsyncTask::new(MetadataTask {
+        bytes: bytes.to_vec(),
     })
 }
 
@@ -691,26 +744,40 @@ pub struct FormField {
     pub max_length: Option<u32>,
 }
 
-#[napi]
-pub fn form_fields(bytes: Buffer) -> Result<Vec<FormField>> {
-    let owned = bytes.to_vec();
-    wrap(move || {
-        vellum_engine::form_fields(&owned).map(|fields| {
-            fields
-                .into_iter()
-                .map(|field| FormField {
-                    name: field.name,
-                    kind: field.kind.as_str().to_string(),
-                    value: field.value,
-                    options: field.options,
-                    read_only: field.read_only,
-                    required: field.required,
-                    multiline: field.multiline,
-                    password: field.password,
-                    max_length: field.max_length,
-                })
-                .collect()
-        })
+pub struct FormFieldsTask {
+    bytes: Vec<u8>,
+}
+
+impl Task for FormFieldsTask {
+    type Output = Vec<vellum_engine::FormField>;
+    type JsValue = Vec<FormField>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("reading a form", || vellum_engine::form_fields(&self.bytes))
+    }
+
+    fn resolve(&mut self, _env: Env, fields: Self::Output) -> Result<Self::JsValue> {
+        Ok(fields
+            .into_iter()
+            .map(|field| FormField {
+                name: field.name,
+                kind: field.kind.as_str().to_string(),
+                value: field.value,
+                options: field.options,
+                read_only: field.read_only,
+                required: field.required,
+                multiline: field.multiline,
+                password: field.password,
+                max_length: field.max_length,
+            })
+            .collect())
+    }
+}
+
+#[napi(ts_return_type = "Promise<FormField[]>")]
+pub fn form_fields(bytes: Buffer) -> AsyncTask<FormFieldsTask> {
+    AsyncTask::new(FormFieldsTask {
+        bytes: bytes.to_vec(),
     })
 }
 

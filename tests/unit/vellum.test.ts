@@ -15,10 +15,10 @@ describe("vellum", () => {
 		expect(isNativeAvailable()).toBe(true);
 	});
 
-	it("reads back a document it authored", () => {
+	it("reads back a document it authored", async () => {
 		const pdf = createBlank([A4, A4, { width: 210, height: 297 }]);
 
-		const info = inspect(pdf);
+		const info = await inspect(pdf);
 		expect(info.pageCount).toBe(3);
 		expect(info.encrypted).toBe(false);
 		expect(info.version).toMatch(/^\d+\.\d+$/);
@@ -32,13 +32,13 @@ describe("vellum", () => {
 		expect(pdf.subarray(-6).toString("latin1")).toContain("%%EOF");
 	});
 
-	it("rejects bytes that are not a PDF", () => {
-		expect(() => inspect(Buffer.from("this is not a PDF at all"))).toThrow(
-			VellumError,
-		);
+	it("rejects bytes that are not a PDF", async () => {
+		await expect(
+			inspect(Buffer.from("this is not a PDF at all")),
+		).rejects.toThrow(VellumError);
 
 		try {
-			inspect(Buffer.from("this is not a PDF at all"));
+			await inspect(Buffer.from("this is not a PDF at all"));
 			expect.unreachable("inspect should have thrown");
 		} catch (error) {
 			// `instanceof` rather than a cast: it narrows the type AND asserts it,
