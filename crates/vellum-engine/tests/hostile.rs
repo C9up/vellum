@@ -9,9 +9,9 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use vellum_engine::{
-    extract_text, extract_text_all_with, extract_text_with, fill_form, flatten_form, form_fields,
-    page_dimensions, render_all, render_page, verify_signatures, FieldValue, ReadLimits,
-    RenderOptions, TrustOptions,
+    extract_text, extract_text_all, extract_text_all_with, extract_text_with, fill_form,
+    flatten_form, form_fields, page_dimensions, render_all, render_page, verify_signatures,
+    FieldValue, ReadLimits, RenderOptions, TrustOptions,
 };
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -88,20 +88,51 @@ fn deep_array_in_content() -> Vec<u8> {
     one_page(content.as_bytes(), HELVETICA)
 }
 
-/// A page whose own dictionary is too deep to read is not a page: it is
-/// dropped from the tree, and asking for it is an error.
-fn assert_unreadable_page(pdf: &[u8]) {
-    let pages = page_dimensions(pdf).expect("the rest of the document is still read");
-    assert!(
-        pages.is_empty(),
-        "the unreadable page was reported: {pages:?}"
-    );
-    let render = render_page(pdf, 0, &RenderOptions::default());
-    assert!(render.is_err(), "rendering an unreadable page succeeded");
-    assert!(
-        extract_text(pdf, 0).is_err(),
-        "reading an unreadable page succeeded"
-    );
+const OBJECTS: &str = "arrays or dictionaries more than 512 levels deep";
+const CHAINS: &str = "colour spaces or functions more than 64 levels deep";
+const PROCEDURES: &str = "calculator procedures more than 64 levels deep";
+
+/// Where a document nests too deep.
+#[derive(Clone, Copy)]
+enum Nesting {
+    /// In the objects that make up the page tree.
+    InStructure,
+    /// In a content stream, which only drawing and reading text interpret.
+    InContent,
+}
+
+/// Nesting past the reader's bound is refused by every way of reading the
+/// part that holds it, never answered as a page that silently lacks it.
+fn assert_refused_as_too_deep(pdf: &[u8], nesting: Nesting, what: &str) {
+    let dimensions = page_dimensions(pdf);
+    match nesting {
+        Nesting::InStructure => {}
+        // Measuring a page reads no content, so it has nothing to refuse.
+        Nesting::InContent => assert_eq!(
+            dimensions.as_ref().map(Vec::len),
+            Ok(1),
+            "the page was not measured"
+        ),
+    }
+    let mut refusals = vec![
+        (
+            "render_page",
+            render_page(pdf, 0, &RenderOptions::default()).map(|_| ()),
+        ),
+        (
+            "render_all",
+            render_all(pdf, &RenderOptions::default()).map(|_| ()),
+        ),
+        ("extract_text", extract_text(pdf, 0).map(|_| ())),
+        ("extract_text_all", extract_text_all(pdf).map(|_| ())),
+    ];
+    if let Nesting::InStructure = nesting {
+        refusals.push(("page_dimensions", dimensions.map(|_| ())));
+    }
+    for (call, result) in refusals {
+        let message = result.expect_err(&format!("{call} accepted the nesting"));
+        assert_eq!(message, format!("the document nests {what}"), "{call}");
+    }
 }
 
 /// A page that is readable but carries a structure too deep for one of its
@@ -113,20 +144,40 @@ fn assert_renders(pdf: &[u8]) {
 }
 
 #[test]
-fn a_deeply_nested_array_does_not_overflow_the_stack() {
-    assert_unreadable_page(&deep_array_in_resources());
+fn a_deeply_nested_array_is_refused_without_overflowing_the_stack() {
+    assert_refused_as_too_deep(&deep_array_in_resources(), Nesting::InStructure, OBJECTS);
 }
 
 #[test]
-fn a_deeply_nested_dictionary_does_not_overflow_the_stack() {
-    assert_unreadable_page(&deep_dictionary_in_resources());
+fn a_deeply_nested_dictionary_is_refused_without_overflowing_the_stack() {
+    assert_refused_as_too_deep(
+        &deep_dictionary_in_resources(),
+        Nesting::InStructure,
+        OBJECTS,
+    );
 }
 
 #[test]
-fn deep_nesting_inside_a_content_stream_does_not_overflow_the_stack() {
-    let pdf = deep_array_in_content();
-    assert_renders(&pdf);
-    assert_eq!(extract_text(&pdf, 0).as_deref(), Ok(""));
+fn deep_nesting_inside_a_content_stream_is_refused_without_overflowing_the_stack() {
+    assert_refused_as_too_deep(&deep_array_in_content(), Nesting::InContent, OBJECTS);
+}
+
+#[test]
+fn nesting_just_past_the_bound_is_refused_and_just_under_it_is_read() {
+    let nested = |depth: usize| {
+        let content = format!("{}{} pop q Q", "[".repeat(depth), "]".repeat(depth));
+        one_page(content.as_bytes(), HELVETICA)
+    };
+    assert_refused_as_too_deep(&nested(513), Nesting::InContent, OBJECTS);
+    assert_renders(&nested(500));
+    let resources = |depth: usize| {
+        one_page(
+            b"q Q",
+            &format!("/Foo {}1{}", "<< /A ".repeat(depth), " >>".repeat(depth)),
+        )
+    };
+    assert_refused_as_too_deep(&resources(520), Nesting::InStructure, OBJECTS);
+    assert_renders(&resources(400));
 }
 
 /// A Separation colour space whose tint transform is a PostScript calculator
@@ -143,8 +194,8 @@ fn deep_postscript_function() -> Vec<u8> {
 }
 
 #[test]
-fn a_deeply_nested_postscript_function_does_not_overflow_the_stack() {
-    assert_renders(&deep_postscript_function());
+fn a_deeply_nested_postscript_function_is_refused_without_overflowing_the_stack() {
+    assert_refused_as_too_deep(&deep_postscript_function(), Nesting::InContent, PROCEDURES);
 }
 
 fn page_with_colour_space(colour_space: &[u8], extra: &[Vec<u8>]) -> Vec<u8> {
@@ -170,7 +221,7 @@ fn chain(count: usize, link: impl Fn(usize) -> String, end: &[u8]) -> Vec<Vec<u8
 const CHAIN: usize = 100_000;
 
 #[test]
-fn a_long_chain_of_stitching_functions_does_not_overflow_the_stack() {
+fn a_long_chain_of_stitching_functions_is_refused_without_overflowing_the_stack() {
     let functions = chain(
         CHAIN,
         |next| {
@@ -178,20 +229,25 @@ fn a_long_chain_of_stitching_functions_does_not_overflow_the_stack() {
         },
         b"<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>",
     );
-    assert_renders(&page_with_colour_space(
-        b"[/Separation /Ink /DeviceGray 6 0 R]",
-        &functions,
-    ));
+    assert_refused_as_too_deep(
+        &page_with_colour_space(b"[/Separation /Ink /DeviceGray 6 0 R]", &functions),
+        Nesting::InContent,
+        CHAINS,
+    );
 }
 
 #[test]
-fn a_long_chain_of_indexed_colour_spaces_does_not_overflow_the_stack() {
+fn a_long_chain_of_indexed_colour_spaces_is_refused_without_overflowing_the_stack() {
     let spaces = chain(
         CHAIN,
         |next| format!("[/Indexed {next} 0 R 0 <00>]"),
         b"/DeviceGray",
     );
-    assert_renders(&page_with_colour_space(b"[/Indexed 6 0 R 0 <00>]", &spaces));
+    assert_refused_as_too_deep(
+        &page_with_colour_space(b"[/Indexed 6 0 R 0 <00>]", &spaces),
+        Nesting::InContent,
+        CHAINS,
+    );
 }
 
 #[test]

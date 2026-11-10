@@ -19,6 +19,11 @@ impl Level {
     pub(crate) fn enter() -> Option<Self> {
         DEPTH.with(|depth| {
             if depth.get() >= MAX_DEPTH {
+                // vellum: remembered, so the document is refused rather
+                // than drawn without it.
+                hayro_syntax::budget::note_too_deep(
+                    "colour spaces or functions more than 64 levels deep",
+                );
                 return None;
             }
             depth.set(depth.get() + 1);

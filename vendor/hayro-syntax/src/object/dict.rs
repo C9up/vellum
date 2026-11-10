@@ -170,6 +170,9 @@ impl Skippable for Dict<'_> {
 
     fn skip_with_depth(r: &mut Reader<'_>, is_content_stream: bool, depth: usize) -> Option<()> {
         if depth >= super::MAX_OBJECT_NESTING_DEPTH {
+            // vellum: remembered, so the document is refused rather than
+            // read without the object.
+            crate::budget::note_too_deep(super::TOO_DEEP);
             return None;
         }
 

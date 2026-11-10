@@ -421,6 +421,11 @@ fn parse_procedure(data: &[u8]) -> Option<Vec<PostScriptOp>> {
 
 fn parse_procedure_inner(r: &mut Reader<'_>, depth: usize) -> Option<Vec<PostScriptOp>> {
     if depth >= MAX_PROCEDURE_DEPTH {
+        // vellum: remembered, so the document is refused rather than
+        // drawn without it.
+        hayro_syntax::budget::note_too_deep(
+            "calculator procedures more than 64 levels deep",
+        );
         return None;
     }
     let mut stack = ParseStack::new();

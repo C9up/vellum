@@ -7,6 +7,12 @@
 //! hours of interpretation. A caller that reads untrusted documents opens a
 //! [`Budget`] on its thread; decoding and interpreting charge it, and stop
 //! once it runs out. Without one, nothing is limited, as upstream.
+//!
+//! Nesting past a bound is answered the way garbage is: the object, colour
+//! space or function is skipped, and the page is drawn or the page tree read
+//! without it. The budget remembers what nested too deep, so a caller can
+//! refuse the document instead of handing back a page that silently lacks
+//! part of itself.
 
 /// Limits charged by the work done on this thread while the guard lives.
 pub struct Budget {
@@ -33,6 +39,12 @@ impl Budget {
     pub fn operations_exhausted(&self) -> bool {
         imp::operations_exhausted()
     }
+
+    /// What was skipped first for nesting past its bound, if anything was:
+    /// a phrase such as "arrays or dictionaries more than 512 levels deep".
+    pub fn too_deep(&self) -> Option<&'static str> {
+        imp::too_deep()
+    }
 }
 
 impl Drop for Budget {
@@ -49,6 +61,13 @@ pub(crate) fn decode_allowance() -> Option<usize> {
 /// Charge `bytes` of decoded data; `false` once the budget is exceeded.
 pub(crate) fn charge_decoded(bytes: usize) -> bool {
     imp::charge_decoded(bytes)
+}
+
+/// Record that `what` was skipped for nesting past its bound; the first
+/// record is the one reported.
+#[doc(hidden)]
+pub fn note_too_deep(what: &'static str) {
+    imp::note_too_deep(what)
 }
 
 /// Charge one operation; `false` once the budget is exceeded.
@@ -75,6 +94,7 @@ mod imp {
     thread_local! {
         static DECODED: Cell<Meter> = const { Cell::new(UNLIMITED) };
         static OPERATIONS: Cell<Meter> = const { Cell::new(UNLIMITED) };
+        static TOO_DEEP: Cell<Option<&'static str>> = const { Cell::new(None) };
     }
 
     fn charge(meter: &Cell<Meter>, amount: u64) -> bool {
@@ -106,11 +126,25 @@ mod imp {
                 exhausted: false,
             })
         });
+        TOO_DEEP.with(|first| first.set(None));
     }
 
     pub(super) fn close() {
         DECODED.with(|meter| meter.set(UNLIMITED));
         OPERATIONS.with(|meter| meter.set(UNLIMITED));
+        TOO_DEEP.with(|first| first.set(None));
+    }
+
+    pub(super) fn too_deep() -> Option<&'static str> {
+        TOO_DEEP.with(Cell::get)
+    }
+
+    pub(super) fn note_too_deep(what: &'static str) {
+        TOO_DEEP.with(|first| {
+            if first.get().is_none() {
+                first.set(Some(what));
+            }
+        });
     }
 
     pub(super) fn decoded_exhausted() -> bool {
@@ -149,6 +183,10 @@ mod imp {
     pub(super) fn operations_exhausted() -> bool {
         false
     }
+    pub(super) fn too_deep() -> Option<&'static str> {
+        None
+    }
+    pub(super) fn note_too_deep(_: &'static str) {}
     pub(super) fn decode_allowance() -> Option<usize> {
         None
     }

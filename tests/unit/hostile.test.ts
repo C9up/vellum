@@ -6,10 +6,46 @@
  * Each document below once did; it must now come back as an answer.
  */
 import { describe, expect, it } from "vitest";
+import { VellumError } from "../../src/errors.js";
 import { Vellum } from "../../src/Vellum.js";
 import { buildPdf, HELVETICA, onePage, stream } from "./rawPdf.js";
 
 const DEEP = 200_000;
+
+const OBJECTS =
+	"the document nests arrays or dictionaries more than 512 levels deep";
+
+/**
+ * Every way of reading the part that nests too deep refuses it with a
+ * VellumError, rather than answering a page that silently lacks it. Measuring
+ * a page reads no content, so it only refuses nesting in the page structure.
+ */
+async function expectRefusedAsTooDeep(
+	pdf: Buffer,
+	where: "structure" | "content",
+	reason = OBJECTS,
+): Promise<void> {
+	const vellum = new Vellum();
+	const refusals: Array<() => Promise<unknown>> = [
+		() => vellum.render(pdf),
+		() => vellum.renderAll(pdf),
+		() => vellum.extractText(pdf),
+		() => vellum.extractTextAll(pdf),
+	];
+	if (where === "structure") {
+		refusals.push(() => vellum.dimensions(pdf));
+	} else {
+		await expect(vellum.dimensions(pdf)).resolves.toHaveLength(1);
+	}
+	for (const refusal of refusals) {
+		const error = await refusal().then(
+			() => undefined,
+			(caught: unknown) => caught,
+		);
+		expect(error).toBeInstanceOf(VellumError);
+		expect(error).toHaveProperty("message", reason);
+	}
+}
 
 describe("vellum > documents nested to overflow the stack", () => {
 	const vellum = new Vellum();
@@ -19,12 +55,7 @@ describe("vellum > documents nested to overflow the stack", () => {
 			stream("", "q Q"),
 			`/Foo ${"[".repeat(DEEP)}${"]".repeat(DEEP)}`,
 		);
-		await expect(vellum.render(pdf)).rejects.toThrow(/page 1 does not exist/);
-		await expect(vellum.extractText(pdf)).rejects.toThrow(
-			/page 1 does not exist/,
-		);
-		await expect(vellum.renderAll(pdf)).resolves.toEqual([]);
-		expect(await vellum.dimensions(pdf)).toEqual([]);
+		await expectRefusedAsTooDeep(pdf, "structure");
 	});
 
 	it("refuses a page whose resources nest dictionaries 200 000 deep", async () => {
@@ -32,29 +63,40 @@ describe("vellum > documents nested to overflow the stack", () => {
 			stream("", "q Q"),
 			`/Foo ${"<< /A ".repeat(DEEP)}1${" >>".repeat(DEEP)}`,
 		);
-		await expect(vellum.render(pdf)).rejects.toThrow(/page 1 does not exist/);
-		expect(await vellum.dimensions(pdf)).toEqual([]);
+		await expectRefusedAsTooDeep(pdf, "structure");
 	});
 
-	it("renders a page whose content stream nests arrays 200 000 deep, without them", async () => {
+	it("refuses a page whose content stream nests arrays 200 000 deep", async () => {
 		const pdf = onePage(
 			stream("", `${"[".repeat(DEEP)}${"]".repeat(DEEP)} pop q Q`),
 			HELVETICA,
 		);
-		const png = await vellum.render(pdf);
-		expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
-		await expect(vellum.extractText(pdf)).resolves.toBe("");
+		await expectRefusedAsTooDeep(pdf, "content");
 	});
 
-	it("renders a page whose colour function nests braces 200 000 deep, without it", async () => {
+	it("refuses content nested one level past the bound, and reads it just under", async () => {
+		const nested = (depth: number) =>
+			onePage(
+				stream("", `${"[".repeat(depth)}${"]".repeat(depth)} pop q Q`),
+				HELVETICA,
+			);
+		await expectRefusedAsTooDeep(nested(513), "content");
+		const png = await vellum.render(nested(500));
+		expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
+	});
+
+	it("refuses a page whose colour function nests braces 200 000 deep", async () => {
 		const body = `{${"{".repeat(DEEP)}${"}".repeat(DEEP)} pop 0 }`;
 		const pdf = onePage(
 			stream("", "/CS0 cs 0.5 sc 0 0 100 100 re f"),
 			"/ColorSpace << /CS0 [/Separation /Ink /DeviceGray 5 0 R] >>",
 			[stream("/FunctionType 4 /Domain [0 1] /Range [0 1]", body)],
 		);
-		const png = await vellum.render(pdf);
-		expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
+		await expectRefusedAsTooDeep(
+			pdf,
+			"content",
+			"the document nests calculator procedures more than 64 levels deep",
+		);
 	});
 
 	it("is still alive to render an ordinary page afterwards", async () => {

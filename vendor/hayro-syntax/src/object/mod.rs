@@ -16,6 +16,8 @@ use crate::reader::{Readable, ReaderContext, ReaderExt, Skippable};
 use core::fmt::{Debug, Display, Formatter};
 
 const MAX_OBJECT_NESTING_DEPTH: usize = 512;
+// vellum: what the budget reports when an object nests past the bound.
+const TOO_DEEP: &str = "arrays or dictionaries more than 512 levels deep";
 
 mod bool;
 mod date;

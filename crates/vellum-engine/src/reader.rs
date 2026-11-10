@@ -47,14 +47,19 @@ impl Default for ReadLimits {
 /// Run `work` under `limits`, on the reader thread it is called from.
 ///
 /// hayro answers an exhausted budget the way it answers a broken stream: it
-/// draws without it. That would hand back a page that silently lacks its
-/// content, so running out is an error here instead.
+/// draws without it. It answers an object, colour space or function nested
+/// past its bound the same way, in the page tree and in content alike. Either
+/// would hand back a page that silently lacks part of itself, so both are
+/// errors here instead.
 pub(crate) fn metered<T>(
     limits: &ReadLimits,
     work: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let budget = Budget::open(limits.max_decoded_bytes, limits.max_operations);
     let result = work();
+    if let Some(what) = budget.too_deep() {
+        return Err(format!("the document nests {what}"));
+    }
     if budget.decoded_exhausted() {
         return Err(format!(
             "the document decodes to more than {} MiB for one page — raise maxDecodedBytes if you meant it",
