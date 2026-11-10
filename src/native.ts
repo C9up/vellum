@@ -29,18 +29,58 @@ import type {
 	TimestampQuery,
 } from "./native/generated.js";
 import {
+	hasFunctions,
 	loadNativeBinary,
 	unavailableReason as vendorUnavailableReason,
 } from "./vendor/nativeBinary.js";
 
 /**
- * The engine's surface, as the Rust declares it.
+ * What this package calls on the engine, typed as the Rust declares it.
  *
  * Derived from `./native/generated.js` — written by `pnpm build:napi-types`
  * from napi-derive's own `type-def` output — rather than restated here, where
  * nothing would notice a `pub fn` gaining a parameter or changing its return.
  */
-type NativeVellum = typeof import("./native/generated.js");
+const NATIVE_CALLS = [
+	"NativeDocument",
+	"standardFontFile",
+	"inspect",
+	"createBlank",
+	"renderPage",
+	"renderAll",
+	"pageDimensions",
+	"metadata",
+	"extractText",
+	"extractTextAll",
+	"merge",
+	"selectPages",
+	"split",
+	"rotate",
+	"stamp",
+	"stampText",
+	"formFields",
+	"fillForm",
+	"flattenForm",
+	"prepareSignature",
+	"embedSignature",
+	"signCms",
+	"timestampQuery",
+	"attachTimestamp",
+	"verifySignatures",
+	"responderUrl",
+	"revocationQuery",
+	"readRevocation",
+] as const;
+
+type NativeVellum = Pick<
+	typeof import("./native/generated.js"),
+	(typeof NATIVE_CALLS)[number]
+>;
+
+/** What the package calls, checked at load: a stale binary loads just as well. */
+function isNativeVellum(value: unknown): value is NativeVellum {
+	return hasFunctions(value, NATIVE_CALLS);
+}
 
 export type {
 	DocumentInfo,
@@ -53,7 +93,7 @@ export type {
 	SignatureReport,
 } from "./native/generated.js";
 
-const attempt = loadNativeBinary<NativeVellum>();
+const attempt = loadNativeBinary(isNativeVellum);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 
