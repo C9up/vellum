@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use cms::content_info::ContentInfo;
 use cms::signed_data::SignedData;
 use der::{Decode, Encode, Reader};
+use lopdf::xref::XrefEntry;
 use lopdf::{Document, Object, ObjectId};
 use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
@@ -112,15 +113,23 @@ fn byte_range(signature: &lopdf::Dictionary) -> Option<[usize; 4]> {
 /// The value is reserved larger than it needs and padded, and the padding is
 /// unsigned. Without this check it could be rewritten — closing the
 /// signature dictionary early, with a /Reason and /Name of anyone's choosing
-/// — while every signed byte stayed the same.
-fn gap_is_value(pdf: &[u8], first: usize, second: usize, value: &[u8]) -> bool {
+/// — while every signed byte stayed the same. `own_value` is where the
+/// signature dictionary's own `/Contents` value sits in the file: a
+/// `/Contents` with the same digits in another object, or nested one level
+/// down, would otherwise let the range leave out a region of its choosing.
+fn gap_is_value(
+    pdf: &[u8],
+    first: usize,
+    second: usize,
+    value: &[u8],
+    own_value: Option<(usize, usize)>,
+) -> bool {
+    if own_value != Some((first, second)) {
+        return false;
+    }
     let Some([b'<', inner @ .., b'>']) = pdf.get(first..second) else {
         return false;
     };
-    // The key it is the value of, right before it.
-    if !pdf[..first].trim_ascii_end().ends_with(b"/Contents") {
-        return false;
-    }
     let mut digits = inner.iter().filter(|byte| !byte.is_ascii_whitespace());
     let mut decoded = Vec::with_capacity(value.len());
     while let Some(&high) = digits.next() {
@@ -132,6 +141,242 @@ fn gap_is_value(pdf: &[u8], first: usize, second: usize, value: &[u8]) -> bool {
         decoded.push(high << 4 | low);
     }
     decoded == value
+}
+
+/// Where the signature dictionary `id` has its own `/Contents` value in the
+/// file: the bytes from its `<` to its `>`.
+///
+/// Read from the offset the cross-reference table gives the object, entry by
+/// entry at the dictionary's top level, so a `/Contents` nested inside one of
+/// its values does not count. `None` when the object is not written there as
+/// `id generation obj << ... >>`, sits in an object stream (where no byte of
+/// it can be left out of a range), or names `/Contents` other than once.
+fn own_contents_span(pdf: &[u8], document: &Document, id: ObjectId) -> Option<(usize, usize)> {
+    let Some(XrefEntry::Normal { offset, generation }) = document.reference_table.get(id.0) else {
+        return None;
+    };
+    if *generation != id.1 {
+        return None;
+    }
+    let mut lexer = Lexer {
+        bytes: pdf,
+        at: usize::try_from(*offset).ok()?,
+    };
+    lexer.skip_space();
+    (lexer.integer()? == u64::from(id.0)).then_some(())?;
+    lexer.skip_space();
+    (lexer.integer()? == u64::from(id.1)).then_some(())?;
+    lexer.skip_space();
+    lexer.keyword(b"obj")?;
+    lexer.skip_space();
+    lexer.tag(b"<<")?;
+    let mut span = None;
+    loop {
+        lexer.skip_space();
+        if lexer.tag(b">>").is_some() {
+            return span;
+        }
+        let key = lexer.name()?;
+        lexer.skip_space();
+        let start = lexer.at;
+        lexer.value()?;
+        if key == b"Contents" {
+            if span.is_some() {
+                return None;
+            }
+            span = Some((start, lexer.at));
+        }
+    }
+}
+
+/// How deep the values of a signature dictionary may nest before reading it
+/// gives up, the bound the parser that read the document applies too.
+const MAX_VALUE_DEPTH: usize = 512;
+
+/// The tokens of ISO 32000-2 §7.2-7.3, enough to step over one value.
+struct Lexer<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Lexer<'_> {
+    fn peek(&self, ahead: usize) -> Option<u8> {
+        self.bytes.get(self.at + ahead).copied()
+    }
+
+    fn skip_space(&mut self) {
+        while let Some(byte) = self.peek(0) {
+            if is_white(byte) {
+                self.at += 1;
+            } else if byte == b'%' {
+                while self
+                    .peek(0)
+                    .is_some_and(|byte| byte != b'\n' && byte != b'\r')
+                {
+                    self.at += 1;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn tag(&mut self, tag: &[u8]) -> Option<()> {
+        self.bytes.get(self.at..)?.starts_with(tag).then(|| {
+            self.at += tag.len();
+        })
+    }
+
+    /// A keyword, which a regular character would continue into another.
+    fn keyword(&mut self, keyword: &[u8]) -> Option<()> {
+        let start = self.at;
+        self.tag(keyword)?;
+        if self.peek(0).is_some_and(is_regular) {
+            self.at = start;
+            return None;
+        }
+        Some(())
+    }
+
+    fn integer(&mut self) -> Option<u64> {
+        let start = self.at;
+        let mut value: u64 = 0;
+        while let Some(digit) = self.peek(0).filter(u8::is_ascii_digit) {
+            value = value
+                .checked_mul(10)?
+                .checked_add(u64::from(digit - b'0'))?;
+            self.at += 1;
+        }
+        if self.at == start || self.peek(0).is_some_and(is_regular) {
+            self.at = start;
+            return None;
+        }
+        Some(value)
+    }
+
+    /// A name, its `#xx` escapes decoded (§7.3.5).
+    fn name(&mut self) -> Option<Vec<u8>> {
+        self.tag(b"/")?;
+        let mut name = Vec::new();
+        while let Some(byte) = self.peek(0).filter(|&byte| is_regular(byte)) {
+            let escaped = (byte == b'#')
+                .then(|| Some(hex_value(self.peek(1)?)? << 4 | hex_value(self.peek(2)?)?))
+                .flatten();
+            match escaped {
+                Some(decoded) => {
+                    name.push(decoded);
+                    self.at += 3;
+                }
+                None => {
+                    name.push(byte);
+                    self.at += 1;
+                }
+            }
+        }
+        Some(name)
+    }
+
+    fn literal_string(&mut self) -> Option<()> {
+        self.tag(b"(")?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.peek(0)? {
+                b'\\' => self.at += 1,
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            self.at += 1;
+        }
+        Some(())
+    }
+
+    fn hex_string(&mut self) -> Option<()> {
+        self.tag(b"<")?;
+        let close = self
+            .bytes
+            .get(self.at..)?
+            .iter()
+            .position(|&byte| byte == b'>')?;
+        self.at += close + 1;
+        Some(())
+    }
+
+    fn regular(&mut self) -> Option<()> {
+        let start = self.at;
+        while self.peek(0).is_some_and(is_regular) {
+            self.at += 1;
+        }
+        (self.at > start).then_some(())
+    }
+
+    /// One value: a string, a name, a number, a keyword, a reference, or an
+    /// array or dictionary with everything inside it.
+    fn value(&mut self) -> Option<()> {
+        match (self.peek(0)?, self.peek(1)) {
+            (b'[', _) | (b'<', Some(b'<')) => self.composite(),
+            (b'<', _) => self.hex_string(),
+            (b'(', _) => self.literal_string(),
+            (b'/', _) => self.name().map(|_| ()),
+            _ => {
+                if self.integer().is_some() {
+                    // `id generation R` is one value.
+                    let after = self.at;
+                    self.skip_space();
+                    let reference = self.integer().is_some() && {
+                        self.skip_space();
+                        self.keyword(b"R").is_some()
+                    };
+                    if !reference {
+                        self.at = after;
+                    }
+                    return Some(());
+                }
+                self.regular()
+            }
+        }
+    }
+
+    /// An array or a dictionary, each closer matched against its opener.
+    fn composite(&mut self) -> Option<()> {
+        let mut closers: Vec<&[u8]> = Vec::new();
+        loop {
+            self.skip_space();
+            match (self.peek(0)?, self.peek(1)) {
+                (b'[', _) => {
+                    self.at += 1;
+                    closers.push(b"]");
+                }
+                (b'<', Some(b'<')) => {
+                    self.at += 2;
+                    closers.push(b">>");
+                }
+                (b']', _) | (b'>', Some(b'>')) => {
+                    let closer = closers.pop()?;
+                    self.tag(closer)?;
+                    if closers.is_empty() {
+                        return Some(());
+                    }
+                    continue;
+                }
+                (b'<', _) => self.hex_string()?,
+                (b'(', _) => self.literal_string()?,
+                (b'/', _) => self.name().map(|_| ())?,
+                _ => self.regular()?,
+            }
+            if closers.len() > MAX_VALUE_DEPTH {
+                return None;
+            }
+        }
+    }
+}
+
+fn is_white(byte: u8) -> bool {
+    matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+}
+
+fn is_regular(byte: u8) -> bool {
+    !is_white(byte) && !b"()<>[]{}/%".contains(&byte)
 }
 
 fn hex_value(digit: u8) -> Option<u8> {
@@ -163,6 +408,7 @@ fn verify_one(
     pdf: &[u8],
     field: String,
     signature: &lopdf::Dictionary,
+    own_value: Option<(usize, usize)>,
     anchors: &[Certificate],
     digests: &mut HashMap<[usize; 4], [u8; 32]>,
 ) -> SignatureReport {
@@ -211,7 +457,7 @@ fn verify_one(
             pdf.len() - end
         ));
     }
-    if !gap_is_value(pdf, first, second, value) {
+    if !gap_is_value(pdf, first, second, value, own_value) {
         report.covers_whole_document = false;
         report.problems.push(
             "the unsigned region is not this signature's value, so bytes outside it are not covered"
@@ -463,7 +709,18 @@ pub fn verify_signatures(
             ));
             continue;
         }
-        let mut report = verify_one(pdf, field.name, &signature, &anchors, &mut digests);
+        // Only an indirect signature dictionary has an object of its own to
+        // hold the value: a field's /V shall be an indirect reference
+        // (ISO 32000-2 Table 255).
+        let own_value = shared.and_then(|id| own_contents_span(pdf, &document, id));
+        let mut report = verify_one(
+            pdf,
+            field.name,
+            &signature,
+            own_value,
+            &anchors,
+            &mut digests,
+        );
         report.problems.extend(anchor_problems.iter().cloned());
         if let Some(id) = shared {
             checked.insert(id, report.clone());
@@ -633,6 +890,149 @@ mod tests {
             "{:?}",
             report.problems
         );
+    }
+
+    /// Where the byte range is written before its numbers are known.
+    const RANGE: &str = "[0 0000000000 0000000000 0000000000]";
+
+    /// The value every signature dictionary below carries.
+    const VALUE: &str = "<C0FFEE>";
+
+    /// A one-page document whose form holds one signature field, numbered
+    /// from 4 on (`objects`), with every `RANGE` placeholder set to exclude
+    /// the first `VALUE` after `gap_after`.
+    fn document_with_gap(objects: &[&str], gap_after: &str) -> Vec<u8> {
+        let mut bodies = vec![
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /SigFlags 3 >> >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>",
+        ];
+        bodies.extend_from_slice(objects);
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, body) in bodies.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+                bodies.len() + 1
+            )
+            .as_bytes(),
+        );
+
+        let marker = out
+            .windows(gap_after.len())
+            .position(|window| window == gap_after.as_bytes())
+            .expect("the marker is written");
+        let first = marker
+            + out[marker..]
+                .windows(VALUE.len())
+                .position(|window| window == VALUE.as_bytes())
+                .expect("the value follows the marker");
+        let second = first + VALUE.len();
+        let range = format!("[0 {first:010} {second:010} {:010}]", out.len() - second);
+        while let Some(at) = out
+            .windows(RANGE.len())
+            .position(|window| window == RANGE.as_bytes())
+        {
+            out[at..at + RANGE.len()].copy_from_slice(range.as_bytes());
+        }
+        out
+    }
+
+    const FIELD: &str = "<< /FT /Sig /T (Signature1) /V 5 0 R >>";
+
+    fn unsigned_region_is_the_value(pdf: &[u8]) -> bool {
+        let report = &verify_signatures(pdf, &TrustOptions::default()).expect("it reads")[0];
+        let flagged = report
+            .problems
+            .iter()
+            .any(|problem| problem.contains("not this signature's value"));
+        assert_eq!(
+            report.covers_whole_document, !flagged,
+            "{:?}",
+            report.problems
+        );
+        report.covers_whole_document
+    }
+
+    #[test]
+    fn the_unsigned_region_is_the_value_of_the_signature_dictionary_itself() {
+        let signature = format!("<< /Type /Sig /ByteRange {RANGE} /Contents <C0FFEE> >>");
+        let pdf = document_with_gap(&[FIELD, &signature], "5 0 obj");
+        assert!(unsigned_region_is_the_value(&pdf));
+    }
+
+    /// A key may be spelt with `#xx` escapes (§7.3.5); `/Cont#65nts` is
+    /// `/Contents`, and its value is the signature's.
+    #[test]
+    fn an_escaped_contents_key_still_owns_the_value() {
+        let signature = format!("<< /Type /Sig /ByteRange {RANGE} /Cont#65nts <C0FFEE> >>");
+        let pdf = document_with_gap(&[FIELD, &signature], "5 0 obj");
+        assert!(unsigned_region_is_the_value(&pdf));
+    }
+
+    /// Another object carrying a `/Contents` with the same digits is not the
+    /// signature's value, and the region it fills is not the signature's to
+    /// leave out.
+    #[test]
+    fn a_contents_in_another_object_is_not_the_signatures_value() {
+        let signature = format!("<< /Type /Sig /ByteRange {RANGE} /Contents <C0FFEE> >>");
+        let decoy = "<< /Contents <C0FFEE> >>";
+        let pdf = document_with_gap(&[FIELD, &signature, decoy], "6 0 obj");
+        assert!(!unsigned_region_is_the_value(&pdf));
+    }
+
+    /// Nor is a `/Contents` nested inside the signature dictionary, one level
+    /// down: only the dictionary's own entry is its value.
+    #[test]
+    fn a_contents_nested_inside_the_signature_is_not_its_value() {
+        let signature = format!(
+            "<< /Type /Sig /ByteRange {RANGE} /Prop_Build << /Contents <C0FFEE> >> /Contents <C0FFEE> >>"
+        );
+        let pdf = document_with_gap(&[FIELD, &signature], "/Prop_Build <<");
+        assert!(!unsigned_region_is_the_value(&pdf));
+    }
+
+    /// Text that reads `/Contents <...>` inside a string is not an entry.
+    #[test]
+    fn a_contents_written_inside_a_string_is_not_the_value() {
+        let signature = format!(
+            "<< /Type /Sig /ByteRange {RANGE} /Reason (see /Contents {VALUE}) /Contents {VALUE} >>"
+        );
+        let pdf = document_with_gap(&[FIELD, &signature], "/Reason (");
+        assert!(!unsigned_region_is_the_value(&pdf));
+    }
+
+    /// A signature field's value shall be an indirect reference (ISO 32000-2
+    /// Table 255): written inline, it has no object of its own to own the
+    /// region it leaves out.
+    #[test]
+    fn a_signature_written_inline_in_its_field_is_not_located() {
+        let field = format!(
+            "<< /FT /Sig /T (Signature1) /V << /Type /Sig /ByteRange {RANGE} /Contents <C0FFEE> >> >>"
+        );
+        let pdf = document_with_gap(&[&field], "4 0 obj");
+        assert!(!unsigned_region_is_the_value(&pdf));
+    }
+
+    /// Two `/Contents` entries leave which one is the value to whichever
+    /// reader is asked; neither is taken.
+    #[test]
+    fn a_signature_with_two_contents_entries_is_not_located() {
+        let signature =
+            format!("<< /Type /Sig /Contents <C0FFEE> /ByteRange {RANGE} /Contents <C0FFEE> >>");
+        let pdf = document_with_gap(&[FIELD, &signature], "/ByteRange");
+        assert!(!unsigned_region_is_the_value(&pdf));
     }
 
     /// The trap everyone meets first. Content appended after a signature is
