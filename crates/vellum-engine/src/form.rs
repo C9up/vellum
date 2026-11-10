@@ -354,15 +354,13 @@ pub fn form_fields(bytes: &[u8]) -> Result<Vec<FormField>, String> {
 }
 
 /// Whether the document carries a signature: a signature field holding a
-/// value.
+/// value, the same fields [`crate::verify_signatures`] reports on.
 ///
-/// A signature's value sits as raw bytes between the two ranges it signs, so
-/// its dictionary cannot be inside a compressed object stream: a file with no
-/// `/ByteRange` anywhere in its bytes carries none, without being parsed.
+/// Decided on the parsed document, never on its bytes: a name may spell any
+/// of its characters as a `#xx` escape (§7.3.5), so `/Byte#52ange` is
+/// `/ByteRange`, and a search for the literal key let such a signed document
+/// through to be rewritten.
 pub fn is_signed(bytes: &[u8]) -> Result<bool, String> {
-    if !bytes.windows(10).any(|window| window == b"/ByteRange") {
-        return Ok(false);
-    }
     let document =
         Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
     Ok(fields_of(&document)?.iter().any(|(id, field)| {
@@ -475,9 +473,6 @@ mod tests {
                 "Contents" => Object::String(vec![0], lopdf::StringFormat::Hexadecimal),
             });
             field.set("V", value);
-        } else {
-            // The key alone, so the fast path does not decide.
-            field.set("Note", Object::Name(b"ByteRange".to_vec()));
         }
         let field_id = document.add_object(field);
         let catalog = document.add_object(dictionary! {
@@ -501,9 +496,85 @@ mod tests {
 
     #[test]
     fn an_empty_signature_field_is_a_place_for_one_not_a_signature() {
-        let bytes = signature_field(false);
-        assert!(bytes.windows(10).any(|window| window == b"/ByteRange"));
-        assert_eq!(is_signed(&bytes), Ok(false));
+        assert_eq!(is_signed(&signature_field(false)), Ok(false));
+    }
+
+    /// A document signed the way an application signs one, with its
+    /// signature dictionary's `/ByteRange` key spelt `/Byte#52ange`: the same
+    /// name once parsed (§7.3.5), and still a signature that verifies, since
+    /// the spelling is chosen before the digest is taken. The two bytes the
+    /// escape adds come out of the padding inside the array, so no offset
+    /// moves.
+    fn signed_with_an_escaped_byte_range() -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+
+        let prepared = crate::prepare(
+            &crate::create_blank(&[(595.28, 841.89)]).expect("a blank page"),
+            &crate::SignatureOptions::default(),
+        )
+        .expect("prepares");
+        let mut document = prepared.document;
+        let key = b"/ByteRange";
+        let at = document
+            .windows(key.len())
+            .position(|window| window == key)
+            .expect("the key is written");
+        let close = at
+            + document[at..]
+                .iter()
+                .position(|&byte| byte == b']')
+                .expect("the array closes");
+        assert_eq!(&document[close - 2..close], b"  ", "padding to absorb");
+        let mut rewritten = b"/Byte#52ange".to_vec();
+        rewritten.extend_from_slice(&document[at + key.len()..close - 2]);
+        document.splice(at..close, rewritten);
+
+        let range = String::from_utf8_lossy(&document[at..close]).into_owned();
+        let numbers: Vec<usize> = range
+            .trim_start_matches("/Byte#52ange")
+            .trim_matches(|c: char| c == '[' || c.is_whitespace())
+            .split_whitespace()
+            .map(|number| number.parse().expect("a number"))
+            .collect();
+        let (hole_start, hole_end) = (numbers[1], numbers[2]);
+        let mut hasher = Sha256::new();
+        hasher.update(&document[..hole_start]);
+        hasher.update(&document[hole_end..]);
+        let digest: [u8; 32] = hasher.finalize().into();
+
+        let (key, certificate) = crate::cms::tests::key_and_certificate();
+        let value = crate::sign_cms(
+            &digest,
+            &key,
+            std::slice::from_ref(&certificate),
+            "2026-09-04T14:30:00Z",
+        )
+        .expect("signs");
+        crate::embed_signature(&document, &value).expect("embeds")
+    }
+
+    #[test]
+    fn a_signature_whose_byte_range_key_is_escaped_is_still_a_signature() {
+        let bytes = signed_with_an_escaped_byte_range();
+        assert!(!bytes.windows(10).any(|window| window == b"/ByteRange"));
+        let reports =
+            crate::verify_signatures(&bytes, &crate::TrustOptions::default()).expect("it reads");
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].digest_matches, "{:?}", reports[0].problems);
+        assert!(
+            reports[0].covers_whole_document,
+            "{:?}",
+            reports[0].problems
+        );
+
+        assert_eq!(is_signed(&bytes), Ok(true));
+        let refused = refuse_if_signed(&bytes, false).expect_err("refused");
+        assert!(refused.starts_with("SIGNED_DOCUMENT: "), "{refused}");
+    }
+
+    #[test]
+    fn a_document_that_cannot_be_read_is_not_called_unsigned() {
+        assert!(is_signed(b"%PDF-1.7\nnot a document").is_err());
     }
 
     /// Build a document carrying an interactive form.

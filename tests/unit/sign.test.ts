@@ -482,6 +482,27 @@ describe("editing a document that is already signed", () => {
 		}
 	});
 
+	it("refuses it just the same when the signature's /ByteRange is spelt with an escape", async () => {
+		// `/Byte#52ange` is `/ByteRange` once parsed. The two bytes the escape
+		// adds come out of the padding inside the array, so no offset moves.
+		const latin1 = (await signedDocument()).toString("latin1");
+		const range = /\/ByteRange(\[[^\]]*) {2}\]/.exec(latin1);
+		expect(range).not.toBeNull();
+		const escaped = Buffer.from(
+			latin1.replace(/\/ByteRange(\[[^\]]*) {2}\]/, "/Byte#52ange$1]"),
+			"latin1",
+		);
+		expect(escaped.includes("/ByteRange")).toBe(false);
+		expect(escaped).toHaveLength(latin1.length);
+		await expect(vellum.verifySignatures(escaped)).resolves.toHaveLength(1);
+
+		for (const [name, edit] of edits(escaped, {})) {
+			await expect(edit(), name).rejects.toMatchObject({
+				code: "E_VELLUM_SIGNED_DOCUMENT",
+			});
+		}
+	});
+
 	it("rewrites it when the caller says the signatures may go", async () => {
 		const signed = await signedDocument();
 		for (const [name, edit] of edits(signed, { discardSignatures: true })) {
