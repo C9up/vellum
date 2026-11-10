@@ -93,7 +93,7 @@ export type {
 	SignatureReport,
 } from "./native/generated.js";
 
-const attempt = loadNativeBinary(isNativeVellum);
+const attempt = loadNativeBinary(isNativeVellum, NATIVE_CALLS);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 
