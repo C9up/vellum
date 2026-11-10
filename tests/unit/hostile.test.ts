@@ -47,7 +47,13 @@ async function expectRefusedAsTooDeep(
 	}
 }
 
-describe("vellum > documents nested to overflow the stack", () => {
+// Refusing a 200 000-deep document is linear (about 0.8 s here, 0.1 s at a
+// eighth of the depth) but a shared CI runner, with the other hostile files in
+// parallel, has gone past the 5 s default. What these tests assert is that the
+// document is refused without exhausting the stack, not how fast.
+describe("vellum > documents nested to overflow the stack", {
+	timeout: 30_000,
+}, () => {
 	const vellum = new Vellum();
 
 	it("refuses a page whose resources nest arrays 200 000 deep", async () => {
