@@ -10,18 +10,21 @@
  */
 
 import { readFileSync } from "node:fs";
-import { createServer, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
-import { fakeHttp } from "@c9up/ream/http-client";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { A4, createBlank } from "../src/index.js";
 import {
 	askResponder,
+	type ClientModule,
+	type GuardedClientOptions,
+	MAX_RESPONDER_ANSWER,
 	mayAsk,
+	type ResponderClient,
 	type ResponderPermit,
+	readClientModule,
 } from "../src/responder.js";
 import { Vellum } from "../src/Vellum.js";
+import { ClientFailure, fakeResponder } from "./fakeResponder.js";
 
 const refusal = async (url: string, policy?: Parameters<typeof mayAsk>[1]) => {
 	const answer = await mayAsk(url, policy);
@@ -91,111 +94,228 @@ describe("vellum > which responder may be named", () => {
 	});
 });
 
-/** A local server counting what it was asked, answering with `respond`. */
-async function serve(
-	respond: (response: ServerResponse) => void,
-): Promise<{ origin: string; asked: string[]; server: Server }> {
-	const asked: string[] = [];
-	const server = createServer((request, response) => {
-		asked.push(`${request.method} ${request.url}`);
-		respond(response);
-	});
-	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-	const address: AddressInfo | string | null = server.address();
-	const port =
-		typeof address === "object" && address !== null ? address.port : 0;
-	return { origin: `http://127.0.0.1:${port}`, asked, server };
-}
-
-const servers: Server[] = [];
-afterEach(async () => {
-	for (const server of servers.splice(0)) {
-		await new Promise<void>((resolve) => server.close(() => resolve()));
-	}
-});
-
 const QUERY = new Uint8Array([0x30, 0x00]);
+const RESPONDER = "http://ocsp.example-ca.test/";
 
-async function ask(url: string, named = false) {
+async function ask(client: ResponderClient, url = RESPONDER, named = false) {
 	const target: ResponderPermit = { url: new URL(url), named };
-	return askResponder(target, QUERY, { timeoutMs: 5_000 });
+	return askResponder(target, QUERY, { timeoutMs: 5_000, client });
 }
 
-describe("vellum > the address a responder is asked at", () => {
-	it("refuses private and special addresses written in the URL", async () => {
-		for (const url of [
-			"http://127.0.0.1:6379/",
-			"http://10.0.0.5/",
-			"http://169.254.169.254/latest/meta-data/",
-			"http://100.64.0.1/",
-			"http://[::1]:11211/",
-			"http://[::ffff:127.0.0.1]/",
-			"http://[64:ff9b::a9fe:a9fe]/", // NAT64 of the metadata address
-			"http://[fec0::1]/", // site-local
-			"http://[fd00::1]/",
-		]) {
-			const answer = await ask(url);
-			expect(Buffer.isBuffer(answer), url).toBe(false);
-			if (Buffer.isBuffer(answer)) continue;
-			expect(answer.status, url).toBe("unknown");
-			expect(answer.detail, url).toContain("an address on this network");
-		}
-	});
+/** The detail of an answer that is not the responder's bytes. */
+function detailOf(answer: Buffer | { detail?: string }): string | undefined {
+	return Buffer.isBuffer(answer) ? undefined : answer.detail;
+}
 
-	it("refuses a name that resolves to this machine, at connect time", async () => {
-		// `localhost` spells no address; DNS answers loopback. The spelling
-		// check this replaced let every such name through.
-		const local = await serve((response) => response.end("secret"));
-		servers.push(local.server);
-		const port = new URL(local.origin).port;
-		const answer = await ask(`http://localhost:${port}/`);
-		expect(Buffer.isBuffer(answer) ? "answered" : answer.detail).toContain(
-			"an address on this network",
-		);
-		expect(local.asked).toEqual([]);
-	});
+describe("vellum > asking a responder", () => {
+	it("posts the query as an OCSP request, bounded in time and size", async () => {
+		const http = fakeResponder().on(RESPONDER, { body: QUERY });
+		const answer = await ask(http);
 
-	it("does not follow a redirect, even from a responder the application named", async () => {
-		const inner = await serve((response) => response.end("secret"));
-		const outer = await serve((response) => {
-			response.writeHead(302, {
-				location: `${inner.origin}/latest/meta-data/`,
-			});
-			response.end();
-		});
-		servers.push(inner.server, outer.server);
-		const answer = await ask(`${outer.origin}/`, true);
-		expect(Buffer.isBuffer(answer) ? "answered" : answer.detail).toContain(
-			"redirected",
-		);
-		expect(outer.asked).toEqual(["POST /"]);
-		expect(inner.asked).toEqual([]);
-	});
-
-	it("stops reading an answer larger than any OCSP answer", async () => {
-		const flood = await serve((response) => {
-			response.writeHead(200, { "content-type": "application/ocsp-response" });
-			const chunk = Buffer.alloc(1024 * 1024);
-			for (let sent = 0; sent < 10; sent++) response.write(chunk);
-			response.end();
-		});
-		servers.push(flood.server);
-		const answer = await ask(`${flood.origin}/`, true);
-		expect(Buffer.isBuffer(answer) ? "answered" : answer.detail).toContain(
-			"more than 64 KiB",
-		);
-	});
-
-	it("asks a responder the application named on its own network", async () => {
-		const local = await serve((response) =>
-			response.end(Buffer.from([0x30, 0x00])),
-		);
-		servers.push(local.server);
-		const answer = await ask(`${local.origin}/`, true);
 		expect(Buffer.isBuffer(answer) ? [...answer] : answer).toEqual([
 			0x30, 0x00,
 		]);
-		expect(local.asked).toEqual(["POST /"]);
+		expect(http.requests).toEqual([
+			{
+				url: RESPONDER,
+				headers: { "content-type": "application/ocsp-request" },
+				body: QUERY,
+				timeout: 5_000,
+				maxResponseBytes: MAX_RESPONDER_ANSWER,
+			},
+		]);
+	});
+
+	it("explains a refused private address, and how to allow it", async () => {
+		const http = fakeResponder().on(
+			RESPONDER,
+			new ClientFailure("privateAddress", "connects to 10.0.0.5"),
+		);
+		const detail = detailOf(await ask(http));
+		expect(detail).toContain("an address on this network");
+		expect(detail).toContain("connects to 10.0.0.5");
+		expect(detail).toContain("allowedResponders");
+	});
+
+	it("does not take a redirect for an answer", async () => {
+		expect(
+			detailOf(await ask(fakeResponder().on(RESPONDER, { status: 302 }))),
+		).toContain("redirected");
+		// A client the application gave may follow redirects itself, and
+		// refuse one by its own rules.
+		const refusing = fakeResponder().on(
+			RESPONDER,
+			new ClientFailure("redirect", "to another host"),
+		);
+		expect(detailOf(await ask(refusing))).toContain("redirected");
+	});
+
+	it("says so when the answer is larger than any OCSP answer", async () => {
+		const http = fakeResponder().on(RESPONDER, {
+			body: new Uint8Array(MAX_RESPONDER_ANSWER + 1),
+		});
+		expect(detailOf(await ask(http))).toContain("more than 64 KiB");
+	});
+
+	it("reports the status of an answer that is not a success", async () => {
+		const http = fakeResponder().on(RESPONDER, { status: 503 });
+		expect(detailOf(await ask(http))).toContain("answered 503");
+	});
+
+	it("reports a responder that could not be reached, whatever was thrown", async () => {
+		expect(detailOf(await ask(fakeResponder()))).toContain(
+			"could not be reached: nothing answers",
+		);
+		const throwing: ResponderClient = {
+			async post() {
+				throw "socket hang up";
+			},
+		};
+		expect(detailOf(await ask(throwing))).toContain(
+			"could not be reached: socket hang up",
+		);
+	});
+});
+
+/** An import failure as Node reports it. */
+function importFailure(code: string): Error {
+	const error = new Error(`import failed: ${code}`);
+	Object.defineProperty(error, "code", { value: code });
+	return error;
+}
+
+/** A client module whose clients answer `body`, recording how they were built. */
+function recordingModule(body: Uint8Array | Error = QUERY) {
+	const built: GuardedClientOptions[] = [];
+	const closed: GuardedClientOptions[] = [];
+	class HttpClient {
+		readonly #options: GuardedClientOptions;
+		constructor(options: GuardedClientOptions) {
+			this.#options = options;
+			built.push(options);
+		}
+		async post() {
+			if (body instanceof Error) throw body;
+			return { status: 200, body: Buffer.from(body) };
+		}
+		close() {
+			closed.push(this.#options);
+		}
+	}
+	const module: ClientModule = { HttpClient };
+	return { module, built, closed };
+}
+
+describe("vellum > finding ream's client", () => {
+	it("takes a missing module, or one without the subpath, as no client", async () => {
+		for (const code of [
+			"ERR_MODULE_NOT_FOUND",
+			"ERR_PACKAGE_PATH_NOT_EXPORTED",
+		]) {
+			await expect(
+				readClientModule(() => Promise.reject(importFailure(code))),
+				code,
+			).resolves.toBeUndefined();
+		}
+	});
+
+	it("lets any other failure through", async () => {
+		const broken = new SyntaxError("Unexpected token");
+		await expect(readClientModule(() => Promise.reject(broken))).rejects.toBe(
+			broken,
+		);
+		await expect(
+			readClientModule(() =>
+				Promise.reject(importFailure("ERR_UNKNOWN_FILE_EXTENSION")),
+			),
+		).rejects.toThrow("ERR_UNKNOWN_FILE_EXTENSION");
+	});
+
+	it("takes a module that does not carry a usable client as no client", async () => {
+		class WithoutClose {
+			async post() {
+				return { status: 200, body: Buffer.alloc(0) };
+			}
+		}
+		for (const loaded of [
+			undefined,
+			"@c9up/ream/http-client",
+			{},
+			{ HttpClient: "HttpClient" },
+			{ HttpClient: () => undefined },
+			{ HttpClient: WithoutClose },
+		]) {
+			await expect(
+				readClientModule(async () => loaded),
+				String(loaded),
+			).resolves.toBeUndefined();
+		}
+	});
+
+	it("hands back a module whose client can post and close", async () => {
+		const { module } = recordingModule();
+		await expect(readClientModule(async () => module)).resolves.toBe(module);
+	});
+});
+
+describe("vellum > asking without a client of the application's", () => {
+	it("refuses rather than ask through a client that does not guard", async () => {
+		const answer = await askResponder(
+			{ url: new URL(RESPONDER), named: false },
+			QUERY,
+			{ timeoutMs: 5_000, clientModule: async () => undefined },
+		);
+		expect(answer).toEqual({
+			status: "unknown",
+			detail: expect.stringContaining(
+				"needs an outbound client that refuses private addresses",
+			),
+		});
+	});
+
+	it("builds ream's client following no redirect and exempting nothing", async () => {
+		const { module, built, closed } = recordingModule();
+		const answer = await askResponder(
+			{ url: new URL(RESPONDER), named: false },
+			QUERY,
+			{ timeoutMs: 5_000, clientModule: async () => module },
+		);
+		expect(Buffer.isBuffer(answer)).toBe(true);
+		expect(built).toEqual([{ maxRedirects: 0, allowHosts: [] }]);
+		expect(closed).toEqual(built);
+	});
+
+	it("exempts exactly the host and port of a responder the application named", async () => {
+		const { module, built } = recordingModule();
+		for (const url of [
+			"https://ocsp.internal/",
+			"http://ocsp.internal/",
+			"http://ocsp.internal:8080/",
+		]) {
+			await askResponder({ url: new URL(url), named: true }, QUERY, {
+				timeoutMs: 5_000,
+				clientModule: async () => module,
+			});
+		}
+		expect(built.map((options) => options.allowHosts)).toEqual([
+			["ocsp.internal:443"],
+			["ocsp.internal:80"],
+			["ocsp.internal:8080"],
+		]);
+	});
+
+	it("closes the client it built even when asking fails", async () => {
+		const { module, built, closed } = recordingModule(
+			new ClientFailure("privateAddress", "connects to 127.0.0.1"),
+		);
+		const answer = await askResponder(
+			{ url: new URL(RESPONDER), named: false },
+			QUERY,
+			{ timeoutMs: 5_000, clientModule: async () => module },
+		);
+		expect(detailOf(answer)).toContain("an address on this network");
+		expect(closed).toEqual(built);
+		expect(closed).toHaveLength(1);
 	});
 });
 
@@ -216,7 +336,7 @@ describe("vellum > the guard sits between the certificate and the network", () =
 		// A policy the code never consults protects nothing, so this goes
 		// through `verifySignatures` and watches the client rather than calling
 		// the check again.
-		const http = fakeHttp();
+		const http = fakeResponder();
 		const authority = readFileSync(
 			fileURLToPath(new URL("./fixtures/authority.der", import.meta.url)),
 		);

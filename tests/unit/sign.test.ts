@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { fakeHttp } from "@c9up/ream/http-client";
 import { describe, expect, it, vi } from "vitest";
 import {
 	A4,
@@ -12,6 +11,7 @@ import {
 	Vellum,
 	VellumError,
 } from "../../src/index.js";
+import { fakeResponder } from "../fakeResponder.js";
 import { encodePng } from "./png.js";
 
 /**
@@ -320,7 +320,7 @@ describe("trusting a signature", () => {
 
 describe("asking whether a certificate still stands", () => {
 	it("does not ask unless told to", async () => {
-		const http = fakeHttp();
+		const http = fakeResponder();
 		const vellum = new Vellum({
 			signers: { internal: stubCmsSigner() },
 			httpClient: http,
@@ -354,7 +354,7 @@ function testAuthority(): Buffer {
 
 describe("asking the issuer named by the certificate", () => {
 	async function signedUnderTheAuthority() {
-		const http = fakeHttp();
+		const http = fakeResponder();
 		const vellum = new Vellum({
 			signers: { internal: stubCmsSigner() },
 			trustedAnchors: [testAuthority()],
@@ -377,7 +377,7 @@ describe("asking the issuer named by the certificate", () => {
 
 	it("asks the responder the certificate names", async () => {
 		const { http, vellum, signed } = await signedUnderTheAuthority();
-		http.on("POST", "http://ocsp.vellum.test/", {
+		http.on("http://ocsp.vellum.test/", {
 			body: new Uint8Array([0x30, 0x00]),
 		});
 
@@ -397,7 +397,7 @@ describe("asking the issuer named by the certificate", () => {
 
 	it("does not call an unanswered responder good", async () => {
 		const { http, vellum, signed } = await signedUnderTheAuthority();
-		http.on("POST", "http://ocsp.vellum.test/", { status: 503, body: "no" });
+		http.on("http://ocsp.vellum.test/", { status: 503, body: "no" });
 
 		const [report] = await vellum.verifySignatures(signed, {
 			checkRevocation: true,
@@ -421,10 +421,7 @@ describe("asking the issuer named by the certificate", () => {
 
 	it("does not follow a responder that redirects", async () => {
 		const { http, vellum, signed } = await signedUnderTheAuthority();
-		http.on("POST", "http://ocsp.vellum.test/", {
-			status: 302,
-			headers: { location: "http://169.254.169.254/latest/meta-data/" },
-		});
+		http.on("http://ocsp.vellum.test/", { status: 302 });
 
 		const [report] = await vellum.verifySignatures(signed, {
 			checkRevocation: true,
@@ -437,7 +434,7 @@ describe("asking the issuer named by the certificate", () => {
 
 	it("does not read an answer larger than any OCSP answer", async () => {
 		const { http, vellum, signed } = await signedUnderTheAuthority();
-		http.on("POST", "http://ocsp.vellum.test/", {
+		http.on("http://ocsp.vellum.test/", {
 			body: new Uint8Array(10 * 1024 * 1024),
 		});
 

@@ -139,7 +139,81 @@ export async function mayAsk(
 	return { url: parsed, named: false };
 }
 
-type ClientModule = typeof import("@c9up/ream/http-client");
+/** What vellum builds ream's client with. */
+export interface GuardedClientOptions {
+	maxRedirects: number;
+	/** `host:port` entries exempt from the public-address rule. */
+	allowHosts: string[];
+}
+
+/** A client vellum built, and so closes once it has asked. */
+export interface GuardedClient extends ResponderClient {
+	close(): void;
+}
+
+/**
+ * The part of `@c9up/ream/http-client` vellum uses: its `HttpClient`, which
+ * refuses private addresses at connect time.
+ */
+export interface ClientModule {
+	HttpClient: new (options: GuardedClientOptions) => GuardedClient;
+}
+
+/**
+ * Held in a constant so neither the compiler nor a bundler resolves it ahead
+ * of time: ream is an optional peer, and an installed ream older than this
+ * subpath must not stop the whole package from loading.
+ */
+const REAM_CLIENT_MODULE = "@c9up/ream/http-client";
+
+/** Whether `value` carries a constructor whose instances can post and close. */
+function isClientModule(value: unknown): value is ClientModule {
+	if (typeof value !== "object" || value === null) return false;
+	if (!("HttpClient" in value) || typeof value.HttpClient !== "function") {
+		return false;
+	}
+	const prototype: unknown = value.HttpClient.prototype;
+	return (
+		typeof prototype === "object" &&
+		prototype !== null &&
+		"post" in prototype &&
+		typeof prototype.post === "function" &&
+		"close" in prototype &&
+		typeof prototype.close === "function"
+	);
+}
+
+/** Import failures that mean "ream's client is not available here". */
+const ABSENT_MODULE_CODES = new Set([
+	"ERR_MODULE_NOT_FOUND",
+	"ERR_PACKAGE_PATH_NOT_EXPORTED",
+]);
+
+/**
+ * ream's client module out of whatever `load` returns, or `undefined` when it
+ * is not there: ream not installed, installed without this subpath, or
+ * exporting something else under it. Any other failure is not a missing
+ * module, and propagates.
+ */
+export async function readClientModule(
+	load: () => Promise<unknown>,
+): Promise<ClientModule | undefined> {
+	let loaded: unknown;
+	try {
+		loaded = await load();
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			"code" in error &&
+			typeof error.code === "string" &&
+			ABSENT_MODULE_CODES.has(error.code)
+		) {
+			return undefined;
+		}
+		throw error;
+	}
+	return isClientModule(loaded) ? loaded : undefined;
+}
 
 let clientModule: Promise<ClientModule | undefined> | undefined;
 
@@ -148,16 +222,7 @@ let clientModule: Promise<ClientModule | undefined> | undefined;
  * application that never checks revocation does not need it.
  */
 function loadClientModule(): Promise<ClientModule | undefined> {
-	clientModule ??= import("@c9up/ream/http-client").catch((error: unknown) => {
-		if (
-			error instanceof Error &&
-			"code" in error &&
-			error.code === "ERR_MODULE_NOT_FOUND"
-		) {
-			return undefined;
-		}
-		throw error;
-	});
+	clientModule ??= readClientModule(() => import(REAM_CLIENT_MODULE));
 	return clientModule;
 }
 
@@ -181,27 +246,36 @@ function reasonOf(error: unknown): string | undefined {
 export async function askResponder(
 	permit: ResponderPermit,
 	query: Uint8Array,
-	options: { timeoutMs: number; client?: ResponderClient },
+	options: {
+		timeoutMs: number;
+		client?: ResponderClient;
+		/** Where ream's client comes from when no `client` is given. */
+		clientModule?: () => Promise<ClientModule | undefined>;
+	},
 ): Promise<Buffer | RevocationAnswer> {
 	const { url } = permit;
-	let client = options.client;
-	let owned: { close(): void } | undefined;
-	if (client === undefined) {
-		const module = await loadClientModule();
+	let client: ResponderClient;
+	let owned: GuardedClient | undefined;
+	if (options.client !== undefined) {
+		client = options.client;
+	} else {
+		// Without ream's client there is nothing that refuses private
+		// addresses, so nothing is asked: a plain fetch would go wherever the
+		// document points.
+		const module = await (options.clientModule ?? loadClientModule)();
 		if (module === undefined) {
 			return {
 				status: "unknown",
 				detail:
-					"checking revocation needs an outbound client that refuses private addresses: install @c9up/ream, or pass httpClient",
+					"checking revocation needs an outbound client that refuses private addresses: install @c9up/ream 0.2.29 or later, or pass httpClient",
 			};
 		}
-		const made = new module.HttpClient({
+		owned = new module.HttpClient({
 			maxRedirects: 0,
 			// A responder the application named may sit on its own network.
 			allowHosts: permit.named ? [`${url.hostname}:${portOf(url)}`] : [],
 		});
-		client = made;
-		owned = made;
+		client = owned;
 	}
 
 	try {
