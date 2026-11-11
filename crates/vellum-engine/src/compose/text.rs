@@ -37,6 +37,9 @@ const SOFT_HYPHEN: char = '\u{00AD}';
 const HYPHEN: &str = "-";
 /// Words remembered with their widths; past this the cache starts over.
 const WIDTH_CACHE_LIMIT: usize = 50_000;
+/// The longest chunk the cache keeps, in bytes, which with the entry limit
+/// bounds what it holds to a few megabytes.
+const WIDTH_CACHE_CHUNK: usize = 64;
 /// The longest text one `text()`, `heightOfString` or `boundsOfString`
 /// call lays out, in bytes: a book chapter. Laying text out is linear in its
 /// length, and this bounds what one call, run on the caller's thread, costs.
@@ -355,6 +358,13 @@ impl Composer {
         }
         let mut total = 0.0;
         for chunk in text.split_inclusive([' ', '\t']) {
+            // A word worth remembering is a word: a chunk longer than that is
+            // a piece of a long one, measured once and not kept, or one long
+            // word filled the cache with every rest of it.
+            if chunk.len() > WIDTH_CACHE_CHUNK {
+                total += self.current_font()?.width(chunk, 1000.0, &[])?;
+                continue;
+            }
             if let Some(width) = self.width_cache.get(&(index, chunk.to_string())) {
                 total += width;
                 continue;
@@ -2116,6 +2126,37 @@ mod tests {
             .map(|fragment| fragment.text.len())
             .sum();
         assert_eq!(drawn, word.len(), "every piece is drawn");
+    }
+
+    /// With a supplied font, every measured chunk was cached under its own
+    /// text: one long word left every rest of it there, gigabytes for a
+    /// megabyte of text.
+    #[test]
+    fn a_long_word_does_not_fill_the_width_cache() {
+        let mut document = self::document();
+        let word = "a".repeat(128 * 1024);
+        text(
+            &mut document,
+            &word,
+            Some((72.0, 72.0)),
+            TextOptions {
+                width: Some(300.0),
+                ..defaults()
+            },
+        );
+        let held: usize = document
+            .width_cache
+            .keys()
+            .map(|(_, chunk)| chunk.len())
+            .sum();
+        assert!(
+            document
+                .width_cache
+                .keys()
+                .all(|(_, chunk)| chunk.len() <= WIDTH_CACHE_CHUNK),
+            "a chunk past {WIDTH_CACHE_CHUNK} bytes was kept"
+        );
+        assert!(held < 4 * 1024 * 1024, "the cache holds {held} bytes");
     }
 
     #[test]
