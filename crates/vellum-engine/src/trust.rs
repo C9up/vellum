@@ -370,6 +370,12 @@ pub(crate) fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether a certificate was issued under its own name, as a renewed
+/// authority's is.
+fn self_issued(certificate: &Certificate) -> bool {
+    certificate.tbs_certificate.subject == certificate.tbs_certificate.issuer
+}
+
 /// Whether `certificate` is the anchor `anchor`.
 ///
 /// A trust anchor is a name and a key (RFC 5280 §6.1.1): the same
@@ -478,18 +484,39 @@ pub fn evaluate(
                 .push("no path to a trusted anchor: the certificate path loops".to_string());
             return report;
         }
-        visited.push(issuer.clone());
 
-        // Anything that issues certificates has to say that it does.
-        if depth > 0 || issuer.tbs_certificate.subject != current.tbs_certificate.subject {
-            let is_authority = extension::<BasicConstraints>(&issuer).is_some_and(|basic| basic.ca);
-            if !is_authority {
+        // Anything that issues certificates has to say that it does, and
+        // how many authorities it allows below it (RFC 5280 §4.2.1.9).
+        let constraints = extension::<BasicConstraints>(&issuer);
+        let issues = depth > 0 || issuer.tbs_certificate.subject != current.tbs_certificate.subject;
+        if issues && !constraints.as_ref().is_some_and(|basic| basic.ca) {
+            report.problems.push(format!(
+                "{} signed a certificate without being an authority",
+                issuer.tbs_certificate.subject
+            ));
+        }
+        // The authorities below this one, a self-issued one (a key rollover)
+        // not counting.
+        let below = visited
+            .iter()
+            .skip(1)
+            .filter(|certificate| !self_issued(certificate));
+        if let Some(limit) = constraints.and_then(|basic| basic.path_len_constraint) {
+            if below.clone().count() > usize::from(limit) {
                 report.problems.push(format!(
-                    "{} signed a certificate without being an authority",
+                    "{} allows {limit} authorities below it, and the path has more",
                     issuer.tbs_certificate.subject
                 ));
             }
         }
+        // And every name it certified, directly or through those below it,
+        // has to be one it may certify (RFC 5280 §4.2.1.10).
+        for certified in visited.iter().take(1).chain(below) {
+            if let Err(problem) = crate::name_constraints::check(&issuer, certified) {
+                report.problems.push(problem);
+            }
+        }
+        visited.push(issuer.clone());
 
         if depth == 0 {
             report.issuer = issuer.to_der().ok();

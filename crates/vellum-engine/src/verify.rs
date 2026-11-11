@@ -1651,6 +1651,190 @@ mod tests {
         );
     }
 
+    /// An authority under the test authority, limited to `path_len` levels
+    /// below it, with whatever `extend` adds: its key and its certificate.
+    fn sub_authority(
+        name: &str,
+        serial: u32,
+        path_len: Option<u8>,
+        extend: impl FnOnce(
+            &mut x509_cert::builder::CertificateBuilder<'_, rsa::pkcs1v15::SigningKey<Sha256>>,
+        ),
+    ) -> (Vec<u8>, Vec<u8>) {
+        let key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let certificate = crate::cms::tests::issued(
+            name,
+            serial,
+            crate::cms::tests::spki_of(&key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            Some(path_len),
+            extend,
+        );
+        (key, certificate)
+    }
+
+    /// A leaf for the signing key, issued by `issuer`.
+    fn leaf_under(
+        issuer_key: &[u8],
+        issuer_name: &str,
+        subject: &str,
+        serial: u32,
+        extend: impl FnOnce(
+            &mut x509_cert::builder::CertificateBuilder<'_, rsa::pkcs1v15::SigningKey<Sha256>>,
+        ),
+    ) -> Vec<u8> {
+        let (key, _) = key_and_certificate();
+        crate::cms::tests::issued_by(
+            issuer_key,
+            issuer_name,
+            subject,
+            serial,
+            crate::cms::tests::spki_of(&key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            None,
+            extend,
+        )
+    }
+
+    /// An authority allowed no authority below it cannot lend its trust
+    /// through one.
+    #[test]
+    fn a_path_length_constraint_is_enforced() {
+        let (first_key, first) = sub_authority("CN=Vellum Bounded,O=Vellum", 20, Some(0), |_| {});
+        // Directly under it: allowed.
+        let leaf = leaf_under(
+            &first_key,
+            "CN=Vellum Bounded,O=Vellum",
+            "CN=Direct,O=Vellum",
+            21,
+            |_| {},
+        );
+        let report = &verify_signatures(
+            &signed_with_certificates(&[leaf, first.clone()]),
+            &anchored(),
+        )
+        .expect("it reads")[0];
+        assert!(report.trusted, "{:?}", report.problems);
+
+        // Through an authority it was not allowed to make: refused.
+        let second_key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let second = crate::cms::tests::issued_by(
+            &first_key,
+            "CN=Vellum Bounded,O=Vellum",
+            "CN=Vellum Beyond,O=Vellum",
+            22,
+            crate::cms::tests::spki_of(&second_key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            Some(None),
+            |_| {},
+        );
+        let leaf = leaf_under(
+            &second_key,
+            "CN=Vellum Beyond,O=Vellum",
+            "CN=Indirect,O=Vellum",
+            23,
+            |_| {},
+        );
+        let report = &verify_signatures(
+            &signed_with_certificates(&[leaf, second, first]),
+            &anchored(),
+        )
+        .expect("it reads")[0];
+        assert!(!report.trusted, "{:?}", report.chain);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("allows 0 authorities below it")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// An authority delegated to certify `O=Acme` certifies `O=Acme` only.
+    #[test]
+    fn a_permitted_name_constraint_is_enforced() {
+        use x509_cert::ext::pkix::constraints::name::{GeneralSubtree, NameConstraints};
+        use x509_cert::ext::pkix::name::GeneralName;
+        let acme = "CN=Acme Authority,O=Acme";
+        let (key, authority) = sub_authority(acme, 30, None, |builder| {
+            builder
+                .add_extension(&NameConstraints {
+                    permitted_subtrees: Some(vec![GeneralSubtree {
+                        base: GeneralName::DirectoryName(
+                            std::str::FromStr::from_str("O=Acme").unwrap(),
+                        ),
+                        minimum: 0,
+                        maximum: None,
+                    }]),
+                    excluded_subtrees: None,
+                })
+                .unwrap();
+        });
+
+        let inside = leaf_under(&key, acme, "CN=Alice,O=Acme", 31, |_| {});
+        let report = &verify_signatures(
+            &signed_with_certificates(&[inside, authority.clone()]),
+            &anchored(),
+        )
+        .expect("it reads")[0];
+        assert!(report.trusted, "{:?}", report.problems);
+
+        let outside = leaf_under(&key, acme, "CN=Mallory,O=Vellum", 32, |_| {});
+        let report = &verify_signatures(
+            &signed_with_certificates(&[outside, authority]),
+            &anchored(),
+        )
+        .expect("it reads")[0];
+        assert!(!report.trusted, "{:?}", report.chain);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("outside the names it may certify")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// And one forbidden a domain cannot certify a host in it.
+    #[test]
+    fn an_excluded_name_constraint_is_enforced() {
+        use x509_cert::ext::pkix::constraints::name::{GeneralSubtree, NameConstraints};
+        use x509_cert::ext::pkix::name::GeneralName;
+        let name = "CN=Fenced Authority,O=Vellum";
+        let (key, authority) = sub_authority(name, 40, None, |builder| {
+            builder
+                .add_extension(&NameConstraints {
+                    permitted_subtrees: None,
+                    excluded_subtrees: Some(vec![GeneralSubtree {
+                        base: GeneralName::DnsName(der::asn1::Ia5String::new("evil.test").unwrap()),
+                        minimum: 0,
+                        maximum: None,
+                    }]),
+                })
+                .unwrap();
+        });
+        let leaf = leaf_under(&key, name, "CN=Www,O=Vellum", 41, |builder| {
+            builder
+                .add_extension(&x509_cert::ext::pkix::SubjectAltName(vec![
+                    GeneralName::DnsName(der::asn1::Ia5String::new("www.evil.test").unwrap()),
+                ]))
+                .unwrap();
+        });
+        let report = &verify_signatures(&signed_with_certificates(&[leaf, authority]), &anchored())
+            .expect("it reads")[0];
+        assert!(!report.trusted, "{:?}", report.chain);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("among the excluded names")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
     /// A second certificate for the same key, issued under another name.
     fn decoy() -> Vec<u8> {
         let (key, _) = key_and_certificate();

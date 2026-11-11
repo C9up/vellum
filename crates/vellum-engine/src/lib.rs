@@ -20,6 +20,7 @@ mod form;
 mod kerning;
 mod metadata;
 mod metrics;
+mod name_constraints;
 mod page;
 mod reader;
 mod render;
