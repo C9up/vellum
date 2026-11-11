@@ -16,7 +16,8 @@ use krilla::text::{GlyphId, KrillaGlyph};
 
 use super::fonts::LoadedFont;
 use super::graphics::{
-    build_path, krilla_transform, Clip, Matrix, Paint, PaintBook, Segment, StrokeStyle,
+    build_path, krilla_transform, maps_finitely, segment_bounds, Clip, Matrix, Paint, PaintBook,
+    Segment, StrokeStyle,
 };
 use super::images::LoadedImage;
 
@@ -213,6 +214,10 @@ pub fn replay(
     marked
 }
 
+/// Draw one operation. One whose drawing would not stay finite numbers on the
+/// page is left out: krilla unwraps the transformed bounds of what it draws,
+/// and the transform and the coordinates are each checked finite but their
+/// product is not.
 fn draw(surface: &mut Surface, op: &Op, resources: &Resources<'_>) {
     let (fonts, paints) = (resources.fonts, resources.paints);
     match op {
@@ -222,6 +227,9 @@ fn draw(surface: &mut Surface, op: &Op, resources: &Resources<'_>) {
             let Some(tree) = resources.svgs.get(*svg) else {
                 return;
             };
+            if !maps_finitely(*ctm, (0.0, 0.0, size.width(), size.height())) {
+                return;
+            }
             surface.push_transform(&krilla_transform(*ctm));
             surface.draw_svg(tree, *size, SvgSettings::default());
             surface.pop();
@@ -236,6 +244,9 @@ fn draw(surface: &mut Surface, op: &Op, resources: &Resources<'_>) {
             let Some(image) = resources.images.get(*image) else {
                 return;
             };
+            if !maps_finitely(*ctm, (0.0, 0.0, size.width(), size.height())) {
+                return;
+            }
             surface.push_transform(&krilla_transform(*ctm));
             let translucent = *opacity < 1.0;
             if translucent {
@@ -261,6 +272,23 @@ fn draw(surface: &mut Surface, op: &Op, resources: &Resources<'_>) {
             let Some(font) = fonts.get(*font) else {
                 return;
             };
+            // Generous bounds for the run: a few ems around the advances.
+            let reach: f32 = glyphs
+                .iter()
+                .map(|glyph| glyph.advance.abs() + glyph.x_offset.abs() + glyph.y_offset.abs())
+                .sum::<f32>()
+                / 1000.0
+                * size;
+            let room = 4.0 * size;
+            let run = (
+                origin.0 - room,
+                origin.1 - room,
+                origin.0 + reach + room,
+                origin.1 + room,
+            );
+            if !maps_finitely(*ctm, run) {
+                return;
+            }
             let glyphs: Vec<KrillaGlyph> = glyphs
                 .iter()
                 .map(|glyph| {
@@ -301,6 +329,15 @@ fn draw(surface: &mut Surface, op: &Op, resources: &Resources<'_>) {
             let Ok(Some(path)) = build_path(segments) else {
                 return;
             };
+            let Some((x0, y0, x1, y1)) = segment_bounds(segments) else {
+                return;
+            };
+            let pen = stroke_spec.as_ref().map_or(0.0, |spec| {
+                spec.style.width.abs() * spec.style.miter_limit.max(1.0)
+            });
+            if !maps_finitely(*ctm, (x0 - pen, y0 - pen, x1 + pen, y1 + pen)) {
+                return;
+            }
             surface.push_transform(&krilla_transform(*ctm));
             surface.set_fill(fill_spec.as_ref().map(|spec| fill(spec, paints)));
             surface.set_stroke(stroke_spec.as_ref().map(|spec| stroke(spec, paints)));

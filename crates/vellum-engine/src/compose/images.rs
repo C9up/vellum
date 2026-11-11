@@ -13,7 +13,7 @@ use std::sync::Arc;
 use krilla::geom::Size;
 use krilla::image::Image;
 
-use super::graphics::{concat, Matrix};
+use super::graphics::{checked_concat, Matrix};
 use super::ops::Op;
 use super::{ComposeError, Composer};
 
@@ -265,8 +265,8 @@ impl Composer {
             // Zero wide or high: nothing to see.
             return Ok(());
         };
-        let placed = concat(self.state.ctm, [1.0, 0.0, 0.0, 1.0, x, y]);
-        let ctm = concat(placed, orientation_matrix(orientation, width, height));
+        let placed = checked_concat(self.state.ctm, [1.0, 0.0, 0.0, 1.0, x, y])?;
+        let ctm = checked_concat(placed, orientation_matrix(orientation, width, height))?;
         let op = Op::Image {
             image: handle,
             size,

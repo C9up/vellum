@@ -660,18 +660,36 @@ impl Composer {
                 .ok_or_else(|| invalid_options("page size out of range"))?;
             let mut writer = document.start_page_with(page_settings);
             let mut surface = writer.surface();
-            let marked = ops::replay(
-                &mut surface,
-                &page.ops,
-                &ops::Resources {
-                    fonts: &self.fonts,
-                    svgs: &self.svgs,
-                    images: &self.images,
-                    paints: &self.paints,
-                },
-                &self.marks,
-                &held,
-            );
+            // A panic inside krilla would unwind through the surface and the
+            // page, whose destructors assert they were finished: a panic
+            // during unwinding, which aborts the process rather than reaching
+            // any handler. It is caught here instead, and the half-written
+            // page is leaked rather than dropped.
+            let replayed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ops::replay(
+                    &mut surface,
+                    &page.ops,
+                    &ops::Resources {
+                        fonts: &self.fonts,
+                        svgs: &self.svgs,
+                        images: &self.images,
+                        paints: &self.paints,
+                    },
+                    &self.marks,
+                    &held,
+                )
+            }));
+            let marked = match replayed {
+                Ok(marked) => marked,
+                Err(_) => {
+                    std::mem::forget(surface);
+                    std::mem::forget(writer);
+                    return Err(ComposeError::new(
+                        "WRITE_FAILED",
+                        "a page could not be drawn, and the document is unusable",
+                    ));
+                }
+            };
             surface.finish();
             for (id, identifier) in marked {
                 if let Some(sequences) = identifiers.marks.get_mut(id) {

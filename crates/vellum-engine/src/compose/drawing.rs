@@ -6,8 +6,8 @@ use std::sync::Arc;
 use krilla::paint::{FillRule, LineCap, LineJoin};
 
 use super::graphics::{
-    build_path, concat, opacity, transform_segments, Clip, Gradient, Matrix, Paint, Segment,
-    SpotColour,
+    build_path, checked_concat, opacity, transform_segments, Clip, Gradient, Matrix, Paint,
+    Segment, SpotColour,
 };
 use super::ops::{FillSpec, Op, StrokeSpec};
 use super::{ComposeError, Composer};
@@ -52,7 +52,7 @@ impl Composer {
 
     pub fn transform(&mut self, matrix: Matrix) -> Result<(), ComposeError> {
         finite(&matrix, "a transform")?;
-        self.state.ctm = concat(self.state.ctm, matrix);
+        self.state.ctm = checked_concat(self.state.ctm, matrix)?;
         Ok(())
     }
 
@@ -487,5 +487,46 @@ mod tests {
             })
         });
         assert!(has_separation, "the colour is written as a Separation");
+    }
+
+    /// Two scales of 1e20 are each finite; their product is not, and krilla
+    /// panicked on it at end() in a way that aborted the process.
+    #[test]
+    fn a_transform_whose_product_overflows_is_refused() {
+        let mut document = document();
+        document
+            .transform([1e20, 0.0, 0.0, 1e20, 0.0, 0.0])
+            .unwrap();
+        let error = document
+            .transform([1e20, 0.0, 0.0, 1e20, 0.0, 0.0])
+            .unwrap_err();
+        assert_eq!(error.code, "INVALID_OPTIONS");
+        assert!(error.message.contains("overflows"), "{}", error.message);
+    }
+
+    /// A transform finite on its own, drawing coordinates whose product with
+    /// it is not: the shape is left out, and the document still ends.
+    #[test]
+    fn a_shape_mapped_past_finite_numbers_is_left_out_and_the_document_ends() {
+        let mut document = document();
+        document
+            .set_fill(Paint::Colour(Colour::Rgb(255, 0, 0)))
+            .unwrap();
+        document
+            .transform([3e38, 0.0, 0.0, 3e38, 0.0, 0.0])
+            .unwrap();
+        document
+            .paint_path(
+                &rect(10.0, 10.0, 50.0, 50.0),
+                Some(FillRule::NonZero),
+                false,
+            )
+            .unwrap();
+        document.set_line_width(1e38).unwrap();
+        document
+            .paint_path(&rect(0.0, 0.0, 1.0, 1.0), None, true)
+            .unwrap();
+        let bytes = document.end().expect("the document ends");
+        assert!(lopdf::Document::load_mem(&bytes).is_ok());
     }
 }

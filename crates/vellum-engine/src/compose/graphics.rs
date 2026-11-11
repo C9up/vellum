@@ -41,6 +41,34 @@ pub fn concat(outer: Matrix, inner: Matrix) -> Matrix {
     ]
 }
 
+/// `concat`, refused when the product is not finite numbers: two scales of
+/// 1e20 are each finite, and their product is not, which krilla cannot
+/// draw with.
+pub fn checked_concat(outer: Matrix, inner: Matrix) -> Result<Matrix, ComposeError> {
+    let product = concat(outer, inner);
+    if product.iter().all(|value| value.is_finite()) {
+        Ok(product)
+    } else {
+        Err(ComposeError::new(
+            "INVALID_OPTIONS",
+            "the transform overflows: its product with the current one is not finite",
+        ))
+    }
+}
+
+/// Whether the box from `(x0, y0)` to `(x1, y1)`, mapped through `matrix`,
+/// stays finite numbers. krilla unwraps the transformed bounds of what it
+/// draws, and a panic in the middle of writing a page cannot be recovered.
+pub fn maps_finitely(matrix: Matrix, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> bool {
+    let [a, b, c, d, e, f] = matrix;
+    [x0, y0, x1, y1, a, b, c, d, e, f]
+        .iter()
+        .all(|value| value.is_finite())
+        && [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+            .iter()
+            .all(|&(x, y)| (a * x + c * y + e).is_finite() && (b * x + d * y + f).is_finite())
+}
+
 pub fn krilla_transform(matrix: Matrix) -> Transform {
     let [a, b, c, d, e, f] = matrix;
     Transform::from_row(a, b, c, d, e, f)
@@ -352,6 +380,24 @@ pub enum Segment {
     Cubic(f32, f32, f32, f32, f32, f32),
     Quad(f32, f32, f32, f32),
     Close,
+}
+
+/// The box every point of `segments` lies in, control points included, which
+/// a curve never leaves.
+pub fn segment_bounds(segments: &[Segment]) -> Option<(f32, f32, f32, f32)> {
+    let mut points = segments.iter().flat_map(|segment| {
+        let coordinates: Vec<(f32, f32)> = match *segment {
+            Segment::Move(x, y) | Segment::Line(x, y) => vec![(x, y)],
+            Segment::Cubic(x1, y1, x2, y2, x, y) => vec![(x1, y1), (x2, y2), (x, y)],
+            Segment::Quad(x1, y1, x, y) => vec![(x1, y1), (x, y)],
+            Segment::Close => Vec::new(),
+        };
+        coordinates
+    });
+    let (x, y) = points.next()?;
+    Some(points.fold((x, y, x, y), |(x0, y0, x1, y1), (x, y)| {
+        (x0.min(x), y0.min(y), x1.max(x), y1.max(y))
+    }))
 }
 
 /// At most this many segments in one path.

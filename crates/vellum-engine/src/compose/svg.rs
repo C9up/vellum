@@ -109,7 +109,7 @@ impl Composer {
         let Some(size) = Size::from_wh(width, height) else {
             return Ok(());
         };
-        let ctm = super::graphics::concat(self.state.ctm, [1.0, 0.0, 0.0, 1.0, x, y]);
+        let ctm = super::graphics::checked_concat(self.state.ctm, [1.0, 0.0, 0.0, 1.0, x, y])?;
         let op = Op::Svg {
             svg: handle,
             size,
