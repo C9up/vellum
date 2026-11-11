@@ -1614,9 +1614,10 @@ fn place(shaped: &[Shaped], chunk: &str, offset: usize) -> Vec<PlacedGlyph> {
     shaped
         .iter()
         .map(|glyph| {
+            // The first cluster after this one, by binary search: a scan from
+            // the start for every glyph made a long line quadratic.
             let end = starts
-                .iter()
-                .find(|&&start| start > glyph.cluster)
+                .get(starts.partition_point(|&start| start <= glyph.cluster))
                 .copied()
                 .unwrap_or(chunk.len());
             PlacedGlyph {
@@ -2157,6 +2158,38 @@ mod tests {
             "a chunk past {WIDTH_CACHE_CHUNK} bytes was kept"
         );
         assert!(held < 4 * 1024 * 1024, "the cache holds {held} bytes");
+    }
+
+    /// One line drawn as given: placing its glyphs scanned every cluster for
+    /// each glyph, quadratic in the line's length.
+    #[test]
+    fn a_long_unwrapped_line_is_placed_in_linear_time() {
+        let mut document = self::document();
+        let line = "a".repeat(256 * 1024);
+        let started = std::time::Instant::now();
+        unwrapped(&mut document, &line, 72.0, 72.0);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn each_glyph_spans_to_the_next_cluster() {
+        let shaped = |cluster| Shaped {
+            glyph: 1,
+            cluster,
+            advance: 0.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+        };
+        let placed = place(&[shaped(0), shaped(0), shaped(2), shaped(5)], "abcdefg", 10);
+        let spans: Vec<(usize, usize)> = placed
+            .iter()
+            .map(|glyph| (glyph.text_start, glyph.text_end))
+            .collect();
+        assert_eq!(spans, [(10, 12), (10, 12), (12, 15), (15, 17)]);
     }
 
     #[test]
