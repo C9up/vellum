@@ -226,3 +226,40 @@ describe("PdfDocument — tables", () => {
 		}
 	});
 });
+
+describe("PdfDocument — spans a table cannot hold", () => {
+	it("refuses a span past the ceiling before claiming a slot", () => {
+		const started = Date.now();
+		expect(() =>
+			new PdfDocument().table({ data: [[{ text: "x", colSpan: 2e6 }]] }),
+		).toThrow(expect.objectContaining({ code: "E_VELLUM_INVALID_OPTIONS" }));
+		expect(() =>
+			new PdfDocument().table({ data: [[{ text: "x", rowSpan: 1e8 }]] }),
+		).toThrow(/at most 1000/);
+		expect(Date.now() - started).toBeLessThan(1000);
+	});
+
+	it("refuses a span that is not a whole number", () => {
+		for (const colSpan of [1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+			expect(
+				() => new PdfDocument().table({ data: [[{ text: "x", colSpan }]] }),
+				String(colSpan),
+			).toThrow(/whole number/);
+		}
+	});
+
+	it("refuses more columns than a table may have", () => {
+		const row = Array.from({ length: 1001 }, () => "x");
+		expect(() => new PdfDocument().table({ data: [row] })).toThrow(
+			/at most 1000 columns/,
+		);
+	});
+
+	it("still floors a span below one, as pdfkit does", () => {
+		expect(() =>
+			new PdfDocument().table({
+				data: [[{ text: "a", colSpan: 0 }, "b"]],
+			}),
+		).not.toThrow();
+	});
+});

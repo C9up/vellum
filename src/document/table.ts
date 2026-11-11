@@ -8,6 +8,7 @@
  * repeats the first rows at the top of every page the table runs onto.
  */
 
+import { VellumError } from "../errors.js";
 import type { ColourValue } from "./colours.js";
 import type { FontSource, MarkOptions, TextOptions } from "./PdfDocument.js";
 import type { Side, SideDefinition, Sides, Size } from "./sizes.js";
@@ -206,6 +207,34 @@ interface ResolvedRow {
 }
 
 const SIDES = ["top", "right", "bottom", "left"] as const;
+
+/**
+ * How many rows and columns one cell may span, and how many columns a table
+ * may have. Spans often come from markup a user wrote, and each spanned slot
+ * is claimed and styled one by one: a colSpan of two million cost half a
+ * gigabyte before anything was drawn.
+ */
+export const MAX_ROW_SPAN = 1000;
+export const MAX_COL_SPAN = 64;
+export const MAX_COLUMNS = 1000;
+
+/** A span as pdfkit reads it, floored at 1, and refused past `max`. */
+function spanOf(name: string, value: number | undefined, max: number): number {
+	if (value === undefined) return 1;
+	if (!Number.isInteger(value)) {
+		throw new VellumError(
+			"INVALID_OPTIONS",
+			`A cell's ${name} must be a whole number, got ${value}.`,
+		);
+	}
+	if (value > max) {
+		throw new VellumError(
+			"INVALID_OPTIONS",
+			`A cell's ${name} is at most ${max}, got ${value}.`,
+		);
+	}
+	return Math.max(1, value);
+}
 
 function isTuple(value: unknown): value is readonly unknown[] {
 	return Array.isArray(value);
@@ -514,8 +543,8 @@ export class PdfTable<Document> {
 					: String(cell.text),
 			rowIndex,
 			colIndex,
-			rowSpan: Math.max(1, cell.rowSpan ?? 1),
-			colSpan: Math.max(1, cell.colSpan ?? 1),
+			rowSpan: spanOf("rowSpan", cell.rowSpan, MAX_ROW_SPAN),
+			colSpan: spanOf("colSpan", cell.colSpan, MAX_COL_SPAN),
 			padding: {
 				top: points("0.25em")(padding.top),
 				right: points("0.25em")(padding.right),
@@ -620,6 +649,12 @@ export class PdfTable<Document> {
 
 	#ensure(row: ResolvedCell[]): void {
 		const columns = row.reduce((sum, cell) => sum + cell.colSpan, 0);
+		if (columns > MAX_COLUMNS) {
+			throw new VellumError(
+				"INVALID_OPTIONS",
+				`A table has at most ${MAX_COLUMNS} columns, this one ${columns}.`,
+			);
+		}
 		const stars: Array<ResolvedColumn | undefined> = [];
 		let starMinimum = 0;
 		let unclaimed = this.#maxWidth;
