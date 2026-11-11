@@ -395,6 +395,25 @@ describe("asking the issuer named by the certificate", () => {
 		expect(report?.revocation?.status).toBe("unknown");
 	});
 
+	it("asks once per certificate, however many signatures carry it", async () => {
+		const { http, vellum, signed } = await signedUnderTheAuthority();
+		const thrice = await vellum.sign(
+			await vellum.sign(signed, { signer: "internal" }),
+			{ signer: "internal" },
+		);
+		http.on("http://ocsp.vellum.test/", { body: new Uint8Array([0x30, 0x00]) });
+
+		const reports = await vellum.verifySignatures(thrice, {
+			checkRevocation: true,
+		});
+
+		expect(reports).toHaveLength(3);
+		expect(http.requests).toHaveLength(1);
+		for (const report of reports) {
+			expect(report.revocation?.status).toBe("unknown");
+		}
+	});
+
 	it("does not call an unanswered responder good", async () => {
 		const { http, vellum, signed } = await signedUnderTheAuthority();
 		http.on("http://ocsp.vellum.test/", { status: 503, body: "no" });

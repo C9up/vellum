@@ -322,3 +322,46 @@ export async function askResponder(
 		owned?.close();
 	}
 }
+
+/** How many responders one call asks at the same time. */
+export const REVOCATION_CONCURRENCY = 4;
+
+/**
+ * How many distinct certificates one call asks about. The responders, and how
+ * many there are, are named by the document being checked.
+ */
+export const MAX_REVOCATION_LOOKUPS = 16;
+
+/**
+ * Ask once per distinct key, a few at a time, and no more than `limit` keys:
+ * the rest answer `beyond(limit)` without anything being asked.
+ *
+ * A document carries up to a hundred signatures, each naming its responder.
+ * Asked all at once, one upload had the server open a hundred sockets to
+ * addresses of its choosing; asked once per certificate, a document signed a
+ * hundred times by one certificate asks once.
+ */
+export async function askEachOnce<T>(
+	keys: ReadonlyArray<string>,
+	ask: (key: string) => Promise<T>,
+	beyond: (limit: number) => T,
+	{
+		concurrency = REVOCATION_CONCURRENCY,
+		limit = MAX_REVOCATION_LOOKUPS,
+	}: { concurrency?: number; limit?: number } = {},
+): Promise<Map<string, T>> {
+	const distinct = [...new Set(keys)];
+	const answers = new Map<string, T>();
+	for (const key of distinct.slice(limit)) answers.set(key, beyond(limit));
+	const asked = distinct.slice(0, limit);
+	let next = 0;
+	const worker = async () => {
+		for (let key = asked[next++]; key !== undefined; key = asked[next++]) {
+			answers.set(key, await ask(key));
+		}
+	};
+	await Promise.all(
+		Array.from({ length: Math.min(concurrency, asked.length) }, worker),
+	);
+	return answers;
+}

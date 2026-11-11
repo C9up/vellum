@@ -43,7 +43,9 @@ import {
 	verifySignaturesNative,
 } from "./native.js";
 import {
+	askEachOnce,
 	askResponder,
+	MAX_REVOCATION_LOOKUPS,
 	mayAsk,
 	type ResponderClient,
 	type ResponderPolicy,
@@ -192,7 +194,10 @@ export interface VerifyOptions {
 	/**
 	 * Ask each certificate's issuer whether it still stands.
 	 *
-	 * A network call per signature, to the responder the certificate names.
+	 * A network call per distinct signing certificate, to the responder it
+	 * names: four at a time, and no more than sixteen certificates per call —
+	 * the rest answer `"unknown"` without anything being asked.
+	 *
 	 * The answer has **three** values, not two: `"good"`, `"revoked"`, and
 	 * `"unknown"` for everything else — the responder was unreachable,
 	 * answered about something else, or could not be believed. Treating
@@ -782,16 +787,42 @@ export class Vellum {
 		});
 		if (options.checkRevocation !== true) return reports;
 
-		return Promise.all(
-			reports.map(async (report) => ({
-				...report,
-				revocation: await this.#revocationOf(
-					report,
-					options.revocationTimeoutMs ?? 10_000,
-					options.allowedResponders ?? this.#config.allowedResponders,
-				),
-			})),
+		// One question per certificate and instant, a few at a time, and a
+		// bounded number of them: the document names the responders.
+		const keyOf = (report: SignatureReport) =>
+			[
+				report.signerCertificate?.toString("base64") ?? "",
+				report.issuerCertificate?.toString("base64") ?? "",
+				String(report.momentAt ?? ""),
+			].join("|");
+		const byKey = new Map<string, SignatureReport>();
+		for (const report of reports) {
+			const key = keyOf(report);
+			if (!byKey.has(key)) byKey.set(key, report);
+		}
+		const notAsked = (limit: number): RevocationAnswer => ({
+			status: "unknown",
+			detail: `not asked: one check asks about at most ${limit} certificates`,
+		});
+		const answers = await askEachOnce(
+			[...byKey.keys()],
+			async (key) => {
+				const report = byKey.get(key);
+				return report === undefined
+					? notAsked(MAX_REVOCATION_LOOKUPS)
+					: this.#revocationOf(
+							report,
+							options.revocationTimeoutMs ?? 10_000,
+							options.allowedResponders ?? this.#config.allowedResponders,
+						);
+			},
+			notAsked,
 		);
+		return reports.map((report) => ({
+			...report,
+			revocation:
+				answers.get(keyOf(report)) ?? notAsked(MAX_REVOCATION_LOOKUPS),
+		}));
 	}
 
 	/**
