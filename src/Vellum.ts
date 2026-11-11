@@ -9,6 +9,7 @@
 
 import { readFile } from "node:fs/promises";
 
+import { checkCeilings } from "./config.js";
 import { VellumError } from "./errors.js";
 import type {
 	DocumentInfo,
@@ -350,6 +351,7 @@ export class Vellum {
 	readonly #fonts = new Map<string, Buffer>();
 
 	constructor(config: VellumConfig = {}) {
+		checkCeilings(config);
 		this.#config = config;
 	}
 
@@ -930,6 +932,7 @@ export class Vellum {
 		maxOperations?: number;
 	} {
 		const merged = { ...this.#config, ...options };
+		checkCeilings(merged);
 		return {
 			scale: merged.scale,
 			width: merged.width,

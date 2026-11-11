@@ -121,37 +121,45 @@ pub struct RenderOptions {
     /// The most pixels one page may rasterise to. 50 million by default —
     /// room for A4 at 600 DPI. A page declares its own size, so without a
     /// ceiling a document alone could ask for gigabytes.
-    pub max_pixels: Option<u32>,
+    pub max_pixels: Option<f64>,
     /// The most pixels `renderAll` may rasterise across every page. 500
     /// million by default; checked before the first page is drawn.
-    pub max_total_pixels: Option<u32>,
+    pub max_total_pixels: Option<f64>,
     /// Bytes of decoded stream data one page may need. 256 MiB by default.
-    pub max_decoded_bytes: Option<u32>,
+    pub max_decoded_bytes: Option<f64>,
     /// Content operators and glyphs one page may take to draw. Ten million
     /// by default.
-    pub max_operations: Option<u32>,
+    pub max_operations: Option<f64>,
 }
 
 /// What reading one page may cost, for the calls that do not rasterise.
 #[napi(object)]
 pub struct ReadLimits {
     /// Bytes of decoded stream data one page may need. 256 MiB by default.
-    pub max_decoded_bytes: Option<u32>,
+    pub max_decoded_bytes: Option<f64>,
     /// Content operators and glyphs one page may take to draw. Ten million
     /// by default.
-    pub max_operations: Option<u32>,
+    pub max_operations: Option<f64>,
 }
 
-fn positive(name: &str, value: u32) -> std::result::Result<u64, String> {
-    if value == 0 {
-        return Err(format!("{name} must be greater than zero"));
+/// A ceiling as JavaScript hands it: a whole number from 1 to `u32::MAX`.
+///
+/// Taken as `f64` and checked here, because napi's `u32` conversion is
+/// ECMAScript's ToUint32: `-1` would arrive as 4 294 967 295 and `1.5` as 1,
+/// turning a typo in a configuration into no ceiling at all.
+fn positive(name: &str, value: f64) -> std::result::Result<u64, String> {
+    if value.fract() != 0.0 || !(1.0..=f64::from(u32::MAX)).contains(&value) {
+        return Err(format!(
+            "{name} must be a whole number from 1 to {}, got {value}",
+            u32::MAX
+        ));
     }
-    Ok(u64::from(value))
+    Ok(value as u64)
 }
 
 fn to_engine_limits(
-    max_decoded_bytes: Option<u32>,
-    max_operations: Option<u32>,
+    max_decoded_bytes: Option<f64>,
+    max_operations: Option<f64>,
 ) -> std::result::Result<vellum_engine::ReadLimits, String> {
     let mut limits = vellum_engine::ReadLimits::default();
     if let Some(value) = max_decoded_bytes {
@@ -189,10 +197,8 @@ fn to_engine_options(
         height: band.height as f32,
     });
     if let Some(max) = options.max_pixels {
-        if max == 0 {
-            return Err("maxPixels must be greater than zero".to_string());
-        }
-        engine.max_pixels = max;
+        engine.max_pixels = u32::try_from(positive("maxPixels", max)?)
+            .map_err(|_| "maxPixels is out of range".to_string())?;
     }
     if let Some(max) = options.max_total_pixels {
         engine.max_total_pixels = positive("maxTotalPixels", max)?;

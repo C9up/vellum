@@ -1,3 +1,4 @@
+import { VellumError } from "./errors.js";
 import type { VellumConfig } from "./Vellum.js";
 
 /**
@@ -31,6 +32,7 @@ export interface VellumConfigInput extends Omit<VellumConfig, "format"> {
  * an indirection over a single implementation.
  */
 export function defineConfig(config: VellumConfigInput): VellumConfig {
+	checkCeilings(config);
 	const { format, ...rest } = config;
 	if (format === undefined) return rest;
 	if (format !== "png" && format !== "jpeg") {
@@ -42,6 +44,40 @@ export function defineConfig(config: VellumConfigInput): VellumConfig {
 		);
 	}
 	return { ...rest, format };
+}
+
+/** The ceilings rendering and reading take, as numbers. */
+export interface Ceilings {
+	maxPixels?: number;
+	maxTotalPixels?: number;
+	maxDecodedBytes?: number;
+	maxOperations?: number;
+}
+
+/**
+ * Refuse a ceiling that is not a whole number from 1 to 4 294 967 295.
+ *
+ * The engine takes them as 32-bit counts, and the conversion JavaScript
+ * applies on the way there wraps rather than refuses: `-1` would become four
+ * billion and `1.5` one, a typo in `config/vellum.ts` turning a ceiling into
+ * none without a word.
+ */
+export function checkCeilings(ceilings: Ceilings): void {
+	for (const name of [
+		"maxPixels",
+		"maxTotalPixels",
+		"maxDecodedBytes",
+		"maxOperations",
+	] as const) {
+		const value = ceilings[name];
+		if (value === undefined) continue;
+		if (!Number.isInteger(value) || value < 1 || value > 0xffff_ffff) {
+			throw new VellumError(
+				"INVALID_OPTIONS",
+				`${name} must be a whole number from 1 to 4294967295, got ${value}.`,
+			);
+		}
+	}
 }
 
 export type { VellumConfig };

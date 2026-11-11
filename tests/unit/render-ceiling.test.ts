@@ -7,7 +7,8 @@
  * `render(pdf)` and nothing else.
  */
 import { describe, expect, it } from "vitest";
-import { A4, createBlank } from "../../src/index.js";
+import { A4, createBlank, defineConfig } from "../../src/index.js";
+import { renderPageNative } from "../../src/native.js";
 import { Vellum } from "../../src/Vellum.js";
 
 describe("vellum > the size a page may rasterise to", () => {
@@ -42,5 +43,38 @@ describe("vellum > the size a page may rasterise to", () => {
 		await expect(
 			new Vellum().render(createBlank([A4]), { scale: 200 }),
 		).rejects.toThrow(/exceeds the 65535px limit/);
+	});
+});
+
+describe("vellum > a ceiling that is not a count", () => {
+	// The engine's 32-bit conversion wraps: -1 would be four billion pixels,
+	// 1.5 would be one, a typo turning a ceiling into none.
+	const wrong = [-1, 0, 1.5, Number.NaN, 2 ** 32];
+
+	it("is refused in the configuration", () => {
+		for (const value of wrong) {
+			expect(
+				() => new Vellum({ maxDecodedBytes: value }),
+				String(value),
+			).toThrow(expect.objectContaining({ code: "E_VELLUM_INVALID_OPTIONS" }));
+			expect(() => defineConfig({ maxPixels: value }), String(value)).toThrow(
+				/whole number/,
+			);
+		}
+	});
+
+	it("is refused on a call", async () => {
+		await expect(
+			new Vellum().render(createBlank([A4]), { maxOperations: -1 }),
+		).rejects.toMatchObject({ code: "E_VELLUM_INVALID_OPTIONS" });
+	});
+
+	it("is refused by the engine itself", async () => {
+		for (const value of wrong) {
+			await expect(
+				renderPageNative(createBlank([A4]), 0, { maxPixels: value }),
+				String(value),
+			).rejects.toThrow(/whole number/);
+		}
 	});
 });
