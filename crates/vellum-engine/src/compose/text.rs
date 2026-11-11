@@ -19,6 +19,7 @@
 //! text drawn while it waits does not disturb it.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use rustybuzz::Feature;
 use unicode_bidi::{BidiInfo, Level};
@@ -36,6 +37,10 @@ const SOFT_HYPHEN: char = '\u{00AD}';
 const HYPHEN: &str = "-";
 /// Words remembered with their widths; past this the cache starts over.
 const WIDTH_CACHE_LIMIT: usize = 50_000;
+/// The longest text one `text()`, `heightOfString` or `boundsOfString`
+/// call lays out, in bytes: a book chapter. Laying text out is linear in its
+/// length, and this bounds what one call, run on the caller's thread, costs.
+pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {
@@ -230,11 +235,23 @@ struct Break {
 }
 
 /// A piece of a word cut because it was wider than the line.
+///
+/// The word and where its graphemes start are kept whole, shared between its
+/// pieces, and the rest is a position in them: collecting and re-joining the
+/// rest once per line made cutting one long word quadratic in its length.
 #[derive(Debug, Clone, PartialEq)]
 struct Piece {
-    /// The rest of the word still to place.
-    rest: String,
+    /// The whole word being cut.
+    word: Arc<str>,
+    /// Where each grapheme of `word` starts, then its length.
+    bounds: Arc<[usize]>,
+    /// The first grapheme of the rest still to place.
+    from: usize,
+    /// The width of the rest: measured when `exact`, otherwise derived from
+    /// the previous piece's, which is only ever used to tell that the rest
+    /// does not fit the line.
     width: f32,
+    exact: bool,
     /// The break the whole word ends at.
     end: Break,
     /// The break before this piece; `None` on the first piece of the text.
@@ -463,6 +480,15 @@ impl Composer {
         options: &TextOptions,
         sink: Sink,
     ) -> Result<TextRun, ComposeError> {
+        if text.len() > MAX_TEXT_BYTES {
+            return Err(ComposeError::new(
+                "INVALID_OPTIONS",
+                format!(
+                    "a text of {} bytes is over {MAX_TEXT_BYTES}: lay it out in several calls",
+                    text.len()
+                ),
+            ));
+        }
         self.current_font()?;
         let features = parse_features(options.features.as_deref().unwrap_or(&[]))?;
         // pdfkit collapses runs of white space when word spacing is set.
@@ -767,9 +793,17 @@ impl Composer {
         let word = run.text[start..end.position].to_string();
         let width = self.word_width(run, &word)?;
         if width > run.wrapper.line_width + run.wrapper.continued_x {
+            let bounds: Arc<[usize]> = word
+                .grapheme_indices(true)
+                .map(|(at, _)| at)
+                .chain(std::iter::once(word.len()))
+                .collect();
             let piece = Piece {
-                rest: word,
+                word: Arc::from(word),
+                bounds,
+                from: 0,
                 width,
+                exact: true,
                 end,
                 last: run.last,
             };
@@ -786,19 +820,28 @@ impl Composer {
     /// pdfkit's cutting of a word wider than the line, a piece at a time.
     fn next_piece(&mut self, run: &mut TextRun, piece: Piece) -> Result<Flow, ComposeError> {
         let Piece {
-            rest,
+            word,
+            bounds,
+            from,
             mut width,
+            exact,
             end,
             last,
         } = piece;
-        let graphemes: Vec<&str> = rest.graphemes(true).collect();
-        let total = graphemes.len();
-        let prefix = |count: usize| -> String { graphemes[..count].concat() };
+        let total = bounds.len() - 1 - from;
+        let prefix = |count: usize| -> &str { &word[bounds[from]..bounds[from + count]] };
+        // A derived width only ever decides that the rest does not fit; when
+        // it says it might, the rest is measured, so what is placed is
+        // measured exactly as it would have been.
+        if !exact && run.wrapper.fits(width) {
+            width = self.word_width(run, prefix(total))?;
+        }
+        let rest_width = width;
         let mut count;
         let mut might_grow = false;
         if !run.wrapper.fits(width) {
             count = ((run.wrapper.space_left / (width / total as f32)).ceil() as usize).min(total);
-            width = self.word_width(run, &prefix(count))?;
+            width = self.word_width(run, prefix(count))?;
             might_grow = run.wrapper.fits(width) && count < total;
         } else {
             count = total;
@@ -807,31 +850,38 @@ impl Composer {
         while must_shrink || might_grow {
             if must_shrink {
                 count -= 1;
-                width = self.word_width(run, &prefix(count))?;
+                width = self.word_width(run, prefix(count))?;
                 must_shrink = !run.wrapper.fits(width) && count > 0;
             } else {
                 count += 1;
-                width = self.word_width(run, &prefix(count))?;
+                width = self.word_width(run, prefix(count))?;
                 must_shrink = !run.wrapper.fits(width) && count > 0;
                 might_grow = run.wrapper.fits(width) && count < total;
             }
         }
         if count == 0 && run.wrapper.space_left == run.wrapper.line_width {
             count = 1;
-            width = self.word_width(run, &prefix(count))?;
+            width = self.word_width(run, prefix(count))?;
         }
         let head = prefix(count);
-        let tail: String = graphemes[count..].concat();
         let fake = Break {
             position: end.position,
             required: end.required || count < total,
         };
-        let flow = self.on_word(run, &head, width, fake, last)?;
-        if !tail.is_empty() && !matches!(flow, Flow::Stop) {
-            let tail_width = self.word_width(run, &tail)?;
+        // What is left is the rest less the head, as `word_width` measures
+        // (the character spacing between the two, the spacing it adds to
+        // every measurement): exact but for any kerning across the cut.
+        let wrapper = &run.wrapper;
+        let tail_width = rest_width - width + wrapper.character_spacing + wrapper.word_spacing
+            - wrapper.character_spacing * wrapper.horizontal_scaling / 100.0;
+        let flow = self.on_word(run, head, width, fake, last)?;
+        if count < total && !matches!(flow, Flow::Stop) {
             run.pieces = Some(Piece {
-                rest: tail,
+                word: Arc::clone(&word),
+                bounds: Arc::clone(&bounds),
+                from: from + count,
                 width: tail_width,
+                exact: false,
                 end,
                 last: Some(Break {
                     position: end.position,
@@ -2037,6 +2087,44 @@ mod tests {
             },
         );
         assert_layout("long_word", &document);
+    }
+
+    /// One long unbroken word, cut across lines: each line used to collect
+    /// and re-measure the whole rest of it, quadratic in its length.
+    #[test]
+    fn a_long_unbroken_word_is_cut_in_linear_time() {
+        let word = "a".repeat(256 * 1024);
+        let started = std::time::Instant::now();
+        let mut document = self::document();
+        document.set_font_size(11.0).unwrap();
+        text(
+            &mut document,
+            &word,
+            Some((72.0, 72.0)),
+            TextOptions {
+                width: Some(300.0),
+                ..defaults()
+            },
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "took {:?}",
+            started.elapsed()
+        );
+        let drawn: usize = fragments(&document)
+            .iter()
+            .map(|fragment| fragment.text.len())
+            .sum();
+        assert_eq!(drawn, word.len(), "every piece is drawn");
+    }
+
+    #[test]
+    fn a_text_past_the_ceiling_is_refused() {
+        let mut document = self::document();
+        let error = document
+            .text(&"a ".repeat(MAX_TEXT_BYTES / 2 + 1), &defaults())
+            .expect_err("refused");
+        assert!(error.to_string().contains("over 1048576"), "{error}");
     }
 
     #[test]

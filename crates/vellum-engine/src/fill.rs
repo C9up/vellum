@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use lopdf::{dictionary, Document, Object, ObjectId, Stream};
 
 use crate::form::{fields_of, FieldKind};
-use crate::metrics::width_of;
+use crate::metrics::{advance_of, width_of};
 use crate::stamp_text::{escape_pdf_literal, to_win_ansi, StandardFont};
 
 /// What a caller asks to be written into one field.
@@ -197,6 +197,11 @@ fn widget_size(document: &Document, widget_id: ObjectId) -> Option<(f32, f32)> {
 /// stream names, and this is the one it names.
 const FONT: StandardFont = StandardFont::Helvetica;
 
+/// The longest value a field is filled with, in bytes. A form field is a
+/// name, an address, a paragraph; values are end-user input, and laying one
+/// out runs once per type size tried when the field sizes its own text.
+pub const MAX_VALUE_BYTES: usize = 64 * 1024;
+
 const PADDING: f32 = 2.0;
 /// Baseline-to-baseline, as a multiple of the type size.
 const LEADING: f32 = 1.2;
@@ -206,37 +211,53 @@ const LEADING: f32 = 1.2;
 /// Words are kept whole where they can be. A word too long for the line on its
 /// own is broken across lines rather than allowed to run past the edge —
 /// truncating it would silently lose part of the answer.
+///
+/// Widths are summed as the text is walked, one byte at a time, and never
+/// measured again: re-measuring the rest of a long word once per line made a
+/// value of one unbroken megabyte cost forty seconds.
 fn wrap(paragraph: &[u8], size: f32, available: f32) -> Vec<Vec<u8>> {
+    let fits = |thousandths: u64| thousandths as f32 * size / 1000.0 <= available;
+    let advance = |byte: u8| u64::from(advance_of(FONT, byte));
+    let space = advance(b' ');
+
     let mut lines: Vec<Vec<u8>> = Vec::new();
     let mut current: Vec<u8> = Vec::new();
+    let mut current_width = 0u64;
 
     for word in paragraph.split(|byte| *byte == b' ') {
         let mut word = word;
+        let mut word_width: u64 = word.iter().map(|byte| advance(*byte)).sum();
         loop {
-            let separator: &[u8] = if current.is_empty() { b"" } else { b" " };
-            let candidate = width_of(FONT, &current, size)
-                + width_of(FONT, separator, size)
-                + width_of(FONT, word, size);
-
-            if candidate <= available {
-                current.extend_from_slice(separator);
+            let separator = if current.is_empty() { 0 } else { space };
+            if fits(current_width + separator + word_width) {
+                if !current.is_empty() {
+                    current.push(b' ');
+                }
                 current.extend_from_slice(word);
+                current_width += separator + word_width;
                 break;
             }
             if !current.is_empty() {
                 // Try the word again, alone on the next line.
                 lines.push(std::mem::take(&mut current));
+                current_width = 0;
                 continue;
             }
 
             // The word does not fit even on a line of its own, so it is cut at
             // the last character that does — at least one, or this would spin.
             let mut taken = 1;
-            while taken < word.len() && width_of(FONT, &word[..taken + 1], size) <= available {
+            let mut taken_width = word.first().map_or(0, |byte| advance(*byte));
+            while let Some(&next) = word.get(taken) {
+                if !fits(taken_width + advance(next)) {
+                    break;
+                }
+                taken_width += advance(next);
                 taken += 1;
             }
             lines.push(word[..taken].to_vec());
             word = &word[taken..];
+            word_width -= taken_width;
             if word.is_empty() {
                 break;
             }
@@ -477,6 +498,12 @@ pub fn fill_form(bytes: &[u8], values: &[FieldValue]) -> Result<Vec<u8>, String>
 
         if field.read_only {
             return Err(format!("the field {name:?} is read-only"));
+        }
+        if value.len() > MAX_VALUE_BYTES {
+            return Err(format!(
+                "{name:?} holds at most {MAX_VALUE_BYTES} bytes, got {}",
+                value.len()
+            ));
         }
         if let Some(max) = field.max_length {
             if value.chars().count() > max as usize {
@@ -913,6 +940,58 @@ pub(crate) mod tests {
             width_of(FONT, long, size) <= 150.0 - 2.0 * PADDING,
             "and the whole answer has to fit the box"
         );
+    }
+
+    /// One unbroken word, cut across lines. Each line used to re-measure the
+    /// whole rest of the word: a megabyte took forty seconds. Every line still
+    /// fits, and nothing is lost.
+    #[test]
+    fn a_long_unbroken_word_is_cut_in_linear_time() {
+        let word = vec![b'W'; 1024 * 1024];
+        let started = std::time::Instant::now();
+        let lines = wrap(&word, 12.0, 296.0);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(lines.iter().all(|line| width_of(FONT, line, 12.0) <= 296.0));
+        assert_eq!(lines.iter().map(Vec::len).sum::<usize>(), word.len());
+        assert!(lines.len() > 1000);
+    }
+
+    /// The cut keeps what the measuring by whole strings gave.
+    #[test]
+    fn wrapping_breaks_where_whole_measurements_would() {
+        let lines = wrap(
+            b"Le present mandat couvre la prevoyance professionnelle",
+            12.0,
+            120.0,
+        );
+        for line in &lines {
+            assert!(width_of(FONT, line, 12.0) <= 120.0, "{line:?}");
+        }
+        let joined = lines.join(&b' ');
+        assert_eq!(
+            joined,
+            b"Le present mandat couvre la prevoyance professionnelle"
+        );
+        assert_eq!(lines[0], b"Le present mandat");
+    }
+
+    #[test]
+    fn a_value_past_the_ceiling_is_refused() {
+        let error = fill_form(
+            &one_field([50, 600, 350, 680], MULTILINE, "/Helv 0 Tf 0 g", None),
+            &[value("answer", &"a".repeat(MAX_VALUE_BYTES + 1))],
+        )
+        .expect_err("refused");
+        assert!(error.contains("at most 65536 bytes"), "got {error}");
+        assert!(fill_form(
+            &one_field([50, 600, 350, 680], MULTILINE, "/Helv 0 Tf 0 g", None),
+            &[value("answer", &"a".repeat(MAX_VALUE_BYTES))],
+        )
+        .is_ok());
     }
 
     /// It grows as well as shrinks: a short answer in a tall box should not be

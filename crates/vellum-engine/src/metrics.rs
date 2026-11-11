@@ -175,6 +175,11 @@ fn table(font: StandardFont) -> &'static [u16; 256] {
     }
 }
 
+/// How wide one WinAnsi byte is, in thousandths of the type size.
+pub(crate) fn advance_of(font: StandardFont, byte: u8) -> u32 {
+    u32::from(table(font)[usize::from(byte)])
+}
+
 /// How wide a WinAnsi string is, in points.
 pub(crate) fn width_of(font: StandardFont, text: &[u8], size: f32) -> f32 {
     let table = table(font);
