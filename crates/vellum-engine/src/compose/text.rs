@@ -398,12 +398,25 @@ impl Composer {
     }
 
     pub fn move_down(&mut self, lines: f32) -> Result<(), ComposeError> {
-        self.y += self.current_line_height(true)? * lines + self.line_gap;
-        Ok(())
+        let moved = self.y + (self.current_line_height(true)? * lines + self.line_gap);
+        self.move_to_line(moved)
     }
 
     pub fn move_up(&mut self, lines: f32) -> Result<(), ComposeError> {
-        self.y -= self.current_line_height(true)? * lines + self.line_gap;
+        let moved = self.y - (self.current_line_height(true)? * lines + self.line_gap);
+        self.move_to_line(moved)
+    }
+
+    /// Move the cursor down or up to `y`, refused when that is no longer a
+    /// finite number: the next line would be written at `inf`.
+    fn move_to_line(&mut self, y: f32) -> Result<(), ComposeError> {
+        if !y.is_finite() {
+            return Err(ComposeError::new(
+                "INVALID_OPTIONS",
+                "moving that many lines takes the cursor past finite numbers",
+            ));
+        }
+        self.y = y;
         Ok(())
     }
 
@@ -2190,6 +2203,38 @@ mod tests {
             .map(|glyph| (glyph.text_start, glyph.text_end))
             .collect();
         assert_eq!(spans, [(10, 12), (10, 12), (12, 15), (15, 17)]);
+    }
+
+    /// Moving past finite numbers would write the next line at `inf`.
+    #[test]
+    fn moving_the_cursor_past_finite_numbers_is_refused() {
+        let mut document = self::document();
+        let y = document.y;
+        assert_eq!(
+            document.move_down(1e38).unwrap_err().code,
+            "INVALID_OPTIONS"
+        );
+        assert_eq!(document.move_up(1e38).unwrap_err().code, "INVALID_OPTIONS");
+        assert_eq!(document.y, y, "the cursor stays where it was");
+    }
+
+    /// A line whose origin is not a finite number is left out of the page
+    /// rather than written as `inf`.
+    #[test]
+    fn a_line_at_a_non_finite_position_is_not_written() {
+        let mut document = self::document();
+        document.x = f32::INFINITY;
+        document.y = 80.0;
+        let _ = document.text("hello", &defaults());
+        document.x = 72.0;
+        unwrapped(&mut document, "visible", 72.0, 100.0);
+        let bytes = document.end().expect("the document ends");
+        let parsed = lopdf::Document::load_mem(&bytes).unwrap();
+        let page = *parsed.get_pages().values().next().unwrap();
+        let content = parsed.get_page_content(page);
+        let text = String::from_utf8_lossy(&content).to_lowercase();
+        assert!(text.contains(" tf"), "the content is read: {text}");
+        assert!(!text.contains("inf") && !text.contains("nan"), "{text}");
     }
 
     #[test]

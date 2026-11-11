@@ -35,6 +35,20 @@ describe("PdfDocument — pages and cursor", () => {
 		expect(doc.bufferedPageRange()).toEqual({ start: 0, count: 1 });
 	});
 
+	it("refuses a position or a move past what the engine's numbers hold", () => {
+		const doc = new PdfDocument();
+		// Finite as a JavaScript number, infinite once narrowed: the next
+		// line would be written at `inf`.
+		expect(() => {
+			doc.x = 1e39;
+		}).toThrow(/finite number/);
+		expect(() => {
+			doc.y = -1e39;
+		}).toThrow(/finite number/);
+		expect(() => doc.moveDown(1e38)).toThrow(/finite numbers/);
+		expect([doc.x, doc.y]).toEqual([72, 72]);
+	});
+
 	it("takes sizes by name, layout and margins in every form", () => {
 		const doc = new PdfDocument({
 			size: "a4",

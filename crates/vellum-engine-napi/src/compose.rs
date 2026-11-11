@@ -347,11 +347,18 @@ fn options_error(message: impl Into<String>) -> Error {
     failure(ComposeError::new("INVALID_OPTIONS", message))
 }
 
+/// A number for the engine, which works in `f32`: finite as a JavaScript
+/// number is not enough, since 1e39 narrows to infinity and a content stream
+/// would then carry the bytes `inf`.
 fn finite(value: f64, name: &str) -> Result<f32> {
-    if value.is_finite() {
-        Ok(value as f32)
+    let narrowed = value as f32;
+    if narrowed.is_finite() {
+        Ok(narrowed)
     } else {
-        Err(options_error(format!("{name} must be a finite number")))
+        Err(options_error(format!(
+            "{name} must be a finite number no larger than {:e}",
+            f32::MAX
+        )))
     }
 }
 
