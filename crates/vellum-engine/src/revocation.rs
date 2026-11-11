@@ -18,12 +18,14 @@ use const_oid::AssociatedOid;
 use der::asn1::{BitString, GeneralizedTime, Null, OctetString};
 use der::{Any, Choice, Decode, Encode, Enumerated, Sequence};
 use sha1::Sha1;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use x509_cert::ext::pkix::name::GeneralName;
-use x509_cert::ext::pkix::{AuthorityInfoAccessSyntax, ExtendedKeyUsage};
+use x509_cert::ext::pkix::AuthorityInfoAccessSyntax;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
+
+use crate::trust::{has_extended_usage, now, rsa_verifies, signed_by, valid_at, Hash};
 
 /// `id-ad-ocsp`, the access method that names a responder.
 const ID_AD_OCSP: const_oid::ObjectIdentifier =
@@ -234,27 +236,21 @@ pub fn revocation_query(certificate: &[u8], issuer: &[u8]) -> Result<Vec<u8>, St
     .map_err(|error| format!("cannot encode the question: {error}"))
 }
 
-/// Whether a certificate may answer for the issuer.
-fn may_answer(candidate: &Certificate, issuer: &Certificate) -> bool {
+/// Whether a certificate may answer for the issuer, judged at `now`.
+///
+/// The issuer itself may. Anybody else is a delegate (RFC 6960 §4.2.2.2): a
+/// certificate the issuer itself signed, still valid, whose extended key usage
+/// says answering is what it is for. A delegate travels inside the answer, so
+/// its name and usage are whatever the answer's author wrote: only the
+/// issuer's signature on it makes it the issuer's.
+fn may_answer(candidate: &Certificate, issuer: &Certificate, now: u64) -> bool {
     if candidate == issuer {
         return true;
     }
-    // A delegate has to be issued by the authority it answers for, and say
-    // that answering is what it is for.
-    if candidate.tbs_certificate.issuer != issuer.tbs_certificate.subject {
-        return false;
-    }
-    candidate
-        .tbs_certificate
-        .extensions
-        .as_ref()
-        .and_then(|extensions| {
-            extensions
-                .iter()
-                .find(|extension| extension.extn_id == ExtendedKeyUsage::OID)
-        })
-        .and_then(|extension| ExtendedKeyUsage::from_der(extension.extn_value.as_bytes()).ok())
-        .is_some_and(|usage| usage.0.contains(&ID_KP_OCSP_SIGNING))
+    candidate.tbs_certificate.issuer == issuer.tbs_certificate.subject
+        && signed_by(candidate, issuer).is_ok()
+        && valid_at(candidate, now)
+        && has_extended_usage(candidate, ID_KP_OCSP_SIGNING)
 }
 
 /// Verify that `signed` was signed by `candidate`, with the algorithm named.
@@ -264,40 +260,16 @@ fn answered_by(
     algorithm: &AlgorithmIdentifierOwned,
     candidate: &Certificate,
 ) -> bool {
-    let Ok(spki) = candidate.tbs_certificate.subject_public_key_info.to_der() else {
+    let Some(hash) = Hash::of_signature(&algorithm.oid, None) else {
         return false;
     };
-    let Some(key) = rsa::pkcs8::SubjectPublicKeyInfoRef::from_der(&spki)
-        .ok()
-        .and_then(|info| rsa::RsaPublicKey::try_from(info).ok())
-    else {
-        return false;
-    };
-    let Ok(signature) = rsa::pkcs1v15::Signature::try_from(signature) else {
-        return false;
-    };
-
-    match algorithm.oid.to_string().as_str() {
-        "1.2.840.113549.1.1.11" => rsa::signature::Verifier::verify(
-            &rsa::pkcs1v15::VerifyingKey::<Sha256>::new(key),
-            signed,
-            &signature,
-        )
-        .is_ok(),
-        "1.2.840.113549.1.1.12" => rsa::signature::Verifier::verify(
-            &rsa::pkcs1v15::VerifyingKey::<sha2::Sha384>::new(key),
-            signed,
-            &signature,
-        )
-        .is_ok(),
-        "1.2.840.113549.1.1.13" => rsa::signature::Verifier::verify(
-            &rsa::pkcs1v15::VerifyingKey::<sha2::Sha512>::new(key),
-            signed,
-            &signature,
-        )
-        .is_ok(),
-        _ => false,
-    }
+    rsa_verifies(
+        &candidate.tbs_certificate.subject_public_key_info,
+        hash,
+        signed,
+        signature,
+    )
+    .unwrap_or(false)
 }
 
 /// The largest responder answer read. An answer about one certificate,
@@ -307,14 +279,32 @@ pub const MAX_REVOCATION_RESPONSE: usize = 64 * 1024;
 
 /// Read a responder's answer about one certificate.
 ///
-/// `at` is the instant the document was signed, which is what the answer has
-/// to be about: a certificate revoked yesterday was perfectly good last year.
+/// `at` is the instant the signature is judged at, which is what the answer
+/// has to be about: a certificate revoked yesterday was perfectly good last
+/// year. It is the current time unless a verified timestamp moved it earlier
+/// (the report's `moment_at`); left out, it is the current time. It is never
+/// the signer's own claim of when it signed, which would let the holder of a
+/// revoked certificate date a fresh signature before the revocation.
 pub fn read_revocation(
     response: &[u8],
     certificate: &[u8],
     issuer: &[u8],
     at: Option<u64>,
 ) -> Revocation {
+    read_revocation_at(response, certificate, issuer, at, now())
+}
+
+/// {@link read_revocation} with the current time stated, so a test can stand
+/// at a given instant.
+pub(crate) fn read_revocation_at(
+    response: &[u8],
+    certificate: &[u8],
+    issuer: &[u8],
+    at: Option<u64>,
+    now: u64,
+) -> Revocation {
+    // An instant after now has not happened, and cannot excuse anything.
+    let at = at.map_or(now, |at| at.min(now));
     let unknown = |reason: &str| Revocation::Unknown {
         reason: reason.to_string(),
     };
@@ -366,7 +356,7 @@ pub fn read_revocation(
         .chain(std::iter::once(issuer.clone()))
         .collect();
     let believed = candidates.iter().any(|candidate| {
-        may_answer(candidate, &issuer)
+        may_answer(candidate, &issuer, now)
             && answered_by(&signed, signature, &basic.signature_algorithm, candidate)
     });
     if !believed {
@@ -384,7 +374,7 @@ pub fn read_revocation(
 
     // An answer that had already been superseded when the document was signed
     // says nothing about that moment.
-    if let (Some(at), Some(next)) = (at, &single.next_update) {
+    if let Some(next) = &single.next_update {
         if next.to_unix_duration().as_secs() < at {
             return unknown("the responder's answer was already stale when this was signed");
         }
@@ -396,11 +386,12 @@ pub fn read_revocation(
             let when = info.revocation_time.to_unix_duration().as_secs();
             // Revoked after this document was signed does not taint it: that
             // is what a signing time, and better a timestamp, is for.
-            match at {
-                Some(at) if at < when => Revocation::Good,
-                _ => Revocation::Revoked {
+            if at < when {
+                Revocation::Good
+            } else {
+                Revocation::Revoked {
                     at: info.revocation_time.to_date_time().to_string(),
-                },
+                }
             }
         }
         CertStatus::Unknown(_) => unknown("the issuer does not recognise this certificate"),
@@ -414,11 +405,20 @@ mod tests {
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::RsaPrivateKey;
+    use sha2::Sha256;
 
     use super::*;
     use crate::cms::tests::{authority_key, key_and_chain};
 
-    const SIGNED_AT: u64 = 1_788_532_200; // 2026-09-04T14:30:00Z
+    /// The instant judged at: a month before the answer is read.
+    const SIGNED_AT: u64 = NOW - 30 * 86_400;
+    /// When the answers below are read. Fixed, so the dates in them are too.
+    const NOW: u64 = 1_788_532_200; // 2026-09-04T14:30:00Z
+
+    fn read_at(response: &[u8], at: Option<u64>, now: u64) -> Revocation {
+        let (_, certificate, issuer) = key_and_chain();
+        read_revocation_at(response, &certificate, &issuer, at, now)
+    }
 
     fn at(seconds: u64) -> GeneralizedTime {
         GeneralizedTime::from_unix_duration(std::time::Duration::from_secs(seconds))
@@ -444,12 +444,12 @@ mod tests {
                 .expect("a responder id"),
             )
             .expect("a responder id"),
-            produced_at: at(SIGNED_AT),
+            produced_at: at(NOW - 60),
             responses: vec![SingleResponse {
                 cert_id: cert_id(&certificate, &issuer_certificate).expect("a cert id"),
                 cert_status: status,
-                this_update: at(SIGNED_AT - 3600),
-                next_update: Some(at(SIGNED_AT + 86_400)),
+                this_update: at(NOW - 3600),
+                next_update: Some(at(NOW + 86_400)),
                 extensions: None,
             }],
             extensions: None,
@@ -483,8 +483,7 @@ mod tests {
     }
 
     fn read(response: &[u8], at: Option<u64>) -> Revocation {
-        let (_, certificate, issuer) = key_and_chain();
-        read_revocation(response, &certificate, &issuer, at)
+        read_at(response, at, NOW)
     }
 
     #[test]
@@ -546,8 +545,7 @@ mod tests {
             None,
         );
         assert_eq!(read(&response, Some(SIGNED_AT)), Revocation::Good);
-        // Without an instant there is nothing to compare against, so the
-        // withdrawal stands.
+        // Without an instant it is judged now, after the withdrawal.
         assert!(matches!(read(&response, None), Revocation::Revoked { .. }));
     }
 
@@ -598,6 +596,76 @@ mod tests {
     fn nonsense_is_unknown_rather_than_good() {
         assert!(matches!(
             read(b"not an answer", Some(SIGNED_AT)),
+            Revocation::Unknown { .. }
+        ));
+    }
+    /// A delegate certificate travels inside the answer, so its name and its
+    /// usage are the answer's author's to write. One the issuer never signed
+    /// does not answer for it, whatever it says.
+    #[test]
+    fn a_self_made_delegate_naming_the_issuer_is_not_believed() {
+        let key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let delegate = crate::cms::tests::issued_by(
+            &key,
+            "CN=Vellum Test Authority,O=Vellum",
+            "CN=Vellum Test Responder,O=Vellum",
+            11,
+            crate::cms::tests::spki_of(&key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            None,
+            responder_usage,
+        );
+        let response = answer(
+            CertStatus::Good(Null),
+            &key,
+            Some(Certificate::from_der(&delegate).expect("the delegate")),
+        );
+        match read(&response, Some(SIGNED_AT)) {
+            Revocation::Unknown { reason } => {
+                assert!(reason.contains("entitled"), "got {reason:?}")
+            }
+            other => panic!("a forged delegate is not believed, got {other:?}"),
+        }
+    }
+
+    fn responder_usage(
+        builder: &mut x509_cert::builder::CertificateBuilder<'_, SigningKey<Sha256>>,
+    ) {
+        builder
+            .add_extension(&x509_cert::ext::pkix::ExtendedKeyUsage(vec![
+                ID_KP_OCSP_SIGNING,
+            ]))
+            .expect("the extension is added");
+    }
+
+    fn delegate(validity: x509_cert::time::Validity) -> (Vec<u8>, Certificate) {
+        let key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let delegate = crate::cms::tests::issued(
+            "CN=Vellum Test Responder,O=Vellum",
+            12,
+            crate::cms::tests::spki_of(&key),
+            validity,
+            None,
+            responder_usage,
+        );
+        (key, Certificate::from_der(&delegate).expect("the delegate"))
+    }
+
+    /// One the issuer did sign, for answering, answers for it.
+    #[test]
+    fn a_delegate_the_issuer_signed_is_believed() {
+        let (key, delegate) = delegate(crate::cms::tests::window(1_577_836_800, 2_051_222_400));
+        let response = answer(CertStatus::Good(Null), &key, Some(delegate));
+        assert_eq!(read(&response, Some(SIGNED_AT)), Revocation::Good);
+    }
+
+    /// Unless it has lapsed.
+    #[test]
+    fn a_lapsed_delegate_is_not_believed() {
+        let (key, delegate) = delegate(crate::cms::tests::window(1_577_836_800, NOW - 86_400));
+        let response = answer(CertStatus::Good(Null), &key, Some(delegate));
+        assert!(matches!(
+            read(&response, Some(SIGNED_AT)),
             Revocation::Unknown { .. }
         ));
     }

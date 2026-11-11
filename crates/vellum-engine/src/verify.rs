@@ -3,14 +3,13 @@
 //! Signing is half the job. A document that arrives signed is worth nothing
 //! until someone has checked that the signature covers it, that the bytes have
 //! not moved since, and that the signature was made by the certificate it
-//! claims.
+//! names.
 //!
-//! What this establishes is **integrity and authorship**, not **trust**. It
-//! does not ask whether the certificate comes from an authority you accept,
-//! nor whether it has since been revoked: that needs a trust store and a live
-//! revocation check, neither of which belongs in a PDF engine. The report says
-//! what was checked, and a caller that needs more has the certificate to check
-//! it with.
+//! Integrity and authorship are settled from the document alone. Trust is
+//! settled against the anchors a caller supplies: the signer's certificate has
+//! to chain to one of them, every link signed by the next, at the instant the
+//! signature is judged at. Revocation needs a responder, which this engine
+//! does not ask; the report carries the certificates to ask about.
 //!
 //! The trap this exists to catch is the one everybody meets first: a
 //! `/ByteRange` that does not reach the end of the file. Content appended
@@ -28,7 +27,9 @@ use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
 
 use crate::form::fields_of;
-use crate::trust::{evaluate, read_anchors, Moment, TrustOptions};
+use crate::trust::{
+    carried, evaluate, named_certificate, read_anchors, rsa_verifies, Hash, Moment, TrustOptions,
+};
 
 /// `id-aa-signatureTimeStampToken`.
 const SIGNATURE_TIME_STAMP: const_oid::ObjectIdentifier =
@@ -45,25 +46,30 @@ pub struct SignatureReport {
     pub covers_whole_document: bool,
     /// The document's bytes hash to what the signature committed to.
     pub digest_matches: bool,
-    /// The signature verifies against the certificate it carries.
+    /// The signature verifies against the certificate its signer names.
     pub signature_verifies: bool,
     /// Who the certificate says signed.
     pub signer: Option<String>,
-    /// When the signature says it was made, as the signer stated it.
+    /// When the signature says it was made, as the signer stated it. Shown,
+    /// never used to judge anything.
     pub signed_at: Option<String>,
-    /// A timestamp authority has vouched for when — so the signature outlives
-    /// the certificate's own validity.
+    /// A timestamp token whose authority's signature checks out, and chains
+    /// to an anchor, vouches for when — so the signature outlives the
+    /// certificate's own validity.
     pub timestamped: bool,
-    /// A path was found from the signer's certificate to a trusted anchor.
-    /// False whenever no anchors were supplied, which is the honest answer.
+    /// A path was found from the signer's certificate to a trusted anchor,
+    /// every link valid at `moment_at`. False whenever no anchors were
+    /// supplied, which is the honest answer.
     pub trusted: bool,
     /// That path, the signer first and the anchor last.
     pub chain: Vec<String>,
-    /// Where the instant used to judge the path came from: a timestamp, the
-    /// signer's own claim, or nowhere.
+    /// What the signature offers about when it was made: a verified
+    /// timestamp, only the signer's own claim, or nothing. Only a verified
+    /// timestamp moves the instant the path is judged at.
     pub moment: &'static str,
-    /// That instant, in seconds since the epoch, for a caller who has to ask
-    /// somebody else about it.
+    /// The instant the path was judged at, in seconds since the epoch: the
+    /// timestamp's when `moment` is `timestamp`, the time of the check
+    /// otherwise. It is the instant to ask a revocation responder about.
     pub moment_at: Option<u64>,
     /// The certificate that signed, so a caller can ask about it.
     pub signer_certificate: Option<Vec<u8>>,
@@ -410,6 +416,7 @@ fn verify_one(
     signature: &lopdf::Dictionary,
     own_value: Option<(usize, usize)>,
     anchors: &[Certificate],
+    now: u64,
     digests: &mut HashMap<[usize; 4], [u8; 32]>,
 ) -> SignatureReport {
     let Some(range) = byte_range(signature) else {
@@ -501,12 +508,6 @@ fn verify_one(
         return report;
     };
 
-    report.timestamped = signer.unsigned_attrs.as_ref().is_some_and(|attributes| {
-        attributes
-            .iter()
-            .any(|attribute| attribute.oid == SIGNATURE_TIME_STAMP)
-    });
-
     let Some(attributes) = signer.signed_attrs.as_ref() else {
         report
             .problems
@@ -536,37 +537,41 @@ fn verify_one(
             .push("the signature commits to no digest".to_string()),
     }
 
-    report.signed_at = attributes
+    let claimed = attributes
         .iter()
         .find(|attribute| attribute.oid == const_oid::db::rfc5911::ID_SIGNING_TIME)
         .and_then(|attribute| attribute.values.as_slice().first())
         .and_then(|value| value.to_der().ok())
-        .and_then(|der| cms::attr::SigningTime::from_der(&der).ok())
-        .map(|time| match time {
-            cms::attr::SigningTime::UtcTime(time) => time.to_date_time().to_string(),
-            cms::attr::SigningTime::GeneralTime(time) => time.to_date_time().to_string(),
-        });
-
-    // The certificate the signature carries, matched to the signer it names.
-    let certificate = signed.certificates.as_ref().and_then(|set| {
-        set.0.iter().find_map(|choice| match choice {
-            cms::cert::CertificateChoices::Certificate(certificate) => Some(certificate.clone()),
-            _ => None,
-        })
+        .and_then(|der| cms::attr::SigningTime::from_der(&der).ok());
+    report.signed_at = claimed.as_ref().map(|time| match time {
+        cms::attr::SigningTime::UtcTime(time) => time.to_date_time().to_string(),
+        cms::attr::SigningTime::GeneralTime(time) => time.to_date_time().to_string(),
     });
-    let Some(certificate) = certificate else {
-        report
-            .problems
-            .push("the signature carries no certificate to check it against".to_string());
+
+    // The certificate the signer names, by issuer and serial or by key
+    // identifier, among those the signature carries: the first of the set is
+    // whichever the document put first.
+    let carried = carried(signed.certificates.as_ref());
+    let Some(certificate) = named_certificate(&signer.sid, &carried).cloned() else {
+        report.problems.push(if carried.is_empty() {
+            "the signature carries no certificate to check it against".to_string()
+        } else {
+            "the signature carries no certificate for the signer it names".to_string()
+        });
         return report;
     };
     report.signer = Some(subject_of(&certificate));
+    report.signer_certificate = certificate.to_der().ok();
+    let names_its_certificate = binds_certificate(attributes, &certificate);
+    if let Err(problem) = &names_its_certificate {
+        report.problems.push(problem.clone());
+    }
 
-    // Judged when the document was signed, not now: a certificate that has
-    // since expired did not retroactively unsign anything. A timestamp is
-    // worth having because it makes that instant something other than the
-    // signer's own word.
-    let stamped = signer
+    // The instant the path is judged at: now, unless a timestamp token that
+    // checks out proves the signature existed earlier. The token is an
+    // unsigned attribute, so it is verified before anything in it is read;
+    // the signer's own signingTime never moves the instant.
+    let token = signer
         .unsigned_attrs
         .as_ref()
         .and_then(|attributes| {
@@ -574,81 +579,133 @@ fn verify_one(
                 .iter()
                 .find(|attribute| attribute.oid == SIGNATURE_TIME_STAMP)
         })
-        .and_then(|attribute| attribute.values.as_slice().first())
-        .and_then(crate::timestamp::stamped_at);
-    let claimed = attributes
-        .iter()
-        .find(|attribute| attribute.oid == const_oid::db::rfc5911::ID_SIGNING_TIME)
-        .and_then(|attribute| attribute.values.as_slice().first())
-        .and_then(|value| value.to_der().ok())
-        .and_then(|der| cms::attr::SigningTime::from_der(&der).ok())
-        .map(|time| match time {
-            cms::attr::SigningTime::UtcTime(time) => time.to_unix_duration().as_secs(),
-            cms::attr::SigningTime::GeneralTime(time) => time.to_unix_duration().as_secs(),
-        });
-
-    let (at, moment) = match (stamped, claimed) {
-        (Some(at), _) => (Some(at), Moment::Timestamp),
-        (None, Some(at)) => (Some(at), Moment::Claimed),
-        (None, None) => (None, Moment::Unknown),
+        .and_then(|attribute| attribute.values.as_slice().first());
+    let stamped = token.map(|token| {
+        crate::timestamp::verify_token(token, signer.signature.as_bytes(), anchors, now)
+    });
+    let (at, moment) = match stamped {
+        Some(Ok(at)) => (at, Moment::Timestamp),
+        Some(Err(problem)) => {
+            report.problems.push(format!(
+                "the timestamp cannot be believed, so the signature is judged at the current time: {problem}"
+            ));
+            (
+                now,
+                if claimed.is_some() {
+                    Moment::Claimed
+                } else {
+                    Moment::Unknown
+                },
+            )
+        }
+        None if claimed.is_some() => (now, Moment::Claimed),
+        None => (now, Moment::Unknown),
     };
+    report.timestamped = moment == Moment::Timestamp;
     report.moment = moment.as_str();
-    report.moment_at = at;
-    report.signer_certificate = certificate.to_der().ok();
+    report.moment_at = Some(at);
 
-    let carried: Vec<Certificate> = signed
-        .certificates
-        .as_ref()
-        .map(|set| {
-            set.0
-                .iter()
-                .filter_map(|choice| match choice {
-                    cms::cert::CertificateChoices::Certificate(certificate) => {
-                        Some(certificate.clone())
-                    }
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     let trust = evaluate(&certificate, &carried, anchors, at);
-    report.trusted = trust.trusted;
+    report.trusted = trust.trusted && names_its_certificate.is_ok();
     report.chain = trust.chain;
     report.issuer_certificate = trust.issuer;
     report.problems.extend(trust.problems);
 
-    let verified = certificate
-        .tbs_certificate
-        .subject_public_key_info
+    let verified = attributes
         .to_der()
-        .ok()
-        .and_then(|spki| {
-            let key = rsa::pkcs8::SubjectPublicKeyInfoRef::from_der(&spki).ok()?;
-            rsa::RsaPublicKey::try_from(key).ok()
-        })
-        .and_then(|key| {
-            let signed_bytes = attributes.to_der().ok()?;
-            let signature = rsa::pkcs1v15::Signature::try_from(signer.signature.as_bytes()).ok()?;
-            Some(
-                rsa::signature::Verifier::verify(
-                    &rsa::pkcs1v15::VerifyingKey::<Sha256>::new(key),
-                    &signed_bytes,
-                    &signature,
-                )
-                .is_ok(),
+        .map_err(|error| format!("the signed attributes cannot be re-encoded: {error}"))
+        .and_then(|signed_bytes| {
+            let hash = Hash::of_signature(
+                &signer.signature_algorithm.oid,
+                Some(&signer.digest_alg.oid),
+            )
+            .ok_or_else(|| "the signature uses an algorithm this cannot check".to_string())?;
+            rsa_verifies(
+                &certificate.tbs_certificate.subject_public_key_info,
+                hash,
+                &signed_bytes,
+                signer.signature.as_bytes(),
             )
         });
     match verified {
-        Some(true) => report.signature_verifies = true,
-        Some(false) => report
+        Ok(true) => report.signature_verifies = true,
+        Ok(false) => report
             .problems
             .push("the signature does not match the certificate it carries".to_string()),
-        None => report
-            .problems
-            .push("the certificate does not carry a key this can check with".to_string()),
+        Err(problem) => report.problems.push(format!(
+            "the signature cannot be checked against its certificate: {problem}"
+        )),
     }
 
     report
+}
+
+/// `id-aa-signingCertificateV2`, RFC 5035 §3.
+const SIGNING_CERTIFICATE_V2: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.47");
+
+/// RFC 5035 §4: one certificate by its hash, the digest `DEFAULT id-sha256`.
+#[derive(der::Sequence)]
+struct EssCertIdV2 {
+    #[asn1(optional = "true")]
+    hash_algorithm: Option<x509_cert::spki::AlgorithmIdentifierOwned>,
+    cert_hash: der::asn1::OctetString,
+    #[asn1(optional = "true")]
+    issuer_serial: Option<der::Any>,
+}
+
+#[derive(der::Sequence)]
+struct SigningCertificateV2 {
+    certs: Vec<EssCertIdV2>,
+    #[asn1(optional = "true")]
+    policies: Option<der::Any>,
+}
+
+/// Whether the signed `signing-certificate-v2` attribute, when there is one,
+/// names `certificate`.
+///
+/// The attribute is what binds a signature to a certificate rather than to a
+/// key: a second certificate for the same key, carried in the signature,
+/// would otherwise be reported as the signer.
+fn binds_certificate(
+    attributes: &x509_cert::attr::Attributes,
+    certificate: &Certificate,
+) -> Result<(), String> {
+    let Some(attribute) = attributes
+        .iter()
+        .find(|attribute| attribute.oid == SIGNING_CERTIFICATE_V2)
+    else {
+        return Ok(());
+    };
+    let named = attribute
+        .values
+        .as_slice()
+        .first()
+        .and_then(|value| value.to_der().ok())
+        .and_then(|der| SigningCertificateV2::from_der(&der).ok())
+        .ok_or_else(|| {
+            "the signature's signing-certificate attribute is not readable".to_string()
+        })?;
+    let first = named
+        .certs
+        .first()
+        .ok_or_else(|| "the signature's signing-certificate attribute names nothing".to_string())?;
+    let hash = match &first.hash_algorithm {
+        None => Hash::Sha256,
+        Some(algorithm) => Hash::of_digest(&algorithm.oid).ok_or_else(|| {
+            "the signature names its certificate with a digest this cannot check".to_string()
+        })?,
+    };
+    let encoded = certificate
+        .to_der()
+        .map_err(|error| format!("cannot re-encode the signer's certificate: {error}"))?;
+    if hash.digest(&encoded) != first.cert_hash.as_bytes() {
+        return Err(
+            "the signature names another certificate than the one reported as its signer"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// How many distinct signatures one call checks. Each costs a hash of up to
@@ -662,6 +719,16 @@ const MAX_SIGNATURES: usize = 100;
 pub fn verify_signatures(
     pdf: &[u8],
     options: &TrustOptions,
+) -> Result<Vec<SignatureReport>, String> {
+    verify_signatures_at(pdf, options, crate::trust::now())
+}
+
+/// {@link verify_signatures} judged at `now`, so a test can stand at a stated
+/// instant.
+pub(crate) fn verify_signatures_at(
+    pdf: &[u8],
+    options: &TrustOptions,
+    now: u64,
 ) -> Result<Vec<SignatureReport>, String> {
     let document = Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;
 
@@ -719,6 +786,7 @@ pub fn verify_signatures(
             &signature,
             own_value,
             &anchors,
+            now,
             &mut digests,
         );
         report.problems.extend(anchor_problems.iter().cloned());
@@ -1091,42 +1159,171 @@ mod tests {
         );
     }
 
+    /// A signature on a blank page by `key` and `certificate`, with a
+    /// timestamp token at `gen_time` signed by `authority` (or by nobody)
+    /// attached the way `attach_timestamp` attaches one.
+    fn stamped_document(
+        key: &[u8],
+        certificate: &[u8],
+        authority: Option<(&[u8], &[u8])>,
+        gen_time: u64,
+    ) -> Vec<u8> {
+        let prepared = prepare(
+            &create_blank(&[(595.28, 841.89)]).unwrap(),
+            &SignatureOptions::default(),
+        )
+        .expect("preparing");
+        let value = sign_cms(
+            &prepared.digest,
+            key,
+            std::slice::from_ref(&certificate.to_vec()),
+            "2026-09-04T14:30:00Z",
+        )
+        .expect("signing");
+        let (_, nonce) = crate::timestamp_query(&value).expect("a query");
+        let token = crate::timestamp::tests::token(
+            &crate::timestamp::tests::imprint_of(&value),
+            nonce,
+            gen_time,
+            authority,
+        );
+        let stamped =
+            crate::attach_timestamp(&value, &crate::timestamp::tests::respond(0, token), nonce)
+                .expect("attaching");
+        embed_signature(&prepared.document, &stamped).expect("embedding")
+    }
+
+    fn anchored() -> TrustOptions {
+        let (_, _, authority) = key_and_chain();
+        TrustOptions {
+            anchors: vec![authority],
+        }
+    }
+
+    /// 2026-01-01 to 2026-10-01: valid when the test authority stamps
+    /// (2026-09-04), lapsed by the time anybody runs this.
+    fn lapsed_signer() -> (Vec<u8>, Vec<u8>) {
+        static LAPSED: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        LAPSED
+            .get_or_init(|| {
+                let key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+                let certificate = crate::cms::tests::issued(
+                    "CN=Vellum Lapsed Signer,O=Vellum",
+                    6,
+                    crate::cms::tests::spki_of(&key),
+                    crate::cms::tests::window(1_767_225_600, 1_790_812_800),
+                    None,
+                    |_| {},
+                );
+                (key, certificate)
+            })
+            .clone()
+    }
+
     /// A timestamp is what keeps a signature verifiable past its
     /// certificate's expiry, so whether one is there belongs in the report.
     #[test]
     fn a_timestamped_signature_is_reported_as_one() {
         assert!(
-            !verify_signatures(&signed_document(), &TrustOptions::default()).expect("it reads")[0]
-                .timestamped,
+            !verify_signatures(&signed_document(), &anchored()).expect("it reads")[0].timestamped,
             "the plain one carries none"
         );
 
-        let marked = create_blank(&[(595.28, 841.89)]).unwrap();
-        let prepared = prepare(&marked, &SignatureOptions::default()).expect("preparing");
         let (key, certificate) = key_and_certificate();
-        let value = sign_cms(
-            &prepared.digest,
+        let (tsa_key, tsa) = crate::cms::tests::timestamp_authority();
+        let document = stamped_document(
             &key,
-            std::slice::from_ref(&certificate),
-            "2026-09-04T14:30:00Z",
-        )
-        .expect("signing");
+            &certificate,
+            Some((&tsa_key, &tsa)),
+            crate::timestamp::tests::STAMPED_AT,
+        );
+        let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
 
-        let (_, nonce) = crate::timestamp_query(&value).expect("a query");
-        let stamped = crate::attach_timestamp(
-            &value,
-            &crate::timestamp::tests::granted_response(&value, nonce),
-            nonce,
-        )
-        .expect("attaching");
-
-        let document = embed_signature(&prepared.document, &stamped).expect("embedding");
-        let report = &verify_signatures(&document, &TrustOptions::default()).expect("it reads")[0];
-
-        assert!(report.timestamped, "the timestamp should be reported");
+        assert!(report.timestamped, "{:?}", report.problems);
+        assert_eq!(report.moment, "timestamp");
+        assert_eq!(report.moment_at, Some(crate::timestamp::tests::STAMPED_AT));
         assert!(
-            report.digest_matches && report.signature_verifies,
+            report.digest_matches && report.signature_verifies && report.trusted,
             "and attaching one must not have disturbed the signature: {:?}",
+            report.problems
+        );
+    }
+
+    /// The verified timestamp is what lets a lapsed certificate's signature
+    /// stand: it proves the signature existed while the certificate was valid.
+    #[test]
+    fn a_verified_timestamp_judges_a_lapsed_certificate_when_it_stamped() {
+        let (key, certificate) = lapsed_signer();
+        let (tsa_key, tsa) = crate::cms::tests::timestamp_authority();
+        let document = stamped_document(
+            &key,
+            &certificate,
+            Some((&tsa_key, &tsa)),
+            crate::timestamp::tests::STAMPED_AT,
+        );
+        let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
+        assert!(report.trusted, "{:?}", report.problems);
+        assert_eq!(report.moment_at, Some(crate::timestamp::tests::STAMPED_AT));
+    }
+
+    /// The token sits outside what the signature covers. A hand-made one,
+    /// dated inside the lapsed certificate's window, is not a timestamp, and
+    /// the signature is judged now: lapsed, so untrusted.
+    #[test]
+    fn a_forged_timestamp_does_not_move_the_instant() {
+        let (key, certificate) = lapsed_signer();
+        let forged = stamped_document(
+            &key,
+            &certificate,
+            None,
+            crate::timestamp::tests::STAMPED_AT,
+        );
+        let now = crate::trust::now();
+        let report = &verify_signatures_at(&forged, &anchored(), now).expect("it reads")[0];
+
+        assert!(!report.timestamped);
+        assert!(!report.trusted);
+        assert_eq!(report.moment, "claimed");
+        assert_eq!(report.moment_at, Some(now));
+        let problems = report.problems.join(" | ");
+        assert!(
+            problems.contains("timestamp cannot be believed"),
+            "{problems}"
+        );
+        assert!(problems.contains("was not valid"), "{problems}");
+    }
+
+    /// Signed by a timestamp authority of the forger's own making.
+    #[test]
+    fn a_timestamp_from_an_untrusted_authority_does_not_move_the_instant() {
+        let (key, certificate) = lapsed_signer();
+        let own_key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let own = crate::cms::tests::issued_by(
+            &own_key,
+            "CN=Vellum Test Timestamps,O=Vellum",
+            "CN=Vellum Test Timestamps,O=Vellum",
+            5,
+            crate::cms::tests::spki_of(&own_key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            None,
+            |builder| {
+                builder
+                    .add_extension(&x509_cert::ext::pkix::ExtendedKeyUsage(vec![
+                        const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8"),
+                    ]))
+                    .unwrap();
+            },
+        );
+        let forged = stamped_document(
+            &key,
+            &certificate,
+            Some((&own_key, &own)),
+            crate::timestamp::tests::STAMPED_AT,
+        );
+        let report = &verify_signatures(&forged, &anchored()).expect("it reads")[0];
+        assert!(
+            !report.timestamped && !report.trusted,
+            "{:?}",
             report.problems
         );
     }
@@ -1214,31 +1411,268 @@ mod tests {
         );
     }
 
-    /// A certificate is judged at the moment of signing, so one that was not
-    /// yet valid then cannot be rescued by being valid now.
+    /// The signer's own signingTime is its word, not proof. A certificate
+    /// that has lapsed signs today, writing a date inside its old window: it
+    /// is judged now, and is not trusted.
     #[test]
-    fn a_certificate_not_valid_when_it_signed_is_reported() {
-        let (key, certificate, authority) = key_and_chain();
-        // The fixture is valid from 2020; this claims to have signed in 2019.
-        let document = signed_at(&key, &certificate, "2019-06-01T10:00:00Z");
+    fn a_claimed_signing_time_does_not_rescue_a_lapsed_certificate() {
+        let (key, certificate) = lapsed_signer();
+        let document = signed_at(&key, &certificate, "2026-06-01T10:00:00Z");
+        let now = crate::trust::now();
+        let report = &verify_signatures_at(&document, &anchored(), now).expect("it reads")[0];
 
-        let report = &verify_signatures(
-            &document,
-            &TrustOptions {
-                anchors: vec![authority],
-            },
-        )
-        .expect("it reads")[0];
-
-        assert!(!report.trusted);
+        assert!(report.signature_verifies && report.digest_matches);
+        assert!(!report.trusted, "{:?}", report.problems);
+        assert_eq!(report.moment, "claimed");
+        assert_eq!(report.moment_at, Some(now), "judged at the current time");
         assert!(
             report
                 .problems
                 .iter()
-                .any(|problem| problem.contains("not valid when the document was signed")),
+                .any(|problem| problem.contains("was not valid")),
             "got {:?}",
             report.problems
         );
+    }
+
+    /// Nor does a claim make a valid certificate invalid: it is not read.
+    #[test]
+    fn a_claimed_signing_time_outside_the_window_is_not_what_is_judged() {
+        let (key, certificate, _) = key_and_chain();
+        // The fixture is valid from 2020; this claims to have signed in 2019.
+        let document = signed_at(&key, &certificate, "2019-06-01T10:00:00Z");
+        let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
+        assert!(report.trusted, "{:?}", report.problems);
+        assert_eq!(report.moment, "claimed");
+    }
+
+    /// With nothing saying when, the certificate is judged now as well, not
+    /// left unjudged.
+    #[test]
+    fn a_lapsed_certificate_with_no_time_at_all_is_not_trusted() {
+        let (key, certificate) = lapsed_signer();
+        let prepared = prepare(
+            &create_blank(&[(595.28, 841.89)]).unwrap(),
+            &SignatureOptions::default(),
+        )
+        .expect("preparing");
+        let value = sign_cms(
+            &prepared.digest,
+            &key,
+            std::slice::from_ref(&certificate),
+            "2026-06-01T10:00:00Z",
+        )
+        .expect("signing");
+        let value = without_signing_time(&value, &key);
+        let document = embed_signature(&prepared.document, &value).expect("embedding");
+        let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
+        assert_eq!(report.moment, "unknown");
+        assert!(report.signature_verifies, "{:?}", report.problems);
+        assert!(!report.trusted, "{:?}", report.problems);
+    }
+
+    /// The CMS with its signingTime taken out and the attributes signed again.
+    fn without_signing_time(cms: &[u8], key: &[u8]) -> Vec<u8> {
+        use rsa::signature::{SignatureEncoding, Signer};
+        let content = ContentInfo::from_der(cms).unwrap();
+        let mut signed: SignedData = content.content.decode_as().unwrap();
+        let mut signers = signed.signer_infos.0.into_vec();
+        let signer = signers.first_mut().unwrap();
+        let kept: Vec<x509_cert::attr::Attribute> = signer
+            .signed_attrs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|attribute| attribute.oid != const_oid::db::rfc5911::ID_SIGNING_TIME)
+            .cloned()
+            .collect();
+        let attributes = der::asn1::SetOfVec::try_from(kept).unwrap();
+        let private =
+            <rsa::RsaPrivateKey as rsa::pkcs8::DecodePrivateKey>::from_pkcs8_der(key).unwrap();
+        let signature = rsa::pkcs1v15::SigningKey::<Sha256>::new(private)
+            .sign(&attributes.to_der().unwrap())
+            .to_vec();
+        signer.signed_attrs = Some(attributes);
+        signer.signature = der::asn1::OctetString::new(signature).unwrap();
+        signed.signer_infos =
+            cms::signed_data::SignerInfos(der::asn1::SetOfVec::try_from(signers).unwrap());
+        ContentInfo {
+            content_type: const_oid::db::rfc5911::ID_SIGNED_DATA,
+            content: der::Any::encode_from(&signed).unwrap(),
+        }
+        .to_der()
+        .unwrap()
+    }
+
+    /// The subject and serial number of a published root are public. A
+    /// certificate copying them, with a key of its own, is not the root.
+    #[test]
+    fn a_certificate_cloning_an_anchors_name_and_serial_is_not_trusted() {
+        let (key, clone) = crate::cms::tests::authority_clone();
+        let document = document_signed_with(&key, &clone);
+        let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
+
+        assert!(report.signature_verifies, "it verifies with its own key");
+        assert!(!report.trusted, "{:?}", report.chain);
+        assert_eq!(report.chain.len(), 1, "{:?}", report.chain);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("signed itself and is not one")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// The same clone, carried next to a genuine leaf as the "issuer" of a
+    /// certificate it signed, does not lend the leaf the anchor's trust.
+    #[test]
+    fn a_leaf_issued_by_a_clone_of_the_anchor_is_not_trusted() {
+        let (clone_key, _) = crate::cms::tests::authority_clone();
+        let key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let leaf = crate::cms::tests::issued_by(
+            &clone_key,
+            "CN=Vellum Test Authority,O=Vellum",
+            "CN=Mallory,O=Vellum",
+            8,
+            crate::cms::tests::spki_of(&key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            None,
+            |_| {},
+        );
+        let document = document_signed_with(&key, &leaf);
+        let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
+        assert!(!report.trusted, "{:?}", report.problems);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("not signed by the issuer")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// A trust anchor is a name and a key: the authority's certificate
+    /// re-issued with the same name and key anchors the same paths.
+    #[test]
+    fn an_anchor_is_its_name_and_key() {
+        let authority_key = crate::cms::tests::authority_key();
+        let reissued = crate::cms::tests::issued_by(
+            &authority_key,
+            "CN=Vellum Test Authority,O=Vellum",
+            "CN=Vellum Test Authority,O=Vellum",
+            99,
+            crate::cms::tests::spki_of(&authority_key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            Some(None),
+            |_| {},
+        );
+        let (key, certificate) = key_and_certificate();
+        let document = document_signed_with(&key, &certificate);
+        let report = &verify_signatures(
+            &document,
+            &TrustOptions {
+                anchors: vec![reissued],
+            },
+        )
+        .expect("it reads")[0];
+        assert!(report.trusted, "{:?}", report.problems);
+    }
+
+    /// A second certificate for the same key, issued under another name.
+    fn decoy() -> Vec<u8> {
+        let (key, _) = key_and_certificate();
+        crate::cms::tests::issued(
+            "CN=Vellum Decoy,O=Vellum",
+            7,
+            crate::cms::tests::spki_of(&key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            None,
+            |_| {},
+        )
+    }
+
+    fn signed_with_certificates(certificates: &[Vec<u8>]) -> Vec<u8> {
+        let (key, _) = key_and_certificate();
+        let prepared = prepare(
+            &create_blank(&[(595.28, 841.89)]).unwrap(),
+            &SignatureOptions::default(),
+        )
+        .expect("preparing");
+        let value = sign_cms(&prepared.digest, &key, certificates, "2026-09-04T14:30:00Z")
+            .expect("signing");
+        embed_signature(&prepared.document, &value).expect("embedding")
+    }
+
+    /// The certificates of a CMS are a SET, ordered by their encoding, so
+    /// whichever sorts first is the document's choice. The report is about
+    /// the certificate the signer names, in either order.
+    #[test]
+    fn the_report_is_about_the_certificate_the_signer_names() {
+        let (_, certificate) = key_and_certificate();
+        let decoy = decoy();
+        for (named, other, subject) in [
+            (&certificate, &decoy, "Vellum Test Signer"),
+            (&decoy, &certificate, "Vellum Decoy"),
+        ] {
+            let document = signed_with_certificates(&[named.clone(), other.clone()]);
+            let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
+            assert!(
+                report
+                    .signer
+                    .as_deref()
+                    .is_some_and(|signer| signer.contains(subject)),
+                "expected {subject}, got {:?}",
+                report.signer
+            );
+            assert_eq!(report.signer_certificate.as_ref(), Some(named));
+            assert!(
+                report.signature_verifies && report.trusted,
+                "{:?}",
+                report.problems
+            );
+        }
+    }
+
+    /// signing-certificate-v2 binds the signature to one certificate; any
+    /// other certificate for the same key is refused.
+    #[test]
+    fn the_signing_certificate_attribute_has_to_name_the_signer() {
+        let (_, certificate) = key_and_certificate();
+        let document = signed_with_certificates(std::slice::from_ref(&certificate));
+        let reports = verify_signatures(&document, &anchored()).expect("it reads");
+        assert!(reports[0].trusted, "{:?}", reports[0].problems);
+
+        let value = {
+            let parsed = Document::load_mem(&document).unwrap();
+            let signature = parsed
+                .objects
+                .values()
+                .filter_map(|object| object.as_dict().ok())
+                .find(|dictionary| dictionary.get(b"ByteRange").is_ok())
+                .unwrap();
+            match signature.get(b"Contents").unwrap() {
+                Object::String(value, _) => first_object(value).unwrap().to_vec(),
+                _ => panic!("a value"),
+            }
+        };
+        let signed: SignedData = ContentInfo::from_der(&value)
+            .unwrap()
+            .content
+            .decode_as()
+            .unwrap();
+        let attributes = signed.signer_infos.0.as_slice()[0]
+            .signed_attrs
+            .clone()
+            .unwrap();
+        assert!(
+            binds_certificate(&attributes, &Certificate::from_der(&certificate).unwrap()).is_ok()
+        );
+        let error = binds_certificate(&attributes, &Certificate::from_der(&decoy()).unwrap())
+            .expect_err("the decoy is not the certificate it names");
+        assert!(error.contains("another certificate"), "got {error:?}");
     }
 
     /// PEM is what an authority usually publishes, so it has to be accepted

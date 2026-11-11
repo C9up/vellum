@@ -13,15 +13,24 @@
 //! question, and a package that shipped its own answer would be making it for
 //! everybody.
 //!
-//! The instant matters. A certificate valid when a document was signed expires
-//! later, which does not retroactively unsign anything — so the path is judged
-//! at the moment of signing, and the report says where that moment came from.
-//! A timestamp is worth having precisely because it makes that moment
-//! something other than the signer's word.
+//! The instant matters, and it is not the signer's to choose. The path is
+//! judged at the current time, unless a timestamp token whose authority's
+//! signature checks out, and which chains to an anchor, proves the signature
+//! existed earlier: then it is judged at the authority's instant, and a
+//! certificate that expired or was revoked since does not retroactively unsign
+//! anything. The `signingTime` a signer writes is signed but is still its own
+//! word: a signer whose certificate has lapsed could otherwise write a date
+//! inside the old window and be believed (ETSI EN 319 102-1 §5.6.2.1 starts
+//! the best signature time at the current time for the same reason).
 
+use cms::signed_data::SignerIdentifier;
+use const_oid::ObjectIdentifier;
 use der::{Decode, Encode};
-use sha2::{Sha256, Sha384, Sha512};
-use x509_cert::ext::pkix::{BasicConstraints, KeyUsage, KeyUsages};
+use sha2::{Digest, Sha256, Sha384, Sha512};
+use x509_cert::ext::pkix::{
+    BasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages, SubjectKeyIdentifier,
+};
+use x509_cert::spki::SubjectPublicKeyInfoOwned;
 use x509_cert::Certificate;
 
 /// How far a path may run before this gives up. Real chains are two or three
@@ -36,14 +45,17 @@ pub struct TrustOptions {
     pub anchors: Vec<Vec<u8>>,
 }
 
-/// Where the instant used to judge the path came from.
+/// What the signature offers about when it was made, and so which instant
+/// its path is judged at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Moment {
-    /// A timestamp authority's word.
+    /// A timestamp whose authority's signature checks out and chains to an
+    /// anchor: the path is judged at the authority's instant.
     Timestamp,
-    /// The signer's own claim, which is signed but not independent.
+    /// Only the signer's own `signingTime`, which is signed but not
+    /// independent: the path is judged at the current time.
     Claimed,
-    /// Nothing said when, so validity windows could not be judged.
+    /// Nothing says when: the path is judged at the current time.
     Unknown,
 }
 
@@ -147,8 +159,94 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, ()> {
     Ok(out)
 }
 
+/// The digests a signature in a certificate, a CMS or an OCSP answer may be
+/// computed with. Anything else is reported as uncheckable, never assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hash {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl Hash {
+    /// The digest an `AlgorithmIdentifier` for a digest names.
+    pub(crate) fn of_digest(oid: &ObjectIdentifier) -> Option<Self> {
+        match oid.to_string().as_str() {
+            "2.16.840.1.101.3.4.2.1" => Some(Self::Sha256),
+            "2.16.840.1.101.3.4.2.2" => Some(Self::Sha384),
+            "2.16.840.1.101.3.4.2.3" => Some(Self::Sha512),
+            _ => None,
+        }
+    }
+
+    /// The digest an RSA signature algorithm is computed with. A CMS signer
+    /// may name plain `rsaEncryption` and its digest separately, so that one
+    /// takes the digest from `digest`.
+    pub(crate) fn of_signature(
+        signature: &ObjectIdentifier,
+        digest: Option<&ObjectIdentifier>,
+    ) -> Option<Self> {
+        match signature.to_string().as_str() {
+            "1.2.840.113549.1.1.11" => Some(Self::Sha256),
+            "1.2.840.113549.1.1.12" => Some(Self::Sha384),
+            "1.2.840.113549.1.1.13" => Some(Self::Sha512),
+            "1.2.840.113549.1.1.1" => digest.and_then(Self::of_digest),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn digest(self, bytes: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Sha256 => Sha256::digest(bytes).to_vec(),
+            Self::Sha384 => Sha384::digest(bytes).to_vec(),
+            Self::Sha512 => Sha512::digest(bytes).to_vec(),
+        }
+    }
+}
+
+/// Whether an RSA PKCS#1 v1.5 `signature` over `message` was made by the key
+/// in `key`.
+///
+/// `Err` when the key cannot be checked with at all, `Ok(false)` when it can
+/// and the signature is not its.
+pub(crate) fn rsa_verifies(
+    key: &SubjectPublicKeyInfoOwned,
+    hash: Hash,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, String> {
+    let spki = key
+        .to_der()
+        .map_err(|error| format!("cannot read a key: {error}"))?;
+    let key = rsa::pkcs8::SubjectPublicKeyInfoRef::from_der(&spki)
+        .ok()
+        .and_then(|info| rsa::RsaPublicKey::try_from(info).ok())
+        .ok_or_else(|| "a key is not RSA, which this cannot check with".to_string())?;
+    let Ok(signature) = rsa::pkcs1v15::Signature::try_from(signature) else {
+        return Ok(false);
+    };
+    let verified = match hash {
+        Hash::Sha256 => rsa::signature::Verifier::verify(
+            &rsa::pkcs1v15::VerifyingKey::<Sha256>::new(key),
+            message,
+            &signature,
+        ),
+        Hash::Sha384 => rsa::signature::Verifier::verify(
+            &rsa::pkcs1v15::VerifyingKey::<Sha384>::new(key),
+            message,
+            &signature,
+        ),
+        Hash::Sha512 => rsa::signature::Verifier::verify(
+            &rsa::pkcs1v15::VerifyingKey::<Sha512>::new(key),
+            message,
+            &signature,
+        ),
+    };
+    Ok(verified.is_ok())
+}
+
 /// Verify that `child` was signed by `issuer`.
-fn signed_by(child: &Certificate, issuer: &Certificate) -> Result<(), String> {
+pub(crate) fn signed_by(child: &Certificate, issuer: &Certificate) -> Result<(), String> {
     let tbs = child
         .tbs_certificate
         .to_der()
@@ -157,51 +255,26 @@ fn signed_by(child: &Certificate, issuer: &Certificate) -> Result<(), String> {
         .signature
         .as_bytes()
         .ok_or_else(|| "a certificate's signature is malformed".to_string())?;
-
-    let spki = issuer
-        .tbs_certificate
-        .subject_public_key_info
-        .to_der()
-        .map_err(|error| format!("cannot read an issuer's key: {error}"))?;
-    let key = rsa::pkcs8::SubjectPublicKeyInfoRef::from_der(&spki)
-        .ok()
-        .and_then(|info| rsa::RsaPublicKey::try_from(info).ok())
-        .ok_or_else(|| "an issuer's key is not RSA, which this cannot check with".to_string())?;
-
-    let signature = rsa::pkcs1v15::Signature::try_from(signature)
-        .map_err(|_| "a certificate's signature is malformed".to_string())?;
     let algorithm = child.signature_algorithm.oid;
-
-    // Only the algorithms actually used by certificates that sign documents.
-    // An unknown one is reported rather than assumed away.
-    let verified = match algorithm.to_string().as_str() {
-        "1.2.840.113549.1.1.11" => rsa::signature::Verifier::verify(
-            &rsa::pkcs1v15::VerifyingKey::<Sha256>::new(key),
-            &tbs,
-            &signature,
-        ),
-        "1.2.840.113549.1.1.12" => rsa::signature::Verifier::verify(
-            &rsa::pkcs1v15::VerifyingKey::<Sha384>::new(key),
-            &tbs,
-            &signature,
-        ),
-        "1.2.840.113549.1.1.13" => rsa::signature::Verifier::verify(
-            &rsa::pkcs1v15::VerifyingKey::<Sha512>::new(key),
-            &tbs,
-            &signature,
-        ),
-        other => {
-            return Err(format!(
-                "a certificate is signed with {other}, which this cannot check"
-            ))
-        }
+    let Some(hash) = Hash::of_signature(&algorithm, None) else {
+        return Err(format!(
+            "a certificate is signed with {algorithm}, which this cannot check"
+        ));
     };
-
-    verified.map_err(|_| "a certificate is not signed by the issuer it names".to_string())
+    match rsa_verifies(
+        &issuer.tbs_certificate.subject_public_key_info,
+        hash,
+        &tbs,
+        signature,
+    ) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("a certificate is not signed by the issuer it names".to_string()),
+        Err(problem) => Err(format!("an issuer's key cannot be checked: {problem}")),
+    }
 }
 
 /// Seconds since the epoch for a certificate's validity bounds.
-fn window(certificate: &Certificate) -> (u64, u64) {
+pub(crate) fn window(certificate: &Certificate) -> (u64, u64) {
     (
         certificate
             .tbs_certificate
@@ -218,7 +291,13 @@ fn window(certificate: &Certificate) -> (u64, u64) {
     )
 }
 
-fn extension<'a, T: der::Decode<'a> + const_oid::AssociatedOid>(
+/// Whether a certificate was within its validity window at `at`.
+pub(crate) fn valid_at(certificate: &Certificate, at: u64) -> bool {
+    let (from, until) = window(certificate);
+    from <= at && at <= until
+}
+
+pub(crate) fn extension<'a, T: der::Decode<'a> + const_oid::AssociatedOid>(
     certificate: &'a Certificate,
 ) -> Option<T> {
     certificate
@@ -230,15 +309,79 @@ fn extension<'a, T: der::Decode<'a> + const_oid::AssociatedOid>(
         .and_then(|extension| T::from_der(extension.extn_value.as_bytes()).ok())
 }
 
+/// Whether a certificate holds the purpose `usage` among its extended key
+/// usages.
+pub(crate) fn has_extended_usage(certificate: &Certificate, usage: ObjectIdentifier) -> bool {
+    extension::<ExtendedKeyUsage>(certificate).is_some_and(|usages| usages.0.contains(&usage))
+}
+
+/// The certificate a CMS signer names, among those it carries.
+///
+/// A signer identifies its certificate by issuer and serial number, or by
+/// the key identifier; taking the first certificate of the set instead lets
+/// the document decide which certificate the report is about.
+pub(crate) fn named_certificate<'a>(
+    signer: &SignerIdentifier,
+    certificates: &'a [Certificate],
+) -> Option<&'a Certificate> {
+    certificates.iter().find(|certificate| match signer {
+        SignerIdentifier::IssuerAndSerialNumber(named) => {
+            certificate.tbs_certificate.issuer == named.issuer
+                && certificate.tbs_certificate.serial_number == named.serial_number
+        }
+        SignerIdentifier::SubjectKeyIdentifier(named) => {
+            extension::<SubjectKeyIdentifier>(certificate).is_some_and(|own| own == *named)
+        }
+    })
+}
+
+/// The plain certificates of a CMS `certificates` set.
+pub(crate) fn carried(set: Option<&cms::signed_data::CertificateSet>) -> Vec<Certificate> {
+    set.map(|set| {
+        set.0
+            .iter()
+            .filter_map(|choice| match choice {
+                cms::cert::CertificateChoices::Certificate(certificate) => {
+                    Some(certificate.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The current time, in seconds since the epoch.
+pub(crate) fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// Whether `certificate` is the anchor `anchor`.
+///
+/// A trust anchor is a name and a key (RFC 5280 §6.1.1): the same
+/// certificate, or one carrying the anchor's subject AND its key. A name and
+/// a serial number are public, and a certificate cloning them with another key
+/// is anyone's.
+fn is_anchor(certificate: &Certificate, anchor: &Certificate) -> bool {
+    certificate == anchor
+        || (certificate.tbs_certificate.subject == anchor.tbs_certificate.subject
+            && certificate.tbs_certificate.subject_public_key_info
+                == anchor.tbs_certificate.subject_public_key_info)
+}
+
 /// Walk from `signer` to an anchor, checking every link.
 ///
-/// `at` is the instant the path is judged at; when it is unknown the links are
-/// still checked but the validity windows are not, and the report says so.
+/// `at` is the instant every certificate on the path has to be valid at. It
+/// is the current time unless a verified timestamp moved it earlier; the
+/// signer's own claim of when it signed never sets it.
 pub fn evaluate(
     signer: &Certificate,
     carried: &[Certificate],
     anchors: &[Certificate],
-    at: Option<u64>,
+    at: u64,
 ) -> TrustReport {
     let mut report = TrustReport {
         chain: vec![signer.tbs_certificate.subject.to_string()],
@@ -268,45 +411,63 @@ pub fn evaluate(
     }
 
     let mut current = signer.clone();
+    let mut visited = vec![signer.clone()];
     for depth in 0..MAX_DEPTH {
-        if let Some(at) = at {
-            let (from, until) = window(&current);
-            if at < from || at > until {
-                report.problems.push(format!(
-                    "{} was not valid when the document was signed",
-                    current.tbs_certificate.subject
-                ));
-            }
+        if !valid_at(&current, at) {
+            report.problems.push(format!(
+                "{} was not valid at the instant the signature is judged at",
+                current.tbs_certificate.subject
+            ));
         }
 
         // An anchor ends the walk: it is trusted because the caller said so,
         // not because something above it vouches for it.
-        let anchor = anchors.iter().find(|anchor| {
-            anchor.tbs_certificate.subject == current.tbs_certificate.subject
-                && anchor.tbs_certificate.serial_number == current.tbs_certificate.serial_number
-        });
-        if anchor.is_some() {
+        if anchors.iter().any(|anchor| is_anchor(&current, anchor)) {
             report.trusted = report.problems.is_empty();
             return report;
         }
 
+        // Every certificate here bearing the issuer's name is a candidate,
+        // the anchors first; the issuer is the one whose key signed. A decoy
+        // carrying the same name is passed over, not believed.
+        let mut refusal = None;
         let issuer = anchors
             .iter()
             .chain(carried.iter())
-            .find(|candidate| candidate.tbs_certificate.subject == current.tbs_certificate.issuer)
+            .filter(|candidate| candidate.tbs_certificate.subject == current.tbs_certificate.issuer)
+            .find(|candidate| match signed_by(&current, candidate) {
+                Ok(()) => true,
+                Err(problem) => {
+                    refusal.get_or_insert(problem);
+                    false
+                }
+            })
             .cloned();
         let Some(issuer) = issuer else {
-            report.problems.push(format!(
-                "no path to a trusted anchor: nothing here issued {}",
-                current.tbs_certificate.issuer
-            ));
+            report.problems.push(refusal.unwrap_or_else(|| {
+                format!(
+                    "no path to a trusted anchor: nothing here issued {}",
+                    current.tbs_certificate.issuer
+                )
+            }));
             return report;
         };
-
-        if let Err(problem) = signed_by(&current, &issuer) {
-            report.problems.push(problem);
+        // A certificate that signed itself, or one already on the path, ends
+        // the walk short of any anchor.
+        if issuer == current {
+            report.problems.push(format!(
+                "no path to a trusted anchor: {} signed itself and is not one",
+                current.tbs_certificate.subject
+            ));
             return report;
         }
+        if visited.contains(&issuer) {
+            report
+                .problems
+                .push("no path to a trusted anchor: the certificate path loops".to_string());
+            return report;
+        }
+        visited.push(issuer.clone());
 
         // Anything that issues certificates has to say that it does.
         if depth > 0 || issuer.tbs_certificate.subject != current.tbs_certificate.subject {

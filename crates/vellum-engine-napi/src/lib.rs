@@ -1102,22 +1102,27 @@ pub struct SignatureReport {
     pub covers_whole_document: bool,
     /// The document's bytes hash to what the signature committed to.
     pub digest_matches: bool,
-    /// The signature verifies against the certificate it carries.
+    /// The signature verifies against the certificate its signer names.
     pub signature_verifies: bool,
     /// Who the certificate says signed.
     pub signer: Option<String>,
-    /// When the signature says it was made.
+    /// When the signature says it was made, as the signer stated it. Shown,
+    /// never used to judge anything.
     pub signed_at: Option<String>,
-    /// An authority has vouched for when, so it outlives the certificate.
+    /// A timestamp whose authority's signature checks out and chains to an
+    /// anchor vouches for when, so the signature outlives the certificate.
     pub timestamped: bool,
-    /// A path was found from the signer's certificate to a trusted anchor.
+    /// A path was found from the signer's certificate to a trusted anchor,
+    /// every link valid at `momentAt`.
     pub trusted: bool,
     /// That path, the signer first and the anchor last.
     pub chain: Vec<String>,
-    /// Where the instant used to judge the path came from: `"timestamp"`,
-    /// `"claimed"` or `"unknown"`.
+    /// What the signature offers about when it was made: `"timestamp"` (a
+    /// verified one), `"claimed"` (only the signer's own word) or `"unknown"`.
+    /// Only a verified timestamp moves the instant judged at.
     pub moment: String,
-    /// That instant, in seconds since the epoch.
+    /// The instant the path was judged at, in seconds since the epoch: the
+    /// timestamp's, or the time of the check.
     pub moment_at: Option<i64>,
     /// The certificate that signed, DER.
     pub signer_certificate: Option<Buffer>,
@@ -1175,9 +1180,8 @@ impl Task for VerifySignaturesTask {
 
 /// Report on every signature the document carries.
 ///
-/// This establishes integrity and authorship, not trust: it does not ask
-/// whether the certificate comes from an authority you accept, nor whether it
-/// has been revoked.
+/// Integrity and authorship from the document; trust against the anchors
+/// given; revocation not asked, which needs a responder.
 #[napi(ts_return_type = "Promise<SignatureReport[]>")]
 pub fn verify_signatures(
     pdf: Buffer,
@@ -1220,8 +1224,9 @@ pub struct RevocationAnswer {
 
 /// Read a responder's answer about a certificate.
 ///
-/// `at` is the instant the document was signed: a certificate withdrawn after
-/// that does not taint what it signed before.
+/// `at` is the instant the signature is judged at, a report's `momentAt`: a
+/// certificate withdrawn after that does not taint what it signed before.
+/// Left out, it is now.
 #[napi]
 pub fn read_revocation(
     response: Buffer,

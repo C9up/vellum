@@ -123,7 +123,7 @@ fn signing_time(iso: &str) -> Result<Attribute, String> {
 }
 
 /// Seconds since the epoch for an ISO 8601 instant in UTC.
-fn parse_iso(iso: &str) -> Option<u64> {
+pub(crate) fn parse_iso(iso: &str) -> Option<u64> {
     let digits: Vec<u32> = iso
         .chars()
         .take_while(|character| *character != '+' && *character != 'Z')
@@ -450,6 +450,154 @@ pub(crate) mod tests {
                 certificate.to_der().expect("the certificate encodes")
             })
             .clone()
+    }
+
+    /// A fresh 2048-bit key, PKCS#8 DER.
+    pub(crate) fn fresh_key() -> RsaPrivateKey {
+        RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).expect("a key")
+    }
+
+    /// The public half of a PKCS#8 key, as a certificate carries it.
+    pub(crate) fn spki_of(key: &[u8]) -> SubjectPublicKeyInfoOwned {
+        spki(&RsaPrivateKey::from_pkcs8_der(key).expect("a key"))
+    }
+
+    pub(crate) fn pkcs8(key: &RsaPrivateKey) -> Vec<u8> {
+        key.to_pkcs8_der()
+            .expect("the key encodes")
+            .as_bytes()
+            .to_vec()
+    }
+
+    /// A validity window from `from` to `until`, seconds since the epoch.
+    pub(crate) fn window(from: u64, until: u64) -> Validity {
+        let at = |seconds| {
+            x509_cert::time::Time::UtcTime(
+                der::asn1::UtcTime::from_unix_duration(Duration::from_secs(seconds))
+                    .expect("a date"),
+            )
+        };
+        Validity {
+            not_before: at(from),
+            not_after: at(until),
+        }
+    }
+
+    /// A certificate the test authority issues: a leaf, or with `ca` set an
+    /// authority of its own limited to `path_len` levels below it, carrying
+    /// `public` and whatever `extend` adds.
+    pub(crate) fn issued(
+        subject: &str,
+        serial: u32,
+        public: SubjectPublicKeyInfoOwned,
+        validity: Validity,
+        ca: Option<Option<u8>>,
+        extend: impl FnOnce(&mut CertificateBuilder<'_, SigningKey<Sha256>>),
+    ) -> Vec<u8> {
+        issued_by(
+            &authority_key(),
+            "CN=Vellum Test Authority,O=Vellum",
+            subject,
+            serial,
+            public,
+            validity,
+            ca,
+            extend,
+        )
+    }
+
+    /// {@link issued}, by any issuer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issued_by(
+        issuer_key: &[u8],
+        issuer_name: &str,
+        subject: &str,
+        serial: u32,
+        public: SubjectPublicKeyInfoOwned,
+        validity: Validity,
+        ca: Option<Option<u8>>,
+        extend: impl FnOnce(&mut CertificateBuilder<'_, SigningKey<Sha256>>),
+    ) -> Vec<u8> {
+        let signing =
+            SigningKey::<Sha256>::new(RsaPrivateKey::from_pkcs8_der(issuer_key).expect("a key"));
+        let issuer = Name::from_str(issuer_name).expect("a name");
+        let profile = match ca {
+            Some(path_len_constraint) => Profile::SubCA {
+                issuer,
+                path_len_constraint,
+            },
+            None => Profile::Leaf {
+                issuer,
+                enable_key_agreement: false,
+                enable_key_encipherment: false,
+            },
+        };
+        let mut builder = CertificateBuilder::new(
+            profile,
+            SerialNumber::from(serial),
+            validity,
+            Name::from_str(subject).expect("a name"),
+            public,
+            &signing,
+        )
+        .expect("a builder");
+        extend(&mut builder);
+        let certificate: Certificate = builder.build().expect("a certificate");
+        certificate.to_der().expect("the certificate encodes")
+    }
+
+    /// A timestamp authority under the test authority: its key and its
+    /// certificate, marked for timestamping as RFC 3161 §2.3 requires.
+    pub(crate) fn timestamp_authority() -> (Vec<u8>, Vec<u8>) {
+        static TSA: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        TSA.get_or_init(|| {
+            let key = fresh_key();
+            let certificate = issued(
+                "CN=Vellum Test Timestamps,O=Vellum",
+                5,
+                spki(&key),
+                validity(),
+                None,
+                |builder| {
+                    builder
+                        .add_extension(&x509_cert::ext::pkix::ExtendedKeyUsage(vec![
+                            const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8"),
+                        ]))
+                        .expect("the extension is added");
+                },
+            );
+            (pkcs8(&key), certificate)
+        })
+        .clone()
+    }
+
+    /// A self-signed certificate copying the test authority's subject and
+    /// serial number, with a key of its own: what anybody can make from a
+    /// published root. Its key, and the certificate.
+    pub(crate) fn authority_clone() -> (Vec<u8>, Vec<u8>) {
+        let (_, _, authority) = key_and_chain();
+        let authority = Certificate::from_der(&authority).expect("the authority");
+        let key = fresh_key();
+        let certificate: Certificate = CertificateBuilder::new(
+            // Self-issued, and allowed to sign documents.
+            Profile::Leaf {
+                issuer: authority.tbs_certificate.subject.clone(),
+                enable_key_agreement: false,
+                enable_key_encipherment: false,
+            },
+            authority.tbs_certificate.serial_number.clone(),
+            validity(),
+            authority.tbs_certificate.subject.clone(),
+            spki(&key),
+            &SigningKey::<Sha256>::new(key.clone()),
+        )
+        .expect("a builder")
+        .build()
+        .expect("a certificate");
+        (
+            pkcs8(&key),
+            certificate.to_der().expect("the certificate encodes"),
+        )
     }
 
     /// The signing half of the chain, for tests that do not care about trust.

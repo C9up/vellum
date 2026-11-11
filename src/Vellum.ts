@@ -743,16 +743,22 @@ export class Vellum {
 	 * arithmetic over the covered part still checks out. A document whose
 	 * second half arrived later is not a signed document.
 	 *
-	 * This establishes **integrity and authorship, not trust**. It does not ask
-	 * whether the certificate comes from an authority you accept, nor whether
-	 * it has since been revoked: that needs a trust store and a live revocation
-	 * check, neither of which belongs in a PDF engine.
+	 * `signatureVerifies` and `digestMatches` establish **integrity and
+	 * authorship**: the signature was made by the certificate its signer names
+	 * (and that `signing-certificate-v2` binds it to), over these bytes.
 	 *
-	 * `trusted` says a path was found from the signer's certificate to one of
-	 * the anchors you accept, judged **at the moment of signing** rather than
-	 * now — a certificate that has since expired did not retroactively unsign
-	 * anything. `moment` says where that instant came from: a timestamp is
-	 * worth having because it makes it something other than the signer's word.
+	 * `trusted` says a path was found from that certificate to one of the
+	 * anchors you accept: every link signed by the key of the one above it, an
+	 * anchor matched by its whole certificate or by its name and key, every
+	 * certificate valid at `momentAt`. That instant is **now**, unless a
+	 * timestamp token proves the signature existed earlier — and a token is
+	 * only believed once its authority's signature over it checks out, the
+	 * authority is a timestamping certificate chaining to your anchors, and it
+	 * stamps this very signature. Then a certificate that has expired or been
+	 * revoked since did not retroactively unsign anything. The signer's own
+	 * `signedAt` is shown, never used: the holder of a lapsed certificate could
+	 * write any date there. `moment` says which case applied: `"timestamp"`,
+	 * or `"claimed"` / `"unknown"`, both judged now.
 	 *
 	 * **Revocation is not checked** unless `checkRevocation` asks for it. A
 	 * certificate withdrawn after it was issued otherwise still looks valid
