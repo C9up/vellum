@@ -1,4 +1,4 @@
-import type { ImageFormat, VellumConfig } from "./Vellum.js";
+import type { VellumConfig } from "./Vellum.js";
 
 /**
  * The config as it is WRITTEN, before validation.
@@ -41,7 +41,7 @@ export function defineConfig(config: VellumConfigInput): VellumConfig {
 				'it is "png" or "jpeg".',
 		);
 	}
-	return { ...rest, format: format as ImageFormat };
+	return { ...rest, format };
 }
 
 export type { VellumConfig };
