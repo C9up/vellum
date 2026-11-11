@@ -153,3 +153,15 @@ export const NAMED_COLOURS: Readonly<
 	yellow: [255, 255, 0],
 	yellowgreen: [154, 205, 50],
 };
+
+/**
+ * The colour a keyword names, or `undefined` when it names none. Only the
+ * table's own keys are keywords: a plain object also answers `constructor`
+ * and `__proto__`, and a colour is often a request's parameter.
+ */
+export function namedColour(
+	name: string,
+): readonly [number, number, number] | undefined {
+	const key = name.toLowerCase();
+	return Object.hasOwn(NAMED_COLOURS, key) ? NAMED_COLOURS[key] : undefined;
+}

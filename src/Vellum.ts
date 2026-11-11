@@ -362,7 +362,7 @@ export class Vellum {
 	 */
 	async #font(name: string | undefined): Promise<Buffer | undefined> {
 		if (name === undefined) return undefined;
-		const path = this.#config.fonts?.[name];
+		const path = own(this.#config.fonts, name);
 		if (path === undefined) return undefined;
 
 		const loaded = this.#fonts.get(path);
@@ -708,7 +708,7 @@ export class Vellum {
 	 * {@link Vellum.stamp} it on first, then sign.
 	 */
 	async sign(pdf: Buffer, options: SignOptions): Promise<Buffer> {
-		const signer = this.#config.signers?.[options.signer];
+		const signer = own(this.#config.signers, options.signer);
 		if (signer === undefined) {
 			const known = Object.keys(this.#config.signers ?? {});
 			throw new VellumError(
@@ -956,4 +956,18 @@ export class Vellum {
 /** The engine's form of {@link EditOptions}. */
 function edits(options: EditOptions): { discardSignatures?: boolean } {
 	return { discardSignatures: options.discardSignatures };
+}
+
+/**
+ * `table[name]`, from the table's own entries only. A configured table is a
+ * plain object, which also answers `constructor` and `__proto__`; a font or a
+ * signer name is often a request's parameter.
+ */
+function own<T>(
+	table: Readonly<Record<string, T>> | undefined,
+	name: string,
+): T | undefined {
+	return table !== undefined && Object.hasOwn(table, name)
+		? table[name]
+		: undefined;
 }

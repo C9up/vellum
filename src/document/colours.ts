@@ -6,7 +6,7 @@
 
 import { VellumError } from "../errors.js";
 import type { PaintInput } from "../native/generated.js";
-import { NAMED_COLOURS } from "./namedColours.js";
+import { namedColour } from "./namedColours.js";
 
 export type ColourValue =
 	| string
@@ -47,7 +47,7 @@ export function plainColour(colour: ColourValue): PlainColour {
 				values: [value >> 16, (value >> 8) & 0xff, value & 0xff],
 			};
 		}
-		const named = NAMED_COLOURS[colour.toLowerCase()];
+		const named = namedColour(colour);
 		if (named !== undefined) return { kind: "rgb", values: [...named] };
 		throw invalid(colour);
 	}
@@ -68,7 +68,7 @@ export function paintOf(
 	spots: ReadonlyMap<string, number>,
 ): PaintInput {
 	if (typeof colour === "string" && !colour.startsWith("#")) {
-		const named = NAMED_COLOURS[colour.toLowerCase()];
+		const named = namedColour(colour);
 		const spot = spots.get(colour);
 		if (named === undefined && spot !== undefined) {
 			return { kind: "spot", handle: spot };

@@ -2209,6 +2209,12 @@ export class PdfDocument extends Readable {
 			Circle: "circle",
 			FreeText: "text",
 		} as const;
+		if (!Object.hasOwn(kinds, options.Subtype)) {
+			throw new VellumError(
+				"INVALID_OPTIONS",
+				`Unknown annotation subtype ${JSON.stringify(options.Subtype)}`,
+			);
+		}
 		const kind = kinds[options.Subtype];
 		return this.#annotation(
 			kind,
