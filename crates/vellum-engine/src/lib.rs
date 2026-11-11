@@ -22,6 +22,7 @@ mod metadata;
 mod metrics;
 mod name_constraints;
 mod page;
+mod parse;
 mod reader;
 mod render;
 mod revocation;
@@ -56,7 +57,6 @@ pub use render::{
 };
 
 use krilla::Document as Authored;
-use lopdf::Document as Parsed;
 
 /// What a document reveals without decoding any of its text.
 ///
@@ -72,7 +72,7 @@ pub struct DocumentInfo {
 
 /// Parse `bytes` and report its shape.
 pub fn inspect(bytes: &[u8]) -> Result<DocumentInfo, String> {
-    let document = Parsed::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let document = parse::parse(bytes)?;
 
     Ok(DocumentInfo {
         page_count: document.get_pages().len() as u32,

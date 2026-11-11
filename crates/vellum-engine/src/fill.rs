@@ -456,8 +456,7 @@ fn set_widget_state(document: &mut Document, widget_id: ObjectId, state: &str) {
 /// does not have is an error rather than a silent no-op: a filled document
 /// missing an answer nobody noticed is worse than a failure.
 pub fn fill_form(bytes: &[u8], values: &[FieldValue]) -> Result<Vec<u8>, String> {
-    let mut document =
-        Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let mut document = crate::parse::parse(bytes)?;
 
     let known: BTreeMap<String, (ObjectId, crate::form::FormField)> = fields_of(&document)?
         .into_iter()

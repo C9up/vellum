@@ -18,7 +18,7 @@
 //! any signature already on it, and destroy the very history a signature
 //! exists to establish.
 
-use lopdf::{dictionary, Dictionary, Document, IncrementalDocument, Object, ObjectId};
+use lopdf::{dictionary, Dictionary, IncrementalDocument, Object, ObjectId};
 use sha2::{Digest, Sha256};
 
 /// What the signature says about itself.
@@ -317,7 +317,7 @@ pub fn prepare(pdf: &[u8], options: &SignatureOptions) -> Result<Prepared, Strin
         asked => asked,
     };
 
-    let previous = Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let previous = crate::parse::parse(pdf)?;
     let version = previous.version.clone();
     let mut incremental = IncrementalDocument::create_from(pdf.to_vec(), previous);
     // The appended revision carries a header of its own, which lopdf writes

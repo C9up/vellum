@@ -730,7 +730,7 @@ pub(crate) fn verify_signatures_at(
     options: &TrustOptions,
     now: u64,
 ) -> Result<Vec<SignatureReport>, String> {
-    let document = Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let document = crate::parse::parse(pdf)?;
 
     let (anchors, anchor_problems) = read_anchors(&options.anchors);
     let mut reports = Vec::new();

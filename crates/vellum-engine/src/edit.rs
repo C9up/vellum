@@ -14,7 +14,7 @@ use lopdf::{dictionary, Document, Object, ObjectId};
 const INHERITABLE: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 
 fn load(bytes: &[u8]) -> Result<Document, String> {
-    Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))
+    crate::parse::parse(bytes)
 }
 
 fn save(mut document: Document) -> Result<Vec<u8>, String> {

@@ -10,7 +10,7 @@
 //! and CJK are not, and are refused rather than mangled. Custom fonts are a
 //! separate piece of work, through krilla, whenever a caller needs one.
 
-use lopdf::{dictionary, Document, ObjectId};
+use lopdf::{dictionary, ObjectId};
 
 use crate::edit::flatten_inheritance;
 use crate::font::embed;
@@ -201,8 +201,7 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         return Err("text position must be finite".to_string());
     }
 
-    let mut document =
-        Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let mut document = crate::parse::parse(pdf)?;
     flatten_inheritance(&mut document);
 
     let pages = document.get_pages();
@@ -322,6 +321,7 @@ mod tests {
     use std::io::Cursor;
 
     use hayro::vello_cpu::Pixmap;
+    use lopdf::Document;
 
     use super::*;
     use crate::{create_blank, extract_text, inspect, render_page, ImageFormat, RenderOptions};

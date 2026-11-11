@@ -12,7 +12,7 @@
 
 use std::io::Cursor;
 
-use lopdf::{dictionary, Document, Object, ObjectId, Stream};
+use lopdf::{dictionary, Object, ObjectId, Stream};
 
 use crate::compose::images::MAX_IMAGE_PIXELS;
 use crate::edit::flatten_inheritance;
@@ -283,8 +283,7 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
     let picture = read_picture(image)?;
     let (width, height) = drawn_size(&picture, options)?;
 
-    let mut document =
-        Document::load_mem(pdf).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let mut document = crate::parse::parse(pdf)?;
     // Inherited attributes are materialised before the pages are touched, so
     // reading a page's MediaBox and Resources does not depend on its ancestry.
     flatten_inheritance(&mut document);

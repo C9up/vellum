@@ -345,8 +345,7 @@ fn visit(
 /// Every interactive field in the document, in the order the form declares
 /// them. A document with no form yields an empty list rather than an error.
 pub fn form_fields(bytes: &[u8]) -> Result<Vec<FormField>, String> {
-    let document =
-        Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let document = crate::parse::parse(bytes)?;
     Ok(fields_of(&document)?
         .into_iter()
         .map(|(_, field)| field)
@@ -361,8 +360,7 @@ pub fn form_fields(bytes: &[u8]) -> Result<Vec<FormField>, String> {
 /// `/ByteRange`, and a search for the literal key let such a signed document
 /// through to be rewritten.
 pub fn is_signed(bytes: &[u8]) -> Result<bool, String> {
-    let document =
-        Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let document = crate::parse::parse(bytes)?;
     Ok(fields_of(&document)?.iter().any(|(id, field)| {
         field.kind == FieldKind::Signature
             && document

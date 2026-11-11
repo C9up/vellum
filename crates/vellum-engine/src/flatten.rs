@@ -288,8 +288,7 @@ fn flatten_page(
 /// value but ships no appearance is an error rather than a silent erasure: the
 /// answer would vanish from a document that still looks complete.
 pub fn flatten_form(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let mut document =
-        Document::load_mem(bytes).map_err(|error| format!("cannot read PDF: {error}"))?;
+    let mut document = crate::parse::parse(bytes)?;
 
     // Which widgets carry an answer, so losing one can be reported by name.
     let mut answered: HashMap<ObjectId, String> = HashMap::new();

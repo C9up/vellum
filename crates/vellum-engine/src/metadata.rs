@@ -5,8 +5,6 @@
 //! the real table). Writing that by hand was the reason metadata was left out
 //! of the first pass — on a French document, an approximation eats the accents.
 
-use lopdf::Document;
-
 /// What the `/Info` dictionary says about a document.
 ///
 /// Every field is optional because every field genuinely is: a PDF is valid
@@ -31,8 +29,7 @@ pub struct DocumentMetadata {
 pub fn metadata(bytes: &[u8]) -> Result<DocumentMetadata, String> {
     // Reads the trailer and the Info dictionary rather than parsing every
     // object, which is why it is a separate call from `inspect`.
-    let info = Document::load_metadata_mem(bytes)
-        .map_err(|error| format!("cannot read PDF metadata: {error}"))?;
+    let info = crate::parse::parse_metadata(bytes)?;
 
     Ok(DocumentMetadata {
         title: clean(info.title),
@@ -113,6 +110,8 @@ fn pdf_date_to_iso(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use lopdf::Document;
+
     use super::*;
 
     #[test]

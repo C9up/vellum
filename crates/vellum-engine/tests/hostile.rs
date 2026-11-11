@@ -387,6 +387,81 @@ fn flate_bomb(inflated: usize, copies: usize) -> Vec<u8> {
     ])
 }
 
+/// A document whose object 5 sits in object stream 4, which inflates to
+/// `inflated` bytes, found through a cross-reference stream when `indexed`;
+/// otherwise the object stream is there but nothing points into it.
+fn object_stream_bomb(inflated: usize, indexed: bool) -> Vec<u8> {
+    let mut content = b"5 0 << /Kept true >>".to_vec();
+    content.resize(inflated, b' ');
+    let bodies: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_vec(),
+        stream(
+            "/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode",
+            &deflate(&content),
+        ),
+    ];
+    if !indexed {
+        return build_pdf(&bodies);
+    }
+
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref_at = out.len();
+    // Type, field 2 (4 bytes), field 3 (2 bytes), for objects 0 to 6.
+    let mut entries = vec![0u8, 0, 0, 0, 0, 0xff, 0xff];
+    for offset in &offsets {
+        entries.push(1);
+        entries.extend_from_slice(&u32::try_from(*offset).unwrap().to_be_bytes());
+        entries.extend_from_slice(&[0, 0]);
+    }
+    entries.extend_from_slice(&[2, 0, 0, 0, 4, 0, 0]);
+    entries.push(1);
+    entries.extend_from_slice(&u32::try_from(xref_at).unwrap().to_be_bytes());
+    entries.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(b"6 0 obj\n");
+    out.extend_from_slice(&stream(
+        "/Type /XRef /Size 7 /W [1 4 2] /Root 1 0 R",
+        &entries,
+    ));
+    out.extend_from_slice(format!("\nendobj\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// lopdf inflates every object stream while it parses, before anything
+/// else runs, on every path that parses: 1 MiB of upload inflating to a
+/// gigabyte took the process down. Past the ceiling the stream is not
+/// inflated, and a document missing what the stream held is refused.
+#[test]
+fn an_object_stream_inflating_past_the_ceiling_is_refused() {
+    let pdf = object_stream_bomb(64 * MIB, true);
+    let started = Instant::now();
+    let error = vellum_engine::inspect(&pdf).expect_err("refused");
+    assert!(error.contains("object stream 4"), "got {error}");
+    assert!(form_fields(&pdf).is_err());
+    assert!(vellum_engine::is_signed(&pdf).is_err());
+    assert!(started.elapsed() < Duration::from_secs(30));
+
+    // Under the ceiling, the same document reads.
+    let pdf = object_stream_bomb(MIB, true);
+    assert_eq!(vellum_engine::inspect(&pdf).expect("read").page_count, 1);
+}
+
+/// One nothing points into is not inflated past the ceiling either, and its
+/// absence takes nothing from the document.
+#[test]
+fn an_object_stream_nothing_points_into_is_not_inflated_past_the_ceiling() {
+    let pdf = object_stream_bomb(64 * MIB, false);
+    assert_eq!(vellum_engine::inspect(&pdf).expect("read").page_count, 1);
+}
+
 #[test]
 fn a_flate_stream_inflating_past_the_budget_is_refused() {
     let pdf = flate_bomb(16 * MIB, 1);
