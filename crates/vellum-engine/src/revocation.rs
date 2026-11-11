@@ -272,6 +272,12 @@ fn answered_by(
     .unwrap_or(false)
 }
 
+/// How far ahead of this machine's clock a responder's may run.
+const CLOCK_SKEW: u64 = 5 * 60;
+
+/// How old an answer that names no `nextUpdate` may be and still be read.
+const MAX_UNDATED_AGE: u64 = 24 * 60 * 60;
+
 /// The largest responder answer read. An answer about one certificate,
 /// with the responder's own certificates, is a few kilobytes; the responder is
 /// named by the document, so it may be anyone's server.
@@ -372,12 +378,23 @@ pub(crate) fn read_revocation_at(
         return unknown("the responder answered about a different certificate");
     };
 
-    // An answer that had already been superseded when the document was signed
-    // says nothing about that moment.
-    if let Some(next) = &single.next_update {
-        if next.to_unix_duration().as_secs() < at {
-            return unknown("the responder's answer was already stale when this was signed");
+    // The answer is about now, and has to be current: one replayed from
+    // before a revocation would otherwise still read good.
+    let this_update = single.this_update.to_unix_duration().as_secs();
+    if this_update > now.saturating_add(CLOCK_SKEW) {
+        return unknown("the responder's answer is dated in the future");
+    }
+    match &single.next_update {
+        Some(next) if next.to_unix_duration().as_secs() < now => {
+            return unknown("the responder's answer has been superseded");
         }
+        Some(_) => {}
+        // No nextUpdate says newer information is always available (RFC 6960
+        // §4.2.2.1), not that this one stays fresh: past a day it is stale.
+        None if now.saturating_sub(this_update) > MAX_UNDATED_AGE => {
+            return unknown("the responder's answer gives no expiry and is more than a day old");
+        }
+        None => {}
     }
 
     match &single.cert_status {
@@ -427,6 +444,17 @@ mod tests {
 
     /// An answer, signed by whoever the test says answers.
     fn answer(status: CertStatus, key: &[u8], responder: Option<Certificate>) -> Vec<u8> {
+        answer_dated(status, key, responder, NOW - 3600, Some(NOW + 86_400))
+    }
+
+    /// An answer whose thisUpdate and nextUpdate are given.
+    fn answer_dated(
+        status: CertStatus,
+        key: &[u8],
+        responder: Option<Certificate>,
+        this_update: u64,
+        next_update: Option<u64>,
+    ) -> Vec<u8> {
         let (_, certificate, issuer) = key_and_chain();
         let certificate = Certificate::from_der(&certificate).expect("the certificate");
         let issuer_certificate = Certificate::from_der(&issuer).expect("the issuer");
@@ -448,8 +476,8 @@ mod tests {
             responses: vec![SingleResponse {
                 cert_id: cert_id(&certificate, &issuer_certificate).expect("a cert id"),
                 cert_status: status,
-                this_update: at(NOW - 3600),
-                next_update: Some(at(NOW + 86_400)),
+                this_update: at(this_update),
+                next_update: next_update.map(at),
                 extensions: None,
             }],
             extensions: None,
@@ -667,6 +695,45 @@ mod tests {
         assert!(matches!(
             read(&response, Some(SIGNED_AT)),
             Revocation::Unknown { .. }
+        ));
+    }
+
+    fn good_dated(this_update: u64, next_update: Option<u64>) -> Revocation {
+        let response = answer_dated(
+            CertStatus::Good(Null),
+            &authority_key(),
+            None,
+            this_update,
+            next_update,
+        );
+        read(&response, Some(SIGNED_AT))
+    }
+
+    /// An answer past its nextUpdate is a replay of what used to be true.
+    #[test]
+    fn a_superseded_answer_is_not_believed() {
+        assert!(matches!(
+            good_dated(NOW - 3 * 86_400, Some(NOW - 60)),
+            Revocation::Unknown { reason } if reason.contains("superseded")
+        ));
+    }
+
+    /// No nextUpdate does not mean fresh forever: an hour old is read, two
+    /// days old is not.
+    #[test]
+    fn an_answer_without_expiry_is_only_read_while_recent() {
+        assert_eq!(good_dated(NOW - 3600, None), Revocation::Good);
+        assert!(matches!(
+            good_dated(NOW - 2 * 86_400, None),
+            Revocation::Unknown { reason } if reason.contains("more than a day old")
+        ));
+    }
+
+    #[test]
+    fn an_answer_dated_in_the_future_is_not_believed() {
+        assert!(matches!(
+            good_dated(NOW + 86_400, Some(NOW + 2 * 86_400)),
+            Revocation::Unknown { reason } if reason.contains("in the future")
         ));
     }
 }
