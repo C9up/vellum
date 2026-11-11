@@ -80,6 +80,17 @@ impl Composer {
         }
         let tree = Tree::from_data(bytes, &options)
             .map_err(|error| invalid(format!("the SVG cannot be read: {error}")))?;
+        // A filter is drawn as pixels, four to a point and up to 5000 a side,
+        // and some cost every pixel times their reach: one feMorphology of
+        // radius 20 on a 500 pt square held the thread for 80 seconds at
+        // end(). SVG markup is often a user's, and a filter is no vector
+        // anyway, so a drawing that uses one is refused.
+        if !tree.filters().is_empty() {
+            return Err(invalid(
+                "the SVG uses filters, which are drawn as pixels at a cost the markup sets: \
+                 remove them, or draw the result as an image",
+            ));
+        }
         let (width, height) = (tree.size().width(), tree.size().height());
         if !(width > 0.0 && height > 0.0 && width.is_finite() && height.is_finite()) {
             return Err(invalid("the SVG has no size"));
@@ -142,6 +153,22 @@ mod tests {
             })
             .unwrap();
         document
+    }
+
+    /// A filter costs every pixel times its reach, on the thread that ends
+    /// the document: refused when the SVG is read, whichever filter it is
+    /// and wherever it sits.
+    #[test]
+    fn an_svg_using_a_filter_is_refused() {
+        for svg in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500"><filter id="f"><feMorphology operator="dilate" radius="20"/></filter><rect width="500" height="500" filter="url(#f)"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><filter id="f"><feGaussianBlur stdDeviation="2"/></filter><g><g filter="url(#f)"><rect width="10" height="10"/></g></g></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><filter id="f"><feTurbulence baseFrequency="0.1" numOctaves="10"/></filter><mask id="m"><rect width="10" height="10" fill="white" filter="url(#f)"/></mask><rect width="10" height="10" mask="url(#m)"/></svg>"#,
+        ] {
+            let error = document().load_svg(svg.as_bytes()).unwrap_err();
+            assert_eq!(error.code, "INVALID_SVG");
+            assert!(error.message.contains("filters"), "{}", error.message);
+        }
     }
 
     #[test]
