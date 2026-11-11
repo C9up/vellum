@@ -84,6 +84,14 @@ every page, links and an outline, tagged structure, PDF/A and PDF/UA checked as
 the document is written, attached files (Factur-X), annotations, form fields,
 AES-256 encryption and SVG.
 
+What one call may lay out is bounded, since text and drawings are often a
+user's: one `text()`, `heightOfString` or `boundsOfString` call takes at most
+1 MiB of text, a path at most 1 000 000 segments, a table cell spans at most
+1000 rows and 64 columns of a table of at most 1000, and an SVG that uses filters
+is refused — a filter is drawn as pixels, at a cost its markup sets. A
+transform whose product with the current one overflows is refused, and a shape
+that would land past finite numbers is left out of the page.
+
 ```ts
 import { PdfDocument, toBytes } from '@c9up/vellum'
 
@@ -141,6 +149,11 @@ Text extraction rides on hayro's interpreter — it already resolves fonts,
 encodings and `/ToUnicode` maps. `pdf-extract` would have been the obvious
 choice but it pins `lopdf ^0.42` against our 0.44, which would put two copies
 of the parser in the binary.
+
+Every path that parses an existing document — inspecting it, reading its
+fields, editing, stamping, signing, verifying — inflates its object streams
+under a ceiling of 32 MiB each, and refuses a document whose object stream
+could not be read, rather than reading it without the objects it held.
 
 Rasterising an A4 page is around 30ms of pure computation, so it runs on the
 libuv thread pool rather than on the thread serving requests. Every method on
@@ -265,8 +278,9 @@ is repointed.
 
 Refusals are loud rather than silent, because a filled document quietly missing
 an answer is worse than a failure: an unknown field name, a read-only field, a
-value over the declared maximum length, a choice the form does not offer, and a
-checkbox state the document does not accept are all errors.
+value over the declared maximum length — or over 64 KiB when the form declares
+none — a choice the form does not offer, and a checkbox state the document does
+not accept are all errors.
 
 Text is laid out with the **published widths of the standard fonts**, because
 that is what the reader lays it out with. A field's `/Q` is honoured, a
@@ -337,6 +351,9 @@ engine, which does no I/O.
 The signature is appended as an **incremental revision**: the original bytes
 are preserved exactly. Rewriting the file would invalidate any signature
 already on it and destroy the history a signature exists to establish.
+Signing a signed document countersigns it: the new signature gets a field of
+its own (`Signature2`, and so on), and the earlier one still matches what it
+signed.
 
 A visible signature — a drawn one, an image — is a separate matter: `stamp` it
 on first, then sign.
@@ -406,12 +423,15 @@ document kept for years — which is most of the documents anyone bothers to
 sign — this is what keeps it verifiable.
 
 The token goes on as an **unsigned** attribute, which is what lets it be added
-without disturbing the signature. What comes back is checked rather than
-trusted: the authority's status, that it stamped the signature we actually
-sent, and that it answered *this* request rather than replaying an older
-answer. Those are read out of the token's structure, not looked for in its
-bytes — a hash that happens to appear inside a certificate is not a hash the
-authority stamped. A token that cannot be read is refused, which fails closed.
+without disturbing the signature. When it is attached, the authority's answer
+is checked: its status, that it stamped the signature we actually sent, and
+that it answered *this* request rather than replaying an older answer — read
+out of the token's structure, not looked for in its bytes. An answer that
+cannot be read is refused, which fails closed.
+
+Being unsigned, the attribute is also anybody's to add or replace once the
+document leaves you, so a verifier believes a token only after checking it
+again, as the next section describes.
 
 The signature grows by a few kilobytes, so a document prepared with a tight
 `capacity` may need a larger one.
@@ -444,8 +464,15 @@ over the covered part still checks out. A reader that verifies only the
 digest will happily call such a document signed. A document whose second half
 arrived later is not one.
 
-The report also names the signer, the time they stated, and whether an
-authority has timestamped it.
+The report also names the signer, the time they stated, and whether a
+timestamp that checks out vouches for when. `signatureVerifies` is about the
+certificate the signature names — by issuer and serial number, or key
+identifier — not whichever one the document lists first, and a
+`signing-certificate-v2` attribute naming another certificate is reported and
+makes the signature untrusted. Signatures are checked as RSA PKCS#1 v1.5 over
+SHA-256, -384 or -512, everywhere — the document, each certificate link, an
+OCSP answer, a timestamp; any other algorithm is reported as uncheckable rather
+than assumed, and an RSA key under 2048 bits is not believed.
 
 ### Trust
 
@@ -467,15 +494,26 @@ what an authority usually publishes. Supplying none is a position too: every
 signature then comes back untrusted, which is the honest answer rather than a
 comfortable one.
 
-The path is judged **at the moment of signing**, not now: a certificate valid
-when the document was signed and expired since did not retroactively unsign
-anything. `moment` says where that instant came from — `"timestamp"` if an
-authority vouched for it, `"claimed"` if it rests on the signer's own word.
-That is the concrete reason timestamping is worth the round trip.
+The path is judged **now** — `momentAt` says the instant — unless a timestamp
+proves the signature existed earlier. Then it is judged at the authority's
+instant, and a certificate valid then and expired or revoked since did not
+retroactively unsign anything. That is the concrete reason timestamping is
+worth the round trip. A timestamp is believed only when the authority's
+signature over it verifies with the certificate it names, that certificate is
+marked for timestamping, was valid when it stamped and chains to your anchors
+today, and the token stamps this very signature; otherwise the report says
+why and the signature is judged now. The time the signer wrote into its own
+signature is shown and never used: the holder of a lapsed certificate could
+write any date there. `moment` says which case applied — `"timestamp"`, or
+`"claimed"` / `"unknown"`, both judged now.
 
-Every link is checked: each certificate is signed by the one above it, each
-issuer says it is an authority, and the signing certificate is allowed to sign
-at all. A path longer than eight is treated as a loop.
+Every link is checked: each certificate's signature verifies with the key of
+the one above it, each issuer says it is an authority, the path length and the
+name constraints an authority was given are honoured, and the signing
+certificate is allowed to sign at all. An anchor is matched by the whole
+certificate or by its name and key — never by a name and serial number, which
+anyone can copy. A certificate that signed itself and is not an anchor ends the
+path, and a path longer than eight is treated as a loop.
 
 ### Revocation
 
@@ -488,8 +526,11 @@ const signatures = await vellum.verifySignatures(mandate, { checkRevocation: tru
 // signatures[0].revocation → { status: 'good' | 'revoked' | 'unknown', detail? }
 ```
 
-That is a network call per signature, to the responder the certificate names,
-so it is off unless asked for.
+That is a network call per signing certificate, to the responder it names, so
+it is off unless asked for. Signatures sharing a certificate share one
+question; at most four are asked at once, and no more than sixteen
+certificates per call — the rest answer `unknown` without anything being
+asked, since the document chooses the responders.
 
 The answer has **three** values, not two. `unknown` covers everything else —
 the responder was unreachable, answered about a different certificate, or could
@@ -498,10 +539,14 @@ avoid: treating it as good waves a withdrawn certificate through, and treating
 it as revoked rejects documents whenever a server is down. **Which to do is
 your policy**, so it is reported rather than decided.
 
-An answer is only read if the issuer, or somebody the issuer authorised to
-answer for it, actually signed it — otherwise anyone could revoke anything. And
-a certificate withdrawn **after** the document was signed does not taint it:
-that is what a signing time, and better a timestamp, is for.
+An answer is only read if the issuer signed it, or a delegate whose own
+certificate the issuer signed, still valid and marked for answering — the
+delegate travels inside the answer, so its name and usage alone prove nothing.
+It has to be current: past its `nextUpdate`, dated ahead of this clock, or, with
+no `nextUpdate`, more than a day old, it is `unknown`. And it is read at
+`momentAt`: a certificate withdrawn after a verified timestamp's instant does
+not taint the signature, while one withdrawn before now does, whatever time the
+signer claimed.
 
 ## Status
 
