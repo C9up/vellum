@@ -698,7 +698,8 @@ pub struct TextStampOptions {
     pub y: Option<f64>,
     /// Type size in points. Default 12.
     pub size: Option<f64>,
-    /// One of the 14 standard fonts, e.g. `"Helvetica"`, `"Times-Roman"`.
+    /// One of the eight standard fonts `stampText` supports, e.g. `"Helvetica"`,
+    /// `"Times-Roman"`.
     /// Ignored when `fontData` is given.
     pub font: Option<String>,
     /// A TrueType or OpenType file to embed, subsetted to the text. Lifts the

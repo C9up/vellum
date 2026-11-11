@@ -194,7 +194,7 @@ It works by re-embedding each existing page as a Form XObject and drawing over
 it, through krilla's `pdf` feature. (Krilla's README says embedding existing
 pages is out of scope; its published manifest says otherwise.)
 
-`stampText` writes a line of text. It uses the 14 standard fonts — `Helvetica`,
+`stampText` writes a line of text. It uses eight of the 14 standard fonts — `Helvetica`,
 `Helvetica-Bold`, `Helvetica-Oblique`, `Times-Roman`, `Times-Bold`,
 `Times-Italic`, `Courier`, `Courier-Bold` — which a PDF may reference *without
 embedding*: nothing is added to the file and no font has to be supplied. The
@@ -225,7 +225,7 @@ inverted.
 
 ## Fonts
 
-`stampText` uses the 14 standard fonts by default. A PDF may reference those
+`stampText` uses those eight standard fonts by default. A PDF may reference those
 without embedding them, so nothing is added to the file and no font has to be
 supplied — at the cost of the WinAnsi character set, outside which text is
 refused rather than mangled.

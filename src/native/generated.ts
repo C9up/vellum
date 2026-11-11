@@ -456,7 +456,8 @@ export interface TextStampOptions {
 	/** Type size in points. Default 12. */
 	size?: number;
 	/**
-	 * One of the 14 standard fonts, e.g. `"Helvetica"`, `"Times-Roman"`.
+	 * One of the eight standard fonts `stampText` supports, e.g. `"Helvetica"`,
+	 * `"Times-Roman"`.
 	 * Ignored when `fontData` is given.
 	 */
 	font?: string;

@@ -1,8 +1,8 @@
 //! Writing text onto the pages of an existing document.
 //!
 //! The mention "PAID" on an invoice, a file number in a header, a draft
-//! marking. Deliberately built on the 14 standard fonts, which a PDF may
-//! REFERENCE without embedding (PDF 32000-1 §9.6.2.2): no font file to ship,
+//! marking. Deliberately built on eight of the 14 standard fonts, which a PDF
+//! may REFERENCE without embedding (PDF 32000-1 §9.6.2.2): no font file to ship,
 //! nothing added to the binary, and hayro already renders them.
 //!
 //! The cost of that choice, and it is a real one: text is encoded as WinAnsi.
@@ -56,13 +56,12 @@ impl StandardFont {
             "courier" => Ok(Self::Courier),
             "courierbold" => Ok(Self::CourierBold),
             other => Err(format!(
-                "unknown font {other:?} — expected one of the 14 standard fonts, such as \"Helvetica\" or \"Times-Roman\""
+                "unknown font {other:?} — expected one of the eight standard fonts stampText supports: Helvetica, Helvetica-Bold, Helvetica-Oblique, Times-Roman, Times-Bold, Times-Italic, Courier, Courier-Bold"
             )),
         }
     }
 }
 
-/// Where and how a line of text is written onto a page.
 /// Which font writes the text.
 ///
 /// A standard font costs nothing and is limited to WinAnsi; a supplied one is
