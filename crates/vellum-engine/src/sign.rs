@@ -61,8 +61,23 @@ pub struct Prepared {
     pub digest: [u8; 32],
 }
 
-/// The field name, and the only one this writes.
-const FIELD_NAME: &str = "Signature1";
+/// What the signature fields this writes are called: `Signature1`, then
+/// `Signature2` on a document already carrying the first, and so on. A form's
+/// field names are unique (ISO 32000-2 §12.7.4), and a countersignature named
+/// like the signature it follows would be reported under the same name.
+const FIELD_PREFIX: &str = "Signature";
+
+/// The first `SignatureN` name the document does not use yet.
+fn free_field_name(document: &lopdf::Document) -> Result<String, String> {
+    let taken: std::collections::HashSet<String> = crate::form::fields_of(document)?
+        .into_iter()
+        .map(|(_, field)| field.name)
+        .collect();
+    (1..)
+        .map(|number| format!("{FIELD_PREFIX}{number}"))
+        .find(|name| !taken.contains(name))
+        .ok_or_else(|| "no signature field name is free".to_string())
+}
 
 /// Turn an ISO 8601 instant into the form a PDF date takes.
 ///
@@ -149,6 +164,7 @@ fn add_signature_field(
     incremental: &mut IncrementalDocument,
     options: &SignatureOptions,
     capacity: usize,
+    name: &str,
 ) -> Result<ObjectId, String> {
     let page_id = *incremental
         .get_prev_documents()
@@ -194,7 +210,7 @@ fn add_signature_field(
         "Type" => "Annot",
         "Subtype" => "Widget",
         "FT" => "Sig",
-        "T" => lopdf::text_string(FIELD_NAME),
+        "T" => lopdf::text_string(name),
         "V" => Object::Reference(signature_id),
         "Rect" => vec![0.into(), 0.into(), 0.into(), 0.into()],
         // Printed, and its appearance locked.
@@ -260,6 +276,25 @@ fn add_signature_field(
     Ok(signature_id)
 }
 
+/// Where the body of the indirect object `id` starts, searching from `from`
+/// on: just after its `id generation obj` header.
+fn object_body(document: &[u8], from: usize, id: ObjectId) -> Option<usize> {
+    let header = format!("{} {} obj", id.0, id.1);
+    let mut at = from;
+    loop {
+        let found = at
+            + document
+                .get(at..)?
+                .windows(header.len())
+                .position(|window| window == header.as_bytes())?;
+        // `12 0 obj` is not the end of `112 0 obj`.
+        if found == 0 || document[found - 1].is_ascii_whitespace() {
+            return Some(found + header.len());
+        }
+        at = found + 1;
+    }
+}
+
 /// Find the span the signature value was reserved in, brackets included.
 fn reserved_span(document: &[u8], capacity: usize) -> Option<(usize, usize)> {
     let mut needle = Vec::with_capacity(capacity * 2 + 2);
@@ -273,24 +308,49 @@ fn reserved_span(document: &[u8], capacity: usize) -> Option<(usize, usize)> {
     Some((at, at + needle.len()))
 }
 
-/// Find a reservation of any size: an unbroken run of zeros in angle
-/// brackets, long enough that no other hex string could be mistaken for it.
-fn reserved_run(document: &[u8]) -> Option<(usize, usize)> {
+/// Every run of zeros in angle brackets long enough to be a reservation.
+fn zero_runs(document: &[u8]) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
     let mut from = 0;
     while let Some(offset) = document[from..].iter().position(|byte| *byte == b'<') {
         let open = from + offset;
-        match document[open + 1..].iter().position(|byte| *byte == b'>') {
-            Some(length) if length >= MINIMUM_CAPACITY * 2 => {
-                let close = open + 1 + length;
-                if document[open + 1..close].iter().all(|byte| *byte == b'0') {
-                    return Some((open, close + 1));
-                }
-                from = open + 1;
-            }
-            _ => from = open + 1,
+        let zeros = document[open + 1..]
+            .iter()
+            .take_while(|byte| **byte == b'0')
+            .count();
+        let close = open + 1 + zeros;
+        if zeros >= MINIMUM_CAPACITY * 2 && document.get(close) == Some(&b'>') {
+            runs.push((open, close + 1));
+            from = close + 1;
+        } else {
+            from = open + 1;
         }
     }
-    None
+    runs
+}
+
+/// Find the reservation `prepare` made: the run of zeros that a byte range
+/// in the document leaves out exactly, `[0 start end rest]` as `prepare`
+/// writes it, reaching the end of the file.
+///
+/// A run of zeros alone could be anybody's: a document may already hold one,
+/// an empty signature from another tool or one planted there, and the value
+/// written into it would sign nothing. More than one candidate is refused
+/// rather than guessed between.
+fn reserved_run(document: &[u8]) -> Result<(usize, usize), String> {
+    let mut found = zero_runs(document).into_iter().filter(|&(start, end)| {
+        let range = format!("[0 {start} {end} {}", document.len() - end);
+        document
+            .windows(range.len())
+            .any(|window| window == range.as_bytes())
+    });
+    match (found.next(), found.next()) {
+        (Some(run), None) => Ok(run),
+        (None, _) => Err("this document has no reserved signature space".to_string()),
+        (Some(_), Some(_)) => {
+            Err("this document has more than one reserved signature space".to_string())
+        }
+    }
 }
 
 /// Find the `/ByteRange` array, so the placeholder can be written over.
@@ -318,6 +378,7 @@ pub fn prepare(pdf: &[u8], options: &SignatureOptions) -> Result<Prepared, Strin
     };
 
     let previous = crate::parse::parse(pdf)?;
+    let name = free_field_name(&previous)?;
     let version = previous.version.clone();
     let mut incremental = IncrementalDocument::create_from(pdf.to_vec(), previous);
     // The appended revision carries a header of its own, which lopdf writes
@@ -326,17 +387,28 @@ pub fn prepare(pdf: &[u8], options: &SignatureOptions) -> Result<Prepared, Strin
     // the document it extends is misleading to anyone reading the bytes.
     incremental.new_document.version = version;
 
-    add_signature_field(&mut incremental, options, capacity)?;
+    let signature_id = add_signature_field(&mut incremental, options, capacity, &name)?;
 
     let mut document = Vec::new();
     incremental
         .save_to(&mut document)
         .map_err(|error| format!("cannot write PDF: {error}"))?;
 
-    let (hole_start, hole_end) = reserved_span(&document, capacity)
+    // Both are looked for in the signature dictionary just written, past
+    // the original bytes: the first `/ByteRange` of a signed document is its
+    // previous signature's. The dictionary writes them before any string the
+    // caller supplied, so text in a /Reason cannot be taken for them either.
+    let body = object_body(&document, pdf.len(), signature_id)
+        .ok_or_else(|| "the signature dictionary was not written as expected".to_string())?;
+    let (hole_start, hole_end) = reserved_span(&document[body..], capacity)
+        .map(|(start, end)| (body + start, body + end))
         .ok_or_else(|| "the reserved signature space was not written as expected".to_string())?;
-    let (range_start, range_end) = byte_range_span(&document)
+    let (range_start, range_end) = byte_range_span(&document[body..])
+        .map(|(start, end)| (body + start, body + end))
         .ok_or_else(|| "the byte range was not written as expected".to_string())?;
+    if range_end > hole_start {
+        return Err("the byte range was not written as expected".to_string());
+    }
 
     // Everything but the hole, which is exactly what the signature covers.
     let tail = document.len() - hole_end;
@@ -367,8 +439,7 @@ pub fn prepare(pdf: &[u8], options: &SignatureOptions) -> Result<Prepared, Strin
 pub fn embed_signature(prepared: &[u8], value: &[u8]) -> Result<Vec<u8>, String> {
     // The reservation's size is not passed in; it is read back from the
     // document, as the run of zeros between the brackets.
-    let (hole_start, hole_end) = reserved_run(prepared)
-        .ok_or_else(|| "this document has no reserved signature space".to_string())?;
+    let (hole_start, hole_end) = reserved_run(prepared)?;
 
     let room = hole_end - hole_start - 2;
     if value.len() * 2 > room {
@@ -533,7 +604,7 @@ mod tests {
         assert_eq!(inspect(&signed).expect("it parses").page_count, 1);
         let fields = form_fields(&signed).expect("it has a form");
         assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].name, FIELD_NAME);
+        assert_eq!(fields[0].name, "Signature1");
         assert_eq!(fields[0].kind.as_str(), "signature");
     }
 
@@ -556,7 +627,7 @@ mod tests {
 
         let after = form_fields(&signed).expect("it still has a form");
         assert_eq!(after.len(), before + 1, "the fields are kept and one added");
-        assert!(after.iter().any(|field| field.name == FIELD_NAME));
+        assert!(after.iter().any(|field| field.name == "Signature1"));
     }
 
     #[test]
@@ -612,5 +683,103 @@ mod tests {
         );
         // Not a date: kept as it came rather than turned into a wrong one.
         assert_eq!(iso_to_pdf_date("yesterday"), "yesterday");
+    }
+
+    /// Sign `pdf` the way an application would: prepare, sign, embed.
+    fn signed(pdf: &[u8]) -> Vec<u8> {
+        let prepared = prepare(pdf, &options()).expect("preparing should succeed");
+        let (key, certificate) = crate::cms::tests::key_and_certificate();
+        let value = crate::sign_cms(
+            &prepared.digest,
+            &key,
+            std::slice::from_ref(&certificate),
+            "2026-09-04T14:30:00Z",
+        )
+        .expect("signing should succeed");
+        embed_signature(&prepared.document, &value).expect("embedding should succeed")
+    }
+
+    /// Countersigning is what the incremental revision is for. The second
+    /// signature is written into its own dictionary, under its own name, and
+    /// the first is left exactly as it was: still matching what it signed,
+    /// with the second revision reported as added after it.
+    #[test]
+    fn signing_a_signed_document_leaves_the_first_signature_intact() {
+        let once = signed(&blank());
+        let twice = signed(&once);
+        assert_eq!(
+            &twice[..once.len()],
+            &once[..],
+            "the first revision is kept"
+        );
+
+        let reports =
+            crate::verify_signatures(&twice, &crate::TrustOptions::default()).expect("it reads");
+        assert_eq!(reports.len(), 2);
+        let names: Vec<&str> = reports.iter().map(|report| report.field.as_str()).collect();
+        assert_eq!(names, ["Signature1", "Signature2"]);
+        for report in &reports {
+            assert!(
+                report.digest_matches && report.signature_verifies,
+                "{}: {:?}",
+                report.field,
+                report.problems
+            );
+        }
+        let latest = &reports[1];
+        assert!(latest.covers_whole_document, "{:?}", latest.problems);
+        let first = &reports[0];
+        assert!(!first.covers_whole_document);
+        assert!(
+            first
+                .problems
+                .iter()
+                .any(|problem| problem.contains("added after this signature")),
+            "{:?}",
+            first.problems
+        );
+    }
+
+    /// A document already holding a long run of zeros in brackets: the value
+    /// goes into the space this signature reserved, not into that one.
+    #[test]
+    fn a_run_of_zeros_already_in_the_document_is_not_taken_for_the_reservation() {
+        let decoy = format!("<< /Junk <{}> >>", "0".repeat(4096));
+        let bodies = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_string(),
+            decoy,
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, body) in bodies.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref_at = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n").as_bytes(),
+        );
+
+        let document = signed(&pdf);
+        let reports =
+            crate::verify_signatures(&document, &crate::TrustOptions::default()).expect("it reads");
+        let report = &reports[0];
+        assert!(
+            report.covers_whole_document && report.digest_matches && report.signature_verifies,
+            "{:?}",
+            report.problems
+        );
+        assert!(
+            document
+                .windows(4098)
+                .any(|window| window == format!("<{}>", "0".repeat(4096)).as_bytes()),
+            "the decoy is untouched"
+        );
     }
 }
