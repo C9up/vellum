@@ -8,6 +8,13 @@ import { VellumError } from "../errors.js";
 /** 4·(√2 − 1)/3: how far a cubic's handles reach to draw a quarter circle. */
 const KAPPA = (4 * (Math.SQRT2 - 1)) / 3;
 
+/**
+ * The most segments one path may hold, the engine's own ceiling: a path
+ * string of n bytes can be n segments, and refusing it as it grows costs
+ * nothing, where refusing it once built costs the whole path.
+ */
+export const MAX_PATH_SEGMENTS = 1_000_000;
+
 /** A path being built: verbs (`M L C Q Z`) and the numbers they take. */
 export class PathRecorder {
 	verbs = "";
@@ -21,12 +28,22 @@ export class PathRecorder {
 	/** The last quadratic's handle, for SVG's `T`. */
 	#quadHandle: [number, number] | undefined;
 
+	#add(verb: string): void {
+		if (this.verbs.length >= MAX_PATH_SEGMENTS) {
+			throw new VellumError(
+				"INVALID_OPTIONS",
+				`A path holds at most ${MAX_PATH_SEGMENTS} segments.`,
+			);
+		}
+		this.verbs += verb;
+	}
+
 	get point(): [number, number] {
 		return [this.#x, this.#y];
 	}
 
 	moveTo(x: number, y: number): void {
-		this.verbs += "M";
+		this.#add("M");
 		this.coords.push(x, y);
 		this.#x = this.#startX = x;
 		this.#y = this.#startY = y;
@@ -34,7 +51,7 @@ export class PathRecorder {
 	}
 
 	lineTo(x: number, y: number): void {
-		this.verbs += "L";
+		this.#add("L");
 		this.coords.push(x, y);
 		this.#x = x;
 		this.#y = y;
@@ -49,7 +66,7 @@ export class PathRecorder {
 		x: number,
 		y: number,
 	): void {
-		this.verbs += "C";
+		this.#add("C");
 		this.coords.push(x1, y1, x2, y2, x, y);
 		this.#x = x;
 		this.#y = y;
@@ -58,7 +75,7 @@ export class PathRecorder {
 	}
 
 	quadraticCurveTo(x1: number, y1: number, x: number, y: number): void {
-		this.verbs += "Q";
+		this.#add("Q");
 		this.coords.push(x1, y1, x, y);
 		this.#x = x;
 		this.#y = y;
@@ -67,7 +84,7 @@ export class PathRecorder {
 	}
 
 	closePath(): void {
-		this.verbs += "Z";
+		this.#add("Z");
 		this.#x = this.#startX;
 		this.#y = this.#startY;
 		this.#cubicHandle = this.#quadHandle = undefined;

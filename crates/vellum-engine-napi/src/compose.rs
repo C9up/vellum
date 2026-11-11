@@ -12,7 +12,7 @@ use vellum_engine::compose::annotations::{AnnotationKind, Attachment, Fit, Relat
 use vellum_engine::compose::forms::{Encryption, FieldSpec, FieldType, Format, Rights};
 use vellum_engine::compose::graphics::{
     Colour, FillRule, Gradient, GradientShape, GradientStop, LineCap, LineJoin, Matrix, Paint,
-    Segment,
+    Segment, MAX_SEGMENTS,
 };
 use vellum_engine::compose::links::{LinkTarget, OutlineItem};
 use vellum_engine::compose::tagging::{ArtifactKind, Child, Element, Mark};
@@ -1532,6 +1532,14 @@ fn matrix(values: &[f64]) -> Result<Matrix> {
 
 /// A path as verbs (`M L C Q Z`) and the numbers they take, in order.
 fn segments(verbs: &str, coords: &[f64]) -> Result<Vec<Segment>> {
+    // Refused before anything is built: a segment is some thirty bytes, and
+    // 20 million one-byte `Z`s cost 700 MiB to be told they are too many.
+    if verbs.len() > MAX_SEGMENTS || coords.len() > MAX_SEGMENTS * 6 {
+        return Err(options_error(format!(
+            "a path of {} segments is over {MAX_SEGMENTS}",
+            verbs.len()
+        )));
+    }
     let mut numbers = coords.iter();
     let mut take = |count: usize| -> Result<Vec<f32>> {
         (0..count)

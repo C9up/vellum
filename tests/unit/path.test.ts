@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
 	arc,
+	MAX_PATH_SEGMENTS,
 	PathRecorder,
 	polygon,
 	svgPath,
 } from "../../src/document/vector.js";
+import { PdfDocument } from "../../src/index.js";
 
 function parse(data: string): { verbs: string; coords: number[] } {
 	const path = new PathRecorder();
@@ -90,5 +92,25 @@ describe("arcs and polygons", () => {
 		const path = new PathRecorder();
 		polygon(path, []);
 		expect(path.take().verbs).toBe("");
+	});
+});
+
+describe("a path too long to draw", () => {
+	it("is refused as it grows, not once every segment is built", () => {
+		// A path string of n bytes is n segments: `Z` takes no numbers.
+		const data = `M0 0${"Z".repeat(MAX_PATH_SEGMENTS)}`;
+		expect(() => parse(data)).toThrow(
+			expect.objectContaining({ code: "E_VELLUM_INVALID_OPTIONS" }),
+		);
+		expect(() => new PdfDocument().path(data).fill()).toThrow(
+			/at most 1000000 segments/,
+		);
+	});
+
+	it("draws one right at the ceiling", () => {
+		const path = new PathRecorder();
+		path.moveTo(0, 0);
+		for (let index = 1; index < MAX_PATH_SEGMENTS; index++) path.closePath();
+		expect(path.take().verbs).toHaveLength(MAX_PATH_SEGMENTS);
 	});
 });
