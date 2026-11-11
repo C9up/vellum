@@ -1581,6 +1581,76 @@ mod tests {
         assert!(report.trusted, "{:?}", report.problems);
     }
 
+    /// A key small enough to factor.
+    fn weak_key() -> Vec<u8> {
+        crate::cms::tests::pkcs8(
+            &rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).expect("a key"),
+        )
+    }
+
+    /// A signer whose key is too small is not believed, even under a
+    /// trusted authority.
+    #[test]
+    fn a_signature_by_a_weak_key_does_not_verify() {
+        let key = weak_key();
+        let certificate = crate::cms::tests::issued(
+            "CN=Vellum Weak Signer,O=Vellum",
+            13,
+            crate::cms::tests::spki_of(&key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            None,
+            |_| {},
+        );
+        let document = document_signed_with(&key, &certificate);
+        let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
+        assert!(!report.signature_verifies, "{:?}", report.problems);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("1024 bits is too weak")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// Nor is a link signed by a weak issuer key.
+    #[test]
+    fn a_link_signed_by_a_weak_key_is_not_trusted() {
+        let intermediate_key = weak_key();
+        let intermediate = crate::cms::tests::issued(
+            "CN=Vellum Weak Authority,O=Vellum",
+            14,
+            crate::cms::tests::spki_of(&intermediate_key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            Some(None),
+            |_| {},
+        );
+        let (key, _) = key_and_certificate();
+        let leaf = crate::cms::tests::issued_by(
+            &intermediate_key,
+            "CN=Vellum Weak Authority,O=Vellum",
+            "CN=Vellum Under Weak,O=Vellum",
+            15,
+            crate::cms::tests::spki_of(&key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            None,
+            |_| {},
+        );
+        let document = signed_with_certificates(&[leaf, intermediate]);
+        let report = &verify_signatures(&document, &anchored()).expect("it reads")[0];
+        assert!(report.signature_verifies, "{:?}", report.problems);
+        assert!(!report.trusted, "{:?}", report.problems);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("too weak")),
+            "got {:?}",
+            report.problems
+        );
+    }
+
     /// A second certificate for the same key, issued under another name.
     fn decoy() -> Vec<u8> {
         let (key, _) = key_and_certificate();

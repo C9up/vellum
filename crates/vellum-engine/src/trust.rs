@@ -204,11 +204,16 @@ impl Hash {
     }
 }
 
+/// The smallest RSA modulus a signature is believed from. Below it a key can
+/// be factored by somebody determined, and whoever did can sign as its
+/// holder (NIST SP 800-131A has disallowed less since 2013).
+pub(crate) const MIN_RSA_BITS: usize = 2048;
+
 /// Whether an RSA PKCS#1 v1.5 `signature` over `message` was made by the key
 /// in `key`.
 ///
-/// `Err` when the key cannot be checked with at all, `Ok(false)` when it can
-/// and the signature is not its.
+/// `Err` when the key cannot be checked with at all, or is too weak to be
+/// believed; `Ok(false)` when it can and the signature is not its.
 pub(crate) fn rsa_verifies(
     key: &SubjectPublicKeyInfoOwned,
     hash: Hash,
@@ -222,6 +227,12 @@ pub(crate) fn rsa_verifies(
         .ok()
         .and_then(|info| rsa::RsaPublicKey::try_from(info).ok())
         .ok_or_else(|| "a key is not RSA, which this cannot check with".to_string())?;
+    let bits = rsa::traits::PublicKeyParts::n(&key).bits();
+    if bits < MIN_RSA_BITS {
+        return Err(format!(
+            "a key of {bits} bits is too weak to be believed: at least {MIN_RSA_BITS} are required"
+        ));
+    }
     let Ok(signature) = rsa::pkcs1v15::Signature::try_from(signature) else {
         return Ok(false);
     };
