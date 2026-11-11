@@ -1954,6 +1954,20 @@ mod tests {
         assert!(report.trusted, "{:?}", report.problems);
     }
 
+    /// Write the signed document the TypeScript tamper tests start from.
+    ///
+    /// Node cannot mint a certificate, so the document is signed here, with
+    /// a throwaway key that is not kept; the file holds the signature and its
+    /// certificate, which are public by nature.
+    ///
+    ///     cargo test -p vellum-engine write_the_signed_document_fixture -- --ignored
+    #[test]
+    #[ignore = "regenerates a checked-in fixture"]
+    fn write_the_signed_document_fixture() {
+        std::fs::write("../../tests/fixtures/signed.pdf", signed_document())
+            .expect("the fixture is written");
+    }
+
     #[test]
     fn refuses_bytes_that_are_not_a_pdf() {
         assert!(verify_signatures(b"not a PDF", &TrustOptions::default()).is_err());

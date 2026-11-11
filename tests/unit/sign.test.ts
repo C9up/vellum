@@ -13,6 +13,7 @@ import {
 } from "../../src/index.js";
 import { fakeResponder } from "../fakeResponder.js";
 import { encodePng } from "./png.js";
+import { buildPdf } from "./rawPdf.js";
 
 /**
  * A signer that records what it was asked to sign. It is not a real one — the
@@ -261,6 +262,54 @@ describe("checking the signatures on a document", () => {
 		const [report] = await vellum.verifySignatures(appended);
 		expect(report?.coversWholeDocument).toBe(false);
 		expect(report?.problems.join(" ")).toMatch(/added after this signature/);
+	});
+
+	it("catches a byte changed inside the signed range", async () => {
+		const signed = readFileSync(
+			fileURLToPath(new URL("../fixtures/signed.pdf", import.meta.url)),
+		);
+		const vellum = new Vellum();
+		const [intact] = await vellum.verifySignatures(signed);
+		expect(intact?.digestMatches).toBe(true);
+		expect(intact?.signatureVerifies).toBe(true);
+
+		// Inside the first stretch the range covers: the binary comment line
+		// under the header, so the file still parses the same.
+		const flipped = Buffer.from(signed);
+		flipped[10] = (flipped[10] ?? 0) ^ 0x01;
+		const [report] = await vellum.verifySignatures(flipped);
+		expect(report?.coversWholeDocument).toBe(true);
+		expect(report?.digestMatches).toBe(false);
+		expect(report?.problems.join(" ")).toMatch(/changed since it was signed/);
+	});
+
+	it("catches a byte range that stops before the end of the file", async () => {
+		const pdf = withByteRange((first, second, length) => [
+			0,
+			first,
+			second,
+			length - second - 40,
+		]);
+		const [report] = await new Vellum().verifySignatures(pdf);
+		expect(report?.coversWholeDocument).toBe(false);
+		expect(report?.problems.join(" ")).toMatch(
+			/40 bytes were added after this signature/,
+		);
+	});
+
+	it("catches a byte range whose gap is not the signature's value", async () => {
+		// The gap reaches 30 bytes past the value: those bytes are unsigned.
+		const pdf = withByteRange((first, second, length) => [
+			0,
+			first,
+			second + 30,
+			length - second - 30,
+		]);
+		const [report] = await new Vellum().verifySignatures(pdf);
+		expect(report?.coversWholeDocument).toBe(false);
+		expect(report?.problems.join(" ")).toMatch(
+			/unsigned region is not this signature's value/,
+		);
 	});
 
 	it("refuses bytes that are not a PDF", async () => {
@@ -533,3 +582,31 @@ describe("editing a document that is already signed", () => {
 		}
 	});
 });
+
+/**
+ * A document whose one signature field holds `<C0FFEE>`, its byte range set
+ * from where that value sits and how long the file is.
+ */
+function withByteRange(
+	range: (first: number, second: number, length: number) => number[],
+): Buffer {
+	const placeholder = "[0 0000000000 0000000000 0000000000]";
+	const pdf = buildPdf([
+		"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /SigFlags 3 >> >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>",
+		"<< /FT /Sig /T (Signature1) /V 5 0 R >>",
+		`<< /Type /Sig /ByteRange ${placeholder} /Contents <C0FFEE> >>`,
+	]);
+	const text = pdf.toString("latin1");
+	const first = text.indexOf("<C0FFEE>");
+	const second = first + "<C0FFEE>".length;
+	const [, ...rest] = range(first, second, pdf.length);
+	const written = `[0 ${rest.map((value) => String(value).padStart(10, "0")).join(" ")}]`;
+	const at = text.indexOf(placeholder);
+	return Buffer.concat([
+		pdf.subarray(0, at),
+		Buffer.from(written, "latin1"),
+		pdf.subarray(at + placeholder.length),
+	]);
+}
