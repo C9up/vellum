@@ -12,7 +12,6 @@
     "fonts",
     "stubs",
     "index.*.node",
-    "scripts",
     "src"
   ],
   "exports": {
