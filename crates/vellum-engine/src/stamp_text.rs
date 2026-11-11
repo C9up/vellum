@@ -804,4 +804,17 @@ mod tests {
     fn refuses_bytes_that_are_not_a_pdf() {
         assert!(stamp_text(b"not a PDF", "x", &TextStampOptions::default()).is_err());
     }
+
+    /// The one guard between a value and the content stream it is written
+    /// into: an unescaped `)` closes the string, and what follows it is
+    /// drawn as operators.
+    #[test]
+    fn a_literal_escapes_what_would_end_it() {
+        assert_eq!(escape_pdf_literal(b"a(b)c\\"), b"a\\(b\\)c\\\\");
+        assert_eq!(
+            escape_pdf_literal(b") Tj ET 1 0 0 rg 0 0 600 800 re f BT ("),
+            b"\\) Tj ET 1 0 0 rg 0 0 600 800 re f BT \\(".to_vec()
+        );
+        assert_eq!(escape_pdf_literal(b"plain"), b"plain");
+    }
 }
