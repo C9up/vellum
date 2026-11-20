@@ -116,7 +116,6 @@ fn peak_resident_bytes() -> u64 {
 
 const MIB: usize = 1024 * 1024;
 
-#[cfg(target_os = "linux")]
 #[test]
 fn what_one_document_may_build_is_bounded_in_total() {
     let started = Instant::now();
@@ -150,12 +149,17 @@ fn what_one_document_may_build_is_bounded_in_total() {
     let error = vellum_engine::metadata(&pdf).expect_err("refused");
     assert!(error.contains("more than 4000000 objects"), "got {error}");
 
-    let peak = peak_resident_bytes();
-    assert!(
-        peak < 768 * 1024 * 1024,
-        "the process peaked at {} MiB",
-        peak / (1024 * 1024)
-    );
+    // The refusals hold on every platform; the peak is read where the kernel
+    // reports it per process.
+    #[cfg(target_os = "linux")]
+    {
+        let peak = peak_resident_bytes();
+        assert!(
+            peak < 768 * 1024 * 1024,
+            "the process peaked at {} MiB",
+            peak / (1024 * 1024)
+        );
+    }
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "took {:?}",
