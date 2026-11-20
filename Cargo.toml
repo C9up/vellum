@@ -8,8 +8,8 @@ exclude = ["vendor"]
 # modes end the process or pin a worker rather than return an error: a stack
 # overflow and an allocation failure are not panics, so no `catch_unwind`
 # nets them, and an endless interpretation cannot be cancelled. Each crate
-# below is the published 0.9.0 source, unchanged except where a comment
-# marked `vellum:` says why:
+# below is its published source (hayro 0.9.0, lopdf 0.44.0), unchanged except
+# where a comment marked `vellum:` says why:
 #
 # - hayro-syntax: `budget` holds per-thread limits on decoded bytes and on
 #   operations; every filter charges what it decodes and stops when the
@@ -22,11 +22,19 @@ exclude = ["vendor"]
 #   the budget, so the page is not drawn without them. Every operator and
 #   glyph charges the operation budget, so a fan-out of Form XObjects cannot
 #   turn a 2 KB file into hours of work.
+# - hayro-syntax also reports what a page's budget has left, so a call
+#   reading every page can carry one total across them.
+# - lopdf: `budget` holds a per-thread limit on what loading one document
+#   may build. Its own `max_decompressed_size` bounds one stream; the budget
+#   bounds the inflated bytes of every object and cross-reference stream
+#   together, and the objects the parser builds from them, so a 32 KB object
+#   stream of one sixteen-million-element array no longer costs 2 GB.
 #
 # Drop a patch once upstream carries the same bound.
 [patch.crates-io]
 hayro-syntax = { path = "vendor/hayro-syntax" }
 hayro-interpret = { path = "vendor/hayro-interpret" }
+lopdf = { path = "vendor/lopdf" }
 
 # Production build.
 #
@@ -53,4 +61,9 @@ codegen-units = 1
 opt-level = 3
 
 [profile.dev.package.hayro-interpret]
+opt-level = 3
+
+# The same for lopdf: the editing-cost tests parse documents of tens of
+# thousands of pages.
+[profile.dev.package.lopdf]
 opt-level = 3

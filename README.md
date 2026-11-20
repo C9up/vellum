@@ -151,9 +151,12 @@ choice but it pins `lopdf ^0.42` against our 0.44, which would put two copies
 of the parser in the binary.
 
 Every path that parses an existing document — inspecting it, reading its
-fields, editing, stamping, signing, verifying — inflates its object streams
-under a ceiling of 32 MiB each, and refuses a document whose object stream
-could not be read, rather than reading it without the objects it held.
+fields, editing, stamping, signing, verifying — inflates its object and
+cross-reference streams under a ceiling of 32 MiB for all of them together,
+builds at most 4 million objects from the document, and refuses a document
+past either, or whose object stream could not be read, rather than reading it
+without the objects it held. lopdf is vendored with that budget, and built
+without `rayon`.
 
 Rasterising an A4 page is around 30ms of pure computation, so it runs on the
 libuv thread pool rather than on the thread serving requests. Every method on

@@ -5,8 +5,12 @@ edition = "2021"
 
 [dependencies]
 # Low-level object-tree surgery on existing documents: merge, split, rotate,
-# metadata, encryption, interactive form fields.
-lopdf = "0.44"
+# metadata, encryption, interactive form fields. Without its default
+# features: `rayon` parsed every object stream of an upload at once on every
+# core, outside the worker the call was scheduled on and outside the
+# thread-local budget that bounds loading (vendor/lopdf/src/budget.rs); the
+# date features serve conversions this engine does not use.
+lopdf = { version = "0.44", default-features = false }
 # High-level authoring. The `pdf` feature pulls hayro-write, which is what
 # lets an existing page be re-embedded as a Form XObject — the basis for
 # stamping and annotating a document we did not produce.
