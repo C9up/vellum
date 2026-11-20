@@ -370,6 +370,16 @@ export interface RenderOptions {
 	 * by default.
 	 */
 	maxOperations?: number;
+	/**
+	 * Bytes of decoded stream data `renderAll` may need across every page.
+	 * 1 GiB by default.
+	 */
+	maxTotalDecodedBytes?: number;
+	/**
+	 * Content operators and glyphs `renderAll` may take across every page.
+	 * Ten million by default.
+	 */
+	maxTotalOperations?: number;
 }
 
 /** What reading one page may cost, for the calls that do not rasterise. */
@@ -382,6 +392,16 @@ export interface ReadLimits {
 	 * by default.
 	 */
 	maxOperations?: number;
+	/**
+	 * Bytes of decoded stream data `extractTextAll` may need across every
+	 * page. 1 GiB by default.
+	 */
+	maxTotalDecodedBytes?: number;
+	/**
+	 * Content operators and glyphs `extractTextAll` may take across every
+	 * page. Ten million by default.
+	 */
+	maxTotalOperations?: number;
 }
 
 export interface PageDimensions {

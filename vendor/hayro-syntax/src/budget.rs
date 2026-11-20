@@ -40,6 +40,17 @@ impl Budget {
         imp::operations_exhausted()
     }
 
+    /// vellum: decoded bytes this budget has left, so a caller reading
+    /// several pages can carry one total across their budgets.
+    pub fn decoded_left(&self) -> u64 {
+        imp::decoded_left()
+    }
+
+    /// vellum: operations this budget has left.
+    pub fn operations_left(&self) -> u64 {
+        imp::operations_left()
+    }
+
     /// What was skipped first for nesting past its bound, if anything was:
     /// a phrase such as "arrays or dictionaries more than 512 levels deep".
     pub fn too_deep(&self) -> Option<&'static str> {
@@ -151,6 +162,14 @@ mod imp {
         DECODED.with(|meter| meter.get().exhausted)
     }
 
+    pub(super) fn decoded_left() -> u64 {
+        DECODED.with(|meter| meter.get().remaining.unwrap_or(u64::MAX))
+    }
+
+    pub(super) fn operations_left() -> u64 {
+        OPERATIONS.with(|meter| meter.get().remaining.unwrap_or(u64::MAX))
+    }
+
     pub(super) fn operations_exhausted() -> bool {
         OPERATIONS.with(|meter| meter.get().exhausted)
     }
@@ -185,6 +204,12 @@ mod imp {
     }
     pub(super) fn too_deep() -> Option<&'static str> {
         None
+    }
+    pub(super) fn decoded_left() -> u64 {
+        u64::MAX
+    }
+    pub(super) fn operations_left() -> u64 {
+        u64::MAX
     }
     pub(super) fn note_too_deep(_: &'static str) {}
     pub(super) fn decode_allowance() -> Option<usize> {

@@ -223,6 +223,88 @@ function fanOut(levels: number): Buffer {
 	]);
 }
 
+/**
+ * `pages` distinct 10 x 10 pt pages, each drawing one shared fan-out of
+ * forms `levels` deep: 10^levels glyphs a page, ~130 bytes a page.
+ */
+function fanOutPages(pages: number, levels: number): Buffer {
+	const firstForm = 4 + pages;
+	const kids = Array.from({ length: pages }, (_, page) => `${4 + page} 0 R`);
+	const objects: Array<string | Buffer> = [
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		`<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${pages} >>`,
+		stream("", "/X Do"),
+	];
+	for (let page = 0; page < pages; page++) {
+		objects.push(
+			`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Contents 3 0 R /Resources << /XObject << /X ${firstForm} 0 R >> >> >>`,
+		);
+	}
+	for (let level = 0; level < levels; level++) {
+		const last = level + 1 === levels;
+		const body = last
+			? "BT /F1 1 Tf (a) Tj ET"
+			: Array(10).fill("/X Do").join(" ");
+		const resources = last
+			? HELVETICA
+			: `/XObject << /X ${firstForm + level + 1} 0 R >>`;
+		objects.push(
+			stream(
+				`/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << ${resources} >>`,
+				body,
+			),
+		);
+	}
+	return buildPdf(objects);
+}
+
+describe("vellum > the pages of one call share a total", () => {
+	// Each page under its own budget used to be the whole bound: twenty tiny
+	// pages each just under it were a minute of work from a 24 KB file.
+	const pdf = fanOutPages(20, 5);
+
+	it("is applied by renderAll and extractTextAll", async () => {
+		const vellum = new Vellum({
+			maxOperations: 1_000_000,
+			maxTotalOperations: 1_000_000,
+		});
+		const started = performance.now();
+		await expect(vellum.extractTextAll(pdf)).rejects.toThrow(
+			/raise maxTotalOperations/,
+		);
+		await expect(vellum.renderAll(pdf)).rejects.toThrow(
+			/raise maxTotalOperations/,
+		);
+		expect(performance.now() - started).toBeLessThan(20_000);
+		// Each page alone fits its own budget.
+		await expect(vellum.extractText(pdf, { page: 20 })).resolves.toBeTypeOf(
+			"string",
+		);
+	});
+
+	it("is the caller's to raise, per call or in the configuration", async () => {
+		await expect(
+			new Vellum({ maxTotalOperations: 4_000_000 }).extractTextAll(pdf),
+		).resolves.toHaveLength(20);
+		await expect(
+			new Vellum().renderAll(pdf, { maxTotalOperations: 1_000_000 }),
+		).rejects.toThrow(/raise maxTotalOperations/);
+	});
+
+	it("refuses a total that is not a count", () => {
+		for (const value of [-1, 0, 1.5, 2 ** 32]) {
+			expect(
+				() => new Vellum({ maxTotalOperations: value }),
+				String(value),
+			).toThrow(expect.objectContaining({ code: "E_VELLUM_INVALID_OPTIONS" }));
+			expect(
+				() => new Vellum({ maxTotalDecodedBytes: value }),
+				String(value),
+			).toThrow(expect.objectContaining({ code: "E_VELLUM_INVALID_OPTIONS" }));
+		}
+	});
+});
+
 describe("vellum > a document that asks for unbounded work", () => {
 	it("stops a fan-out of forms once the operations run out", async () => {
 		const vellum = new Vellum({ maxOperations: 1_000_000 });

@@ -52,6 +52,8 @@ export interface Ceilings {
 	maxTotalPixels?: number;
 	maxDecodedBytes?: number;
 	maxOperations?: number;
+	maxTotalDecodedBytes?: number;
+	maxTotalOperations?: number;
 }
 
 /**
@@ -68,6 +70,8 @@ export function checkCeilings(ceilings: Ceilings): void {
 		"maxTotalPixels",
 		"maxDecodedBytes",
 		"maxOperations",
+		"maxTotalDecodedBytes",
+		"maxTotalOperations",
 	] as const) {
 		const value = ceilings[name];
 		if (value === undefined) continue;

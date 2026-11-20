@@ -103,6 +103,26 @@ export interface VellumConfig {
 	 */
 	maxOperations?: number;
 	/**
+	 * Bytes of decoded stream data {@link Vellum.renderAll} and
+	 * {@link Vellum.extractTextAll} may need across every page. 1 GiB by
+	 * default.
+	 *
+	 * `maxDecodedBytes` bounds one page, and the page count is the
+	 * document's to choose; the pages of one call share this total.
+	 */
+	maxTotalDecodedBytes?: number;
+	/**
+	 * Content operators and glyphs {@link Vellum.renderAll} and
+	 * {@link Vellum.extractTextAll} may take across every page. Ten million
+	 * by default — what one page may already take, and a few thousand pages
+	 * of ordinary text.
+	 *
+	 * Twenty tiny pages each just under `maxOperations` were a minute of
+	 * work from a 24 KB file; the pages of one call share this total. Every
+	 * glyph counts, so it also bounds the text `extractTextAll` hands back.
+	 */
+	maxTotalOperations?: number;
+	/**
 	 * Fonts to write text with, by the name a caller asks for them by. Values
 	 * are paths to TrueType or OpenType files.
 	 *
@@ -930,6 +950,8 @@ export class Vellum {
 		maxTotalPixels?: number;
 		maxDecodedBytes?: number;
 		maxOperations?: number;
+		maxTotalDecodedBytes?: number;
+		maxTotalOperations?: number;
 	} {
 		const merged = { ...this.#config, ...options };
 		checkCeilings(merged);
@@ -944,14 +966,23 @@ export class Vellum {
 			maxTotalPixels: merged.maxTotalPixels,
 			maxDecodedBytes: merged.maxDecodedBytes,
 			maxOperations: merged.maxOperations,
+			maxTotalDecodedBytes: merged.maxTotalDecodedBytes,
+			maxTotalOperations: merged.maxTotalOperations,
 		};
 	}
 
-	/** What reading one page may cost, as configured. */
-	#limits(): { maxDecodedBytes?: number; maxOperations?: number } {
+	/** What reading one page, and every page, may cost, as configured. */
+	#limits(): {
+		maxDecodedBytes?: number;
+		maxOperations?: number;
+		maxTotalDecodedBytes?: number;
+		maxTotalOperations?: number;
+	} {
 		return {
 			maxDecodedBytes: this.#config.maxDecodedBytes,
 			maxOperations: this.#config.maxOperations,
+			maxTotalDecodedBytes: this.#config.maxTotalDecodedBytes,
+			maxTotalOperations: this.#config.maxTotalOperations,
 		};
 	}
 }

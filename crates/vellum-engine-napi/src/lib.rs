@@ -130,6 +130,12 @@ pub struct RenderOptions {
     /// Content operators and glyphs one page may take to draw. Ten million
     /// by default.
     pub max_operations: Option<f64>,
+    /// Bytes of decoded stream data `renderAll` may need across every page.
+    /// 1 GiB by default.
+    pub max_total_decoded_bytes: Option<f64>,
+    /// Content operators and glyphs `renderAll` may take across every page.
+    /// Ten million by default.
+    pub max_total_operations: Option<f64>,
 }
 
 /// What reading one page may cost, for the calls that do not rasterise.
@@ -140,6 +146,12 @@ pub struct ReadLimits {
     /// Content operators and glyphs one page may take to draw. Ten million
     /// by default.
     pub max_operations: Option<f64>,
+    /// Bytes of decoded stream data `extractTextAll` may need across every
+    /// page. 1 GiB by default.
+    pub max_total_decoded_bytes: Option<f64>,
+    /// Content operators and glyphs `extractTextAll` may take across every
+    /// page. Ten million by default.
+    pub max_total_operations: Option<f64>,
 }
 
 /// A ceiling as JavaScript hands it: a whole number from 1 to `u32::MAX`.
@@ -157,25 +169,40 @@ fn positive(name: &str, value: f64) -> std::result::Result<u64, String> {
     Ok(value as u64)
 }
 
-fn to_engine_limits(
+/// The ceilings on reading, as JavaScript names them.
+#[derive(Default)]
+struct Ceilings {
     max_decoded_bytes: Option<f64>,
     max_operations: Option<f64>,
-) -> std::result::Result<vellum_engine::ReadLimits, String> {
+    max_total_decoded_bytes: Option<f64>,
+    max_total_operations: Option<f64>,
+}
+
+fn to_engine_limits(ceilings: Ceilings) -> std::result::Result<vellum_engine::ReadLimits, String> {
     let mut limits = vellum_engine::ReadLimits::default();
-    if let Some(value) = max_decoded_bytes {
+    if let Some(value) = ceilings.max_decoded_bytes {
         limits.max_decoded_bytes = positive("maxDecodedBytes", value)?;
     }
-    if let Some(value) = max_operations {
+    if let Some(value) = ceilings.max_operations {
         limits.max_operations = positive("maxOperations", value)?;
+    }
+    if let Some(value) = ceilings.max_total_decoded_bytes {
+        limits.max_total_decoded_bytes = positive("maxTotalDecodedBytes", value)?;
+    }
+    if let Some(value) = ceilings.max_total_operations {
+        limits.max_total_operations = positive("maxTotalOperations", value)?;
     }
     Ok(limits)
 }
 
 fn read_limits(limits: Option<ReadLimits>) -> Result<vellum_engine::ReadLimits> {
-    let (bytes, operations) = limits.map_or((None, None), |limits| {
-        (limits.max_decoded_bytes, limits.max_operations)
+    let ceilings = limits.map_or_else(Ceilings::default, |limits| Ceilings {
+        max_decoded_bytes: limits.max_decoded_bytes,
+        max_operations: limits.max_operations,
+        max_total_decoded_bytes: limits.max_total_decoded_bytes,
+        max_total_operations: limits.max_total_operations,
     });
-    to_engine_limits(bytes, operations).map_err(Error::from_reason)
+    to_engine_limits(ceilings).map_err(Error::from_reason)
 }
 
 fn to_engine_options(
@@ -203,7 +230,12 @@ fn to_engine_options(
     if let Some(max) = options.max_total_pixels {
         engine.max_total_pixels = positive("maxTotalPixels", max)?;
     }
-    engine.limits = to_engine_limits(options.max_decoded_bytes, options.max_operations)?;
+    engine.limits = to_engine_limits(Ceilings {
+        max_decoded_bytes: options.max_decoded_bytes,
+        max_operations: options.max_operations,
+        max_total_decoded_bytes: options.max_total_decoded_bytes,
+        max_total_operations: options.max_total_operations,
+    })?;
 
     let quality = match options.quality {
         Some(value) => Some(

@@ -590,7 +590,8 @@ fn the_operation_budget_is_the_callers_to_set() {
 
 #[test]
 fn each_page_of_a_long_document_has_a_budget_of_its_own() {
-    // Three pages of 512 KiB each: 1.5 MiB in all, under 1 MiB per page.
+    // Three pages of 512 KiB each: 1.5 MiB in all, under 1 MiB per page and
+    // under the default total.
     let compressed = deflate(&vec![b' '; 512 * 1024]);
     let pdf = build_pdf(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
@@ -607,6 +608,118 @@ fn each_page_of_a_long_document_has_a_budget_of_its_own() {
     assert_eq!(
         extract_text_all_with(&pdf, &one_mib()).map(|pages| pages.len()),
         Ok(3)
+    );
+}
+
+/// `pages` distinct tiny pages, each drawing one shared fan-out of Form
+/// XObjects `levels` deep: 10^levels glyphs per page, 130 bytes per page.
+fn fan_out_pages(pages: usize, levels: usize) -> Vec<u8> {
+    let first_page = 4;
+    let first_form = first_page + pages;
+    let kids: Vec<String> = (0..pages)
+        .map(|page| format!("{} 0 R", first_page + page))
+        .collect();
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        )
+        .into_bytes(),
+        stream("", b"/X Do"),
+    ];
+    for _ in 0..pages {
+        objects.push(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Contents 3 0 R /Resources << /XObject << /X {first_form} 0 R >> >> >>"
+            )
+            .into_bytes(),
+        );
+    }
+    for level in 0..levels {
+        let last = level + 1 == levels;
+        let body = if last {
+            "BT /F1 1 Tf (a) Tj ET".to_string()
+        } else {
+            ["/X Do"; 10].join(" ")
+        };
+        let resources = if last {
+            HELVETICA.to_string()
+        } else {
+            format!("/XObject << /X {} 0 R >>", first_form + level + 1)
+        };
+        objects.push(stream(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << {resources} >>"
+            ),
+            body.as_bytes(),
+        ));
+    }
+    build_pdf(&objects)
+}
+
+/// Each page under its own budget used to be the whole bound: twenty tiny
+/// pages each just under it were a minute of work from a 24 KB file. The
+/// pages of one call now share a total as well.
+#[test]
+fn the_pages_of_one_document_share_one_operation_total() {
+    // 20 pages of 100 000 glyphs: each under the per-page budget, two
+    // million together.
+    let pdf = fan_out_pages(20, 5);
+    let limits = ReadLimits {
+        max_operations: 1_000_000,
+        max_total_operations: 1_000_000,
+        ..ReadLimits::default()
+    };
+    let started = Instant::now();
+    let text = extract_text_all_with(&pdf, &limits).expect_err("refused");
+    assert!(text.contains("raise maxTotalOperations"), "got {text}");
+    let rendered = render_all(&pdf, &render_with(limits)).expect_err("refused");
+    assert!(
+        rendered.contains("raise maxTotalOperations"),
+        "got {rendered}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "took {:?}",
+        started.elapsed()
+    );
+
+    // Every page alone is within its own budget, and so is the document
+    // under a total that fits it.
+    assert!(extract_text_with(&pdf, 19, &limits).is_ok());
+    let roomy = ReadLimits {
+        max_total_operations: 4_000_000,
+        ..limits
+    };
+    assert_eq!(
+        extract_text_all_with(&pdf, &roomy).map(|pages| pages.len()),
+        Ok(20)
+    );
+}
+
+#[test]
+fn the_pages_of_one_document_share_one_decoded_total() {
+    // Three pages of 512 KiB each: under 1 MiB per page, 1.5 MiB together.
+    let compressed = deflate(&vec![b' '; 512 * 1024]);
+    let pdf = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 6 0 R >>".to_vec(),
+        stream("/Filter /FlateDecode", &compressed),
+    ]);
+    let limits = ReadLimits {
+        max_total_decoded_bytes: 1024 * 1024,
+        ..one_mib()
+    };
+    let text = extract_text_all_with(&pdf, &limits).expect_err("refused");
+    assert!(text.contains("raise maxTotalDecodedBytes"), "got {text}");
+    let rendered = render_all(&pdf, &render_with(limits)).expect_err("refused");
+    assert!(
+        rendered.contains("raise maxTotalDecodedBytes"),
+        "got {rendered}"
     );
 }
 

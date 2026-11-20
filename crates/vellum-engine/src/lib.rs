@@ -40,7 +40,10 @@ pub use fill::{fill_form, FieldValue};
 pub use flatten::flatten_form;
 pub use form::{form_fields, is_signed, refuse_if_signed, FieldKind, FormField};
 pub use metadata::{metadata, DocumentMetadata};
-pub use reader::{ReadLimits, DEFAULT_MAX_DECODED_BYTES, DEFAULT_MAX_OPERATIONS};
+pub use reader::{
+    ReadLimits, DEFAULT_MAX_DECODED_BYTES, DEFAULT_MAX_OPERATIONS, DEFAULT_MAX_TOTAL_DECODED_BYTES,
+    DEFAULT_MAX_TOTAL_OPERATIONS,
+};
 pub use revocation::{read_revocation, responder_url, revocation_query, Revocation};
 pub use sign::{embed_signature, prepare, Prepared, SignatureOptions, DEFAULT_CAPACITY};
 pub use stamp::{stamp_image, StampOptions};

@@ -21,18 +21,37 @@ pub const DEFAULT_MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
 /// under one.
 pub const DEFAULT_MAX_OPERATIONS: u64 = 10_000_000;
 
-/// What reading one page may cost.
+/// 1 GiB of decoded stream data across every page of one `render_all` or
+/// `extract_text_all`.
+pub const DEFAULT_MAX_TOTAL_DECODED_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Ten million operators and glyphs across every page of one `render_all` or
+/// `extract_text_all`: what one page may already take, and a few thousand
+/// pages of ordinary text.
+pub const DEFAULT_MAX_TOTAL_OPERATIONS: u64 = 10_000_000;
+
+/// What reading one page may cost, and what reading all of them may.
 ///
 /// The size of a document says nothing about the work it asks for: a 1 MiB
 /// Flate stream inflates to 1 GiB, once per reference to it, and Form
 /// XObjects drawing one another ten times per level multiply a 2 KB file into
 /// hours. Each page is read under these bounds, and refused past them.
+///
+/// The page count is the document's to choose, so the calls that read every
+/// page also carry the totals across them: twenty tiny pages each just under
+/// the per-page bound were a minute of work from a 24 KB file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadLimits {
     /// Bytes of decoded stream data: content, images, fonts, object streams.
     pub max_decoded_bytes: u64,
     /// Content operators and glyphs interpreted, nested forms included.
     pub max_operations: u64,
+    /// Bytes of decoded stream data across every page, for the calls that
+    /// read them all.
+    pub max_total_decoded_bytes: u64,
+    /// Operators and glyphs across every page, for the calls that read them
+    /// all.
+    pub max_total_operations: u64,
 }
 
 impl Default for ReadLimits {
@@ -40,6 +59,8 @@ impl Default for ReadLimits {
         Self {
             max_decoded_bytes: DEFAULT_MAX_DECODED_BYTES,
             max_operations: DEFAULT_MAX_OPERATIONS,
+            max_total_decoded_bytes: DEFAULT_MAX_TOTAL_DECODED_BYTES,
+            max_total_operations: DEFAULT_MAX_TOTAL_OPERATIONS,
         }
     }
 }
@@ -55,24 +76,85 @@ pub(crate) fn metered<T>(
     limits: &ReadLimits,
     work: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let budget = Budget::open(limits.max_decoded_bytes, limits.max_operations);
-    let result = work();
-    if let Some(what) = budget.too_deep() {
-        return Err(format!("the document nests {what}"));
+    Totals::single(limits).metered(work)
+}
+
+/// What a call reading every page has left of its totals, carried from one
+/// page's budget to the next.
+pub(crate) struct Totals {
+    limits: ReadLimits,
+    decoded_left: u64,
+    operations_left: u64,
+    /// Whether the totals apply: a call reading one page has only the
+    /// per-page bounds.
+    across_pages: bool,
+}
+
+impl Totals {
+    /// The totals of a call that reads every page.
+    pub(crate) fn across_pages(limits: &ReadLimits) -> Self {
+        Self {
+            limits: *limits,
+            decoded_left: limits.max_total_decoded_bytes,
+            operations_left: limits.max_total_operations,
+            across_pages: true,
+        }
     }
-    if budget.decoded_exhausted() {
-        return Err(format!(
-            "the document decodes to more than {} MiB for one page — raise maxDecodedBytes if you meant it",
-            limits.max_decoded_bytes / (1024 * 1024)
-        ));
+
+    fn single(limits: &ReadLimits) -> Self {
+        Self {
+            limits: *limits,
+            decoded_left: u64::MAX,
+            operations_left: u64::MAX,
+            across_pages: false,
+        }
     }
-    if budget.operations_exhausted() {
-        return Err(format!(
-            "drawing the page takes more than {} operations — raise maxOperations if you meant it",
-            limits.max_operations
-        ));
+
+    /// Run `work` under the per-page bounds, lowered to what is left of the
+    /// totals, and charge the totals with what it used.
+    pub(crate) fn metered<T>(
+        &mut self,
+        work: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let decoded = self.limits.max_decoded_bytes.min(self.decoded_left);
+        let operations = self.limits.max_operations.min(self.operations_left);
+        let budget = Budget::open(decoded, operations);
+        let result = work();
+        self.decoded_left = self
+            .decoded_left
+            .saturating_sub(decoded.saturating_sub(budget.decoded_left()));
+        self.operations_left = self
+            .operations_left
+            .saturating_sub(operations.saturating_sub(budget.operations_left()));
+        if let Some(what) = budget.too_deep() {
+            return Err(format!("the document nests {what}"));
+        }
+        if budget.decoded_exhausted() {
+            if self.across_pages && decoded < self.limits.max_decoded_bytes {
+                return Err(format!(
+                    "the document decodes to more than {} MiB across its pages — read them one at a time, or raise maxTotalDecodedBytes if you meant it",
+                    self.limits.max_total_decoded_bytes / (1024 * 1024)
+                ));
+            }
+            return Err(format!(
+                "the document decodes to more than {} MiB for one page — raise maxDecodedBytes if you meant it",
+                self.limits.max_decoded_bytes / (1024 * 1024)
+            ));
+        }
+        if budget.operations_exhausted() {
+            if self.across_pages && operations < self.limits.max_operations {
+                return Err(format!(
+                    "reading every page takes more than {} operations — read them one at a time, or raise maxTotalOperations if you meant it",
+                    self.limits.max_total_operations
+                ));
+            }
+            return Err(format!(
+                "drawing the page takes more than {} operations — raise maxOperations if you meant it",
+                self.limits.max_operations
+            ));
+        }
+        result
     }
-    result
 }
 
 /// Run `work` on a reader thread and wait for it.

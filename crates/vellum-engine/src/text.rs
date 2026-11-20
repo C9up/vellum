@@ -20,7 +20,7 @@ use hayro::hayro_interpret::{
 };
 use hayro::vello_cpu::kurbo::{BezPath, Rect};
 
-use crate::reader::{metered, on_reader_thread, ReadLimits};
+use crate::reader::{metered, on_reader_thread, ReadLimits, Totals};
 
 /// Vertical distance, in points, beyond which two glyphs are taken to be on
 /// different lines.
@@ -209,13 +209,16 @@ pub fn extract_text_all(bytes: &[u8]) -> Result<Vec<String>, String> {
     extract_text_all_with(bytes, &ReadLimits::default())
 }
 
-/// [`extract_text_all`] under the given limits, each page under its own.
+/// [`extract_text_all`] under the given limits: each page under its own,
+/// and the document under the totals. Every glyph is an operation, so the
+/// total also bounds the text handed back.
 pub fn extract_text_all_with(bytes: &[u8], limits: &ReadLimits) -> Result<Vec<String>, String> {
     on_reader_thread(|| {
-        let pdf = metered(limits, || load(bytes))?;
+        let mut totals = Totals::across_pages(limits);
+        let pdf = totals.metered(|| load(bytes))?;
         pdf.pages()
             .iter()
-            .map(|page| metered(limits, || Ok(page_text(page))))
+            .map(|page| totals.metered(|| Ok(page_text(page))))
             .collect()
     })
 }

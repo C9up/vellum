@@ -11,7 +11,7 @@ use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
 use image::codecs::jpeg::JpegEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 
-use crate::reader::{metered, on_reader_thread, ReadLimits};
+use crate::reader::{metered, on_reader_thread, ReadLimits, Totals};
 
 /// How the rasterised page should be encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,12 +225,14 @@ fn read_page(bytes: &[u8], page_index: u32, options: &RenderOptions) -> Result<V
 
 /// Rasterise every page, in document order.
 ///
-/// Each page is read under its own [`ReadLimits`], so a long document is not
-/// refused for being long; what the pages add up to is bounded by
-/// `max_total_pixels`, before any of them is drawn.
+/// Each page is read under its own [`ReadLimits`], and the document under
+/// their totals, so what the pages add up to is bounded however many there
+/// are: in pixels by `max_total_pixels`, before any of them is drawn, and in
+/// work by `max_total_operations` and `max_total_decoded_bytes` as they are.
 pub fn render_all(bytes: &[u8], options: &RenderOptions) -> Result<Vec<Vec<u8>>, String> {
     on_reader_thread(|| {
-        let pdf = metered(&options.limits, || load(bytes))?;
+        let mut totals = Totals::across_pages(&options.limits);
+        let pdf = totals.metered(|| load(bytes))?;
         let pages = pdf.pages();
         let mut total = 0f64;
         for page in pages.iter() {
@@ -246,11 +248,7 @@ pub fn render_all(bytes: &[u8], options: &RenderOptions) -> Result<Vec<Vec<u8>>,
         }
         pages
             .iter()
-            .map(|page| {
-                metered(&options.limits, || {
-                    encode(&rasterise(page, options)?, options)
-                })
-            })
+            .map(|page| totals.metered(|| encode(&rasterise(page, options)?, options)))
             .collect()
     })
 }
