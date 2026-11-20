@@ -1,0 +1,34 @@
+# What `cargo audit --deny warnings` may pass over in vellum, and why.
+#
+# CI runs `cargo audit --deny warnings` from this directory, so every
+# advisory fails the release, unmaintained and unsound ones included, unless
+# it is listed here. An entry is a claim that has to stay checkable: say why it
+# cannot be removed today and what upstream release lets it go.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2023-0071: rsa, the Marvin attack, a timing side channel in the
+  # PRIVATE-key operation. vellum signs with RSA (cms.rs) and blinds, the
+  # mitigation the advisory points to. Blinding reduces the exposure, it does
+  # not close it: a signer reachable from remote input wants an HSM. The
+  # residual risk is written down in README.md, "Where this signer's limits
+  # are".
+  # DROP WHEN an rsa release ships the constant-time rewrite (none exists in
+  # any line today).
+  "RUSTSEC-2023-0071",
+
+  # RUSTSEC-2026-0206: `rustybuzz` is unmaintained, no fixed release. It shapes
+  # text for krilla 0.8.2 and usvg 0.47, which is how vellum draws a PDF.
+  # krilla 0.8.2 is the latest release.
+  # DROP WHEN krilla ships against `harfrust`, the replacement the advisory
+  # names.
+  "RUSTSEC-2026-0206",
+
+  # RUSTSEC-2026-0192: `ttf-parser` is unmaintained, no fixed release. It parses
+  # fonts for krilla, rustybuzz, usvg and fontdb. A font an application embeds
+  # without having authored it is input from outside, so this is an accepted
+  # exposure, not a dismissed one.
+  # DROP WHEN krilla (and the usvg/fontdb it builds on) move to `skrifa`, the
+  # replacement the advisory names.
+  "RUSTSEC-2026-0192",
+]
