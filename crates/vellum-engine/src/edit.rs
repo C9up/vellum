@@ -5,13 +5,27 @@
 //! `Pages` node and be INHERITED by the page (PDF 32000-1 §7.7.3.4). Re-parent
 //! such a page and it silently loses its size and its fonts. Every operation
 //! here materialises the inherited attributes onto the page first.
+//!
+//! Every one of them also costs what the document weighs, once. lopdf's own
+//! `delete_pages`, `prune_objects` and `renumber_objects` each walk the whole
+//! document, and that walk is itself quadratic in the object count; called
+//! once per page, a 75 KB file of a thousand pages held a worker for a minute.
+//! A document is cut apart here by copying what the kept pages reach, in one
+//! walk.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use lopdf::{dictionary, Document, Object, ObjectId};
+use lopdf::{dictionary, Dictionary, Document, Object, ObjectId};
+
+use crate::page::{page_ids, Copies};
 
 /// Attributes a page inherits from its ancestors in the page tree.
 const INHERITABLE: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
+
+/// How far up a page's `/Parent` chain inheritance is looked for: lopdf reads
+/// a page tree 256 levels deep at most, so a page it found has no more real
+/// ancestors than that, and a longer chain is not a page tree.
+const MAX_ANCESTORS: usize = 257;
 
 fn load(bytes: &[u8]) -> Result<Document, String> {
     crate::parse::parse(bytes)
@@ -25,15 +39,37 @@ fn save(mut document: Document) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The page at zero-based `index`, or the error that names it in human
+/// numbering.
+fn page_at(pages: &[ObjectId], index: u32) -> Result<ObjectId, String> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| pages.get(index).copied())
+        .ok_or_else(|| {
+            // Widened before adding one: u32::MAX + 1 wraps to 0 in a release
+            // build, and "page 0 does not exist" names nothing.
+            format!(
+                "page {} does not exist — the document has {}",
+                u64::from(index) + 1,
+                pages.len()
+            )
+        })
+}
+
 /// Walk up from each page and copy any inherited attribute onto the page.
 ///
 /// Without this, a page whose `MediaBox` lives on its parent comes out of a
 /// merge or a split with no size at all — which readers fall back to Letter
 /// for, quietly resizing a French A4 document.
-pub(crate) fn flatten_inheritance(document: &mut Document) {
-    let page_ids: Vec<ObjectId> = document.get_pages().into_values().collect();
-
-    for page_id in page_ids {
+///
+/// What is copied is charged to `copies`: an inline `/Resources` on the page
+/// tree is copied onto every page below it.
+pub(crate) fn flatten_inheritance(
+    document: &mut Document,
+    pages: &[ObjectId],
+    copies: &mut Copies,
+) -> Result<(), String> {
+    for &page_id in pages {
         let mut inherited: Vec<(Vec<u8>, Object)> = Vec::new();
 
         {
@@ -50,23 +86,30 @@ pub(crate) fn flatten_inheritance(document: &mut Document) {
             }
 
             // Guarded against a cycle in the parent chain, which a crafted
-            // document can carry and which would otherwise spin forever.
+            // document can carry and which would otherwise spin forever, and
+            // against a chain longer than any page tree, which would make the
+            // walk cost pages x chain.
             let mut seen = HashSet::new();
             let mut next = page.get(b"Parent").and_then(Object::as_reference).ok();
             while let Some(parent_id) = next {
-                if !seen.insert(parent_id) {
+                if seen.len() >= MAX_ANCESTORS || !seen.insert(parent_id) {
                     break;
                 }
                 let Ok(parent) = document.get_dictionary(parent_id) else {
                     break;
                 };
+                let mut found = Vec::new();
                 missing.retain(|key| match parent.get(key) {
                     Ok(value) => {
-                        inherited.push((key.to_vec(), value.clone()));
+                        found.push((key.to_vec(), value));
                         false
                     }
                     Err(_) => true,
                 });
+                for (key, value) in found {
+                    copies.charge(value)?;
+                    inherited.push((key, value.clone()));
+                }
                 if missing.is_empty() {
                     break;
                 }
@@ -83,54 +126,280 @@ pub(crate) fn flatten_inheritance(document: &mut Document) {
             }
         }
     }
+    Ok(())
 }
 
-/// Drop references to objects that no longer exist from every `Kids` array.
-///
-/// `Document::delete_pages` removes the page object and decrements `Count`,
-/// but leaves the dangling reference behind. A reader resolves it to null and
-/// may show a phantom page, so the arrays are tidied here.
-fn prune_dangling_kids(document: &mut Document) {
-    let page_tree_ids: Vec<ObjectId> = document
-        .objects
-        .iter()
-        .filter(|(_, object)| {
-            object
-                .as_dict()
-                .and_then(|dict| dict.get(b"Type"))
-                .and_then(Object::as_name)
-                .is_ok_and(|name| name == b"Pages")
-        })
-        .map(|(id, _)| *id)
-        .collect();
+/// A document's pages and the nodes of the tree that holds them.
+struct PageTree {
+    pages: Vec<ObjectId>,
+    members: HashSet<ObjectId>,
+}
 
-    for tree_id in page_tree_ids {
-        let Ok(kids) = document
-            .get_dictionary(tree_id)
-            .and_then(|dict| dict.get(b"Kids"))
-            .and_then(Object::as_array)
-        else {
-            continue;
-        };
+impl PageTree {
+    /// Read the page tree, each page once, and its intermediate nodes: every
+    /// object typed `/Pages`.
+    fn of(document: &Document) -> Result<Self, String> {
+        let pages = page_ids(document)?;
+        let mut members: HashSet<ObjectId> = pages.iter().copied().collect();
+        members.extend(
+            document
+                .objects
+                .iter()
+                .filter(|(_, object)| has_type(object, b"Pages"))
+                .map(|(id, _)| *id),
+        );
+        Ok(Self { pages, members })
+    }
+}
 
-        let kept: Vec<Object> = kids
-            .iter()
-            .filter(|kid| match kid.as_reference() {
-                Ok(id) => document.objects.contains_key(&id),
-                // A kid written inline rather than as a reference cannot dangle.
-                Err(_) => true,
-            })
-            .cloned()
-            .collect();
+fn has_type(object: &Object, name: &[u8]) -> bool {
+    let dictionary = match object {
+        Object::Dictionary(dictionary) => dictionary,
+        Object::Stream(stream) => &stream.dict,
+        _ => return false,
+    };
+    dictionary
+        .get(b"Type")
+        .and_then(Object::as_name)
+        .is_ok_and(|kind| kind == name)
+}
 
-        if kept.len() != kids.len() {
-            if let Ok(dict) = document
-                .get_object_mut(tree_id)
-                .and_then(|object| object.as_dict_mut())
-            {
-                dict.set("Kids", kept);
+/// Which references a copy keeps, rewrites or drops.
+enum Reach {
+    /// Copied, and followed.
+    Follow,
+    /// Removed, as `delete_pages` removes a reference to a page it deletes:
+    /// the array entry or the dictionary key goes.
+    Cut,
+    /// Points at nothing: a reader takes it as `null`, and so is it written.
+    Missing,
+}
+
+/// Whether `object` is a reference `reach` cuts.
+fn is_cut(object: &Object, reach: &impl Fn(ObjectId) -> Reach) -> bool {
+    match object {
+        Object::Reference(id) => matches!(reach(*id), Reach::Cut),
+        _ => false,
+    }
+}
+
+/// Remove every reference `reach` cuts from `object`, write the missing ones
+/// as `null`, and queue the ones it follows.
+fn strip(object: &mut Object, reach: &impl Fn(ObjectId) -> Reach, found: &mut Vec<ObjectId>) {
+    match object {
+        Object::Array(items) => {
+            items.retain(|item| !is_cut(item, reach));
+            for item in items.iter_mut() {
+                strip(item, reach, found);
             }
         }
+        Object::Dictionary(dictionary) => strip_dictionary(dictionary, reach, found),
+        Object::Stream(stream) => strip_dictionary(&mut stream.dict, reach, found),
+        Object::Reference(id) => match reach(*id) {
+            Reach::Follow => found.push(*id),
+            Reach::Missing => *object = Object::Null,
+            // Removed by the array or dictionary that holds it.
+            Reach::Cut => {}
+        },
+        _ => {}
+    }
+}
+
+fn strip_dictionary(
+    dictionary: &mut Dictionary,
+    reach: &impl Fn(ObjectId) -> Reach,
+    found: &mut Vec<ObjectId>,
+) {
+    let cut: Vec<Vec<u8>> = dictionary
+        .iter()
+        .filter(|(_, value)| is_cut(value, reach))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in cut {
+        dictionary.remove(&key);
+    }
+    for (_, value) in dictionary.iter_mut() {
+        strip(value, reach, found);
+    }
+}
+
+/// Copy `seeds` and everything they reach into `into`, without what `reach`
+/// cuts. `prepare` sees each object before its references are followed.
+fn copy_reachable(
+    source: &Document,
+    seeds: Vec<ObjectId>,
+    reach: &impl Fn(ObjectId) -> Reach,
+    prepare: &impl Fn(ObjectId, &mut Object),
+    copies: &mut Copies,
+    into: &mut BTreeMap<ObjectId, Object>,
+) -> Result<(), String> {
+    let mut queue: VecDeque<ObjectId> = seeds.into();
+    let mut found = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        if into.contains_key(&id) {
+            continue;
+        }
+        let Some(original) = source.objects.get(&id) else {
+            continue;
+        };
+        copies.charge(original)?;
+        let mut object = original.clone();
+        prepare(id, &mut object);
+        strip(&mut object, reach, &mut found);
+        queue.extend(found.drain(..));
+        into.insert(id, object);
+    }
+    Ok(())
+}
+
+/// What a part of a document carries besides its pages.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// The catalog and what it reaches — the outline, the form, the names —
+    /// and the trailer's `/Info`: everything the document held that does not
+    /// lead to another page, as `delete_pages` followed by `prune_objects`
+    /// left it.
+    Catalog,
+    /// Only the pages and what they reach, for merging under a new catalog.
+    PagesOnly,
+}
+
+/// The objects of `document` that `kept` reach, under a single flat page tree
+/// holding `kept` in that order, with every reference to another page or to
+/// the old page tree removed.
+fn part_of(
+    document: &Document,
+    tree: &PageTree,
+    kept: &[ObjectId],
+    keep: Keep,
+    copies: &mut Copies,
+) -> Result<Document, String> {
+    let root = document
+        .trailer
+        .get(b"Root")
+        .and_then(Object::as_reference)
+        .map_err(|_| "no catalog found".to_string())?;
+    let kept_set: HashSet<ObjectId> = kept.iter().copied().collect();
+    let reach = |id: ObjectId| {
+        let Some(object) = document.objects.get(&id) else {
+            return Reach::Missing;
+        };
+        if kept_set.contains(&id) {
+            return Reach::Follow;
+        }
+        let dropped = tree.members.contains(&id)
+            || (keep == Keep::PagesOnly
+                && (id == root
+                    || has_type(object, b"Catalog")
+                    || has_type(object, b"Outlines")
+                    || has_type(object, b"Outline")));
+        if dropped {
+            Reach::Cut
+        } else {
+            Reach::Follow
+        }
+    };
+    let prepare = |id: ObjectId, object: &mut Object| {
+        if let Object::Dictionary(dictionary) = object {
+            // The page is re-parented and the catalog given the new tree;
+            // neither old link is followed.
+            if kept_set.contains(&id) {
+                dictionary.remove(b"Parent");
+            } else if id == root {
+                dictionary.remove(b"Pages");
+            }
+        }
+    };
+
+    let pages_id = (
+        document
+            .max_id
+            .checked_add(1)
+            .ok_or_else(|| "the document numbers its objects past the end".to_string())?,
+        0,
+    );
+    let mut part = Document::with_version(document.version.clone());
+    let mut seeds: Vec<ObjectId> = kept.to_vec();
+    if keep == Keep::Catalog {
+        part.trailer = document.trailer.clone();
+        strip_dictionary(&mut part.trailer, &reach, &mut seeds);
+    }
+    copy_reachable(document, seeds, &reach, &prepare, copies, &mut part.objects)?;
+
+    for page_id in kept {
+        if let Some(Object::Dictionary(page)) = part.objects.get_mut(page_id) {
+            page.set("Parent", pages_id);
+        }
+    }
+    let kids: Vec<Object> = kept.iter().copied().map(Object::Reference).collect();
+    part.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Count" => i64::try_from(kids.len()).unwrap_or(i64::MAX),
+            "Kids" => kids,
+        }),
+    );
+    if keep == Keep::Catalog {
+        match part.objects.get_mut(&root) {
+            Some(Object::Dictionary(catalog)) => catalog.set("Pages", pages_id),
+            _ => return Err("no catalog found".to_string()),
+        }
+    }
+    part.max_id = pages_id.0;
+    Ok(part)
+}
+
+/// Objects under their new numbers, and the old number of each mapped to its
+/// new one.
+type Renumbered = (BTreeMap<ObjectId, Object>, HashMap<ObjectId, ObjectId>);
+
+/// Renumber `objects` from `next` on, in their order, and rewrite every
+/// reference between them: one walk, where lopdf's `renumber_objects` walks
+/// the document once per object.
+fn renumber(objects: BTreeMap<ObjectId, Object>, next: &mut u32) -> Result<Renumbered, String> {
+    let mut map = HashMap::with_capacity(objects.len());
+    for id in objects.keys() {
+        map.insert(*id, (*next, 0));
+        *next = next
+            .checked_add(1)
+            .ok_or_else(|| "the merged document has too many objects".to_string())?;
+    }
+    let renumbered = objects
+        .into_iter()
+        .filter_map(|(id, mut object)| {
+            rewrite_references(&mut object, &map);
+            map.get(&id).map(|new_id| (*new_id, object))
+        })
+        .collect();
+    Ok((renumbered, map))
+}
+
+fn rewrite_references(object: &mut Object, map: &HashMap<ObjectId, ObjectId>) {
+    match object {
+        Object::Array(items) => {
+            for item in items {
+                rewrite_references(item, map);
+            }
+        }
+        Object::Dictionary(dictionary) => {
+            for (_, value) in dictionary.iter_mut() {
+                rewrite_references(value, map);
+            }
+        }
+        Object::Stream(stream) => {
+            for (_, value) in stream.dict.iter_mut() {
+                rewrite_references(value, map);
+            }
+        }
+        Object::Reference(id) => {
+            // Every reference left in a part points into it: `part_of` wrote
+            // the others as null or removed them.
+            if let Some(new_id) = map.get(id) {
+                *id = *new_id;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -140,74 +409,56 @@ pub fn merge(documents: &[Vec<u8>]) -> Result<Vec<u8>, String> {
         return Err("merging needs at least one document".to_string());
     }
 
-    let mut max_id = 1;
-    let mut pages = BTreeMap::new();
-    let mut objects = BTreeMap::new();
+    // 1 and 2 are the new catalog and page tree.
+    let catalog_id = (1, 0);
+    let pages_id = (2, 0);
+    let mut next = 3;
+    let mut merged = Document::with_version("1.7");
+    let mut kids = Vec::new();
 
     for (index, bytes) in documents.iter().enumerate() {
-        let mut document =
-            load(bytes).map_err(|error| format!("document {}: {error}", index + 1))?;
-        flatten_inheritance(&mut document);
+        let failed = |error: String| format!("document {}: {error}", index + 1);
+        let mut document = load(bytes).map_err(failed)?;
+        let tree = PageTree::of(&document).map_err(failed)?;
+        flatten_inheritance(&mut document, &tree.pages, &mut Copies::new()).map_err(failed)?;
 
-        // Every document numbers its objects from 1, so they are shifted past
-        // the ones already collected before anything is merged.
-        document.renumber_objects_with(max_id);
-        max_id = document.max_id + 1;
-
-        for page_id in document.get_pages().into_values() {
-            if let Ok(page) = document.get_object(page_id) {
-                pages.insert(page_id, page.to_owned());
+        // Outlines refer to the page trees being dismantled, and every
+        // catalog but the new one goes, so only the pages and what they
+        // reach are carried over.
+        let part = part_of(
+            &document,
+            &tree,
+            &tree.pages,
+            Keep::PagesOnly,
+            &mut Copies::unbounded(),
+        )
+        .map_err(failed)?;
+        let mut objects = part.objects;
+        objects.retain(|id, _| id.0 <= document.max_id);
+        let (objects, map) = renumber(objects, &mut next).map_err(failed)?;
+        for page_id in &tree.pages {
+            if let Some(new_id) = map.get(page_id) {
+                kids.push(Object::Reference(*new_id));
             }
         }
-        objects.extend(document.objects);
+        merged.objects.extend(objects);
     }
 
-    if pages.is_empty() {
+    if kids.is_empty() {
         return Err("none of the documents has a page".to_string());
     }
-
-    let mut merged = Document::with_version("1.7");
-    let mut catalog_id = None;
-    let mut pages_id = None;
-
-    for (object_id, object) in objects {
-        let object_type = object
-            .as_dict()
-            .and_then(|dict| dict.get(b"Type"))
-            .and_then(Object::as_name)
-            .unwrap_or(b"");
-
-        match object_type {
-            b"Catalog" => catalog_id = catalog_id.or(Some(object_id)),
-            b"Pages" => pages_id = pages_id.or(Some(object_id)),
-            // Pages are re-parented below; outlines refer to the page trees we
-            // are dismantling, so they are dropped rather than left dangling.
-            b"Page" | b"Outlines" | b"Outline" => {}
-            _ => {
-                merged.objects.insert(object_id, object);
+    for kid in &kids {
+        if let Ok(id) = kid.as_reference() {
+            if let Some(Object::Dictionary(page)) = merged.objects.get_mut(&id) {
+                page.set("Parent", pages_id);
             }
         }
     }
-
-    let pages_id = pages_id.ok_or_else(|| "no page tree found".to_string())?;
-    let catalog_id = catalog_id.ok_or_else(|| "no catalog found".to_string())?;
-
-    for (page_id, page) in &pages {
-        if let Ok(dictionary) = page.as_dict() {
-            let mut dictionary = dictionary.clone();
-            dictionary.set("Parent", pages_id);
-            merged
-                .objects
-                .insert(*page_id, Object::Dictionary(dictionary));
-        }
-    }
-
-    let kids: Vec<Object> = pages.keys().copied().map(Object::Reference).collect();
     merged.objects.insert(
         pages_id,
         Object::Dictionary(dictionary! {
             "Type" => "Pages",
-            "Count" => kids.len() as i64,
+            "Count" => i64::try_from(kids.len()).unwrap_or(i64::MAX),
             "Kids" => kids,
         }),
     );
@@ -219,10 +470,7 @@ pub fn merge(documents: &[Vec<u8>]) -> Result<Vec<u8>, String> {
         }),
     );
     merged.trailer.set("Root", catalog_id);
-
-    merged.max_id = max_id;
-    merged.renumber_objects();
-    merged.prune_objects();
+    merged.max_id = next - 1;
 
     save(merged)
 }
@@ -239,51 +487,48 @@ pub fn select_pages(bytes: &[u8], pages: &[u32]) -> Result<Vec<u8>, String> {
     }
 
     let mut document = load(bytes)?;
-    flatten_inheritance(&mut document);
+    let tree = PageTree::of(&document)?;
 
-    let available: Vec<u32> = document.get_pages().into_keys().collect();
-    let total = available.len();
-    if let Some(missing) = pages.iter().find(|page| !available.contains(&(*page + 1))) {
-        return Err(format!(
-            "page {} does not exist — the document has {total}",
-            missing + 1
-        ));
+    let mut wanted = BTreeSet::new();
+    for &page in pages {
+        page_at(&tree.pages, page)?;
+        wanted.insert(page);
     }
-
-    let wanted: HashSet<u32> = pages.iter().map(|page| page + 1).collect();
-    let to_delete: Vec<u32> = available
-        .into_iter()
-        .filter(|page| !wanted.contains(page))
+    let kept: Vec<ObjectId> = tree
+        .pages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| u32::try_from(*index).is_ok_and(|index| wanted.contains(&index)))
+        .map(|(_, page_id)| *page_id)
         .collect();
+    // Only the pages kept: the others are not part of what comes out.
+    flatten_inheritance(&mut document, &kept, &mut Copies::new())?;
 
-    document.delete_pages(&to_delete);
-    prune_dangling_kids(&mut document);
-    document.prune_objects();
-
-    save(document)
+    save(part_of(
+        &document,
+        &tree,
+        &kept,
+        Keep::Catalog,
+        &mut Copies::unbounded(),
+    )?)
 }
 
 /// One single-page document per page, in document order.
+///
+/// Every part carries what its page reaches and what the catalog reaches —
+/// fonts, images, the outline, the form — so the parts together can weigh
+/// the document times its page count. They share one [`Copies`] allowance,
+/// and past it the split is refused rather than built.
 pub fn split(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     let mut document = load(bytes)?;
-    flatten_inheritance(&mut document);
-    let page_numbers: Vec<u32> = document.get_pages().into_keys().collect();
+    let tree = PageTree::of(&document)?;
+    let mut copies = Copies::splitting();
+    flatten_inheritance(&mut document, &tree.pages, &mut copies)?;
 
-    page_numbers
+    tree.pages
         .iter()
-        .map(|page| {
-            // Cloned rather than re-parsed for each page: the parse is the
-            // expensive half, and a 200-page document would pay it 200 times.
-            let mut single = document.clone();
-            let others: Vec<u32> = page_numbers
-                .iter()
-                .copied()
-                .filter(|other| other != page)
-                .collect();
-            single.delete_pages(&others);
-            prune_dangling_kids(&mut single);
-            single.prune_objects();
-            save(single)
+        .map(|page_id| {
+            part_of(&document, &tree, &[*page_id], Keep::Catalog, &mut copies).and_then(save)
         })
         .collect()
 }
@@ -299,23 +544,17 @@ pub fn rotate(bytes: &[u8], degrees: i64, pages: Option<&[u32]>) -> Result<Vec<u
     }
 
     let mut document = load(bytes)?;
-    let all = document.get_pages();
-    let total = all.len();
+    let all = page_ids(&document)?;
 
     let targets: Vec<ObjectId> = match pages {
         Some(wanted) => {
-            if let Some(missing) = wanted.iter().find(|page| !all.contains_key(&(*page + 1))) {
-                return Err(format!(
-                    "page {} does not exist — the document has {total}",
-                    missing + 1
-                ));
+            let mut targets = Vec::with_capacity(wanted.len());
+            for &page in wanted {
+                targets.push(page_at(&all, page)?);
             }
-            wanted
-                .iter()
-                .filter_map(|page| all.get(&(page + 1)).copied())
-                .collect()
+            targets
         }
-        None => all.into_values().collect(),
+        None => all,
     };
 
     for page_id in targets {

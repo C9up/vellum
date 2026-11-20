@@ -16,7 +16,7 @@ use lopdf::{dictionary, Object, ObjectId, Stream};
 
 use crate::compose::images::MAX_IMAGE_PIXELS;
 use crate::edit::flatten_inheritance;
-use crate::page::{isolate_existing_contents, page_height, register_resources};
+use crate::page::{isolate_existing_contents, page_height, page_ids, register_resources, Copies};
 
 const IMAGE_KEY: &str = "VellumStamp";
 const STATE_KEY: &str = "VellumStampState";
@@ -286,28 +286,30 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
     let mut document = crate::parse::parse(pdf)?;
     // Inherited attributes are materialised before the pages are touched, so
     // reading a page's MediaBox and Resources does not depend on its ancestry.
-    flatten_inheritance(&mut document);
+    // Each page object once: one listed ten thousand times in the page tree
+    // is refused, not stamped ten thousand times.
+    let pages = page_ids(&document)?;
 
-    let pages = document.get_pages();
     if pages.is_empty() {
         return Err("the document has no page".to_string());
     }
-    if let Some(page) = options.page {
-        if usize::try_from(page).is_err() || page as usize >= pages.len() {
-            return Err(format!(
-                "page {} does not exist — the document has {}",
-                page + 1,
-                pages.len()
-            ));
-        }
-    }
-
-    let targets: Vec<ObjectId> = pages
-        .into_iter()
-        .enumerate()
-        .filter(|(index, _)| options.page.is_none_or(|wanted| wanted as usize == *index))
-        .map(|(_, (_, page_id))| page_id)
-        .collect();
+    let targets: Vec<ObjectId> = match options.page {
+        Some(page) => vec![usize::try_from(page)
+            .ok()
+            .and_then(|index| pages.get(index).copied())
+            .ok_or_else(|| {
+                format!(
+                    "page {} does not exist — the document has {}",
+                    u64::from(page) + 1,
+                    pages.len()
+                )
+            })?],
+        None => pages,
+    };
+    // What is copied onto each page — inherited attributes, resources it
+    // shares with others, its content list — is charged to one allowance.
+    let mut copies = Copies::new();
+    flatten_inheritance(&mut document, &targets, &mut copies)?;
 
     // The picture is written once and referenced from every page it appears
     // on, rather than embedded again for each.
@@ -333,9 +335,14 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
 
         // Registered first: another stamp may already hold the base names on
         // this page, and the content must use the names actually given.
-        let image_key =
-            register_resources(&mut document, page_id, "XObject", &[(IMAGE_KEY, image_id)])?
-                .remove(0);
+        let image_key = register_resources(
+            &mut document,
+            page_id,
+            "XObject",
+            &[(IMAGE_KEY, image_id)],
+            &mut copies,
+        )?
+        .remove(0);
         let mut content: Vec<u8> = Vec::new();
         content.extend_from_slice(b"q\n");
         if let Some(state_id) = state_id {
@@ -344,6 +351,7 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
                 page_id,
                 "ExtGState",
                 &[(STATE_KEY, state_id)],
+                &mut copies,
             )?
             .remove(0);
             content.extend_from_slice(format!("/{state_key} gs\n").as_bytes());
@@ -358,7 +366,7 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
             .as_bytes(),
         );
 
-        isolate_existing_contents(&mut document, page_id)?;
+        isolate_existing_contents(&mut document, page_id, &mut copies)?;
         document
             .add_page_contents(page_id, content)
             .map_err(|error| format!("cannot write onto the page: {error}"))?;

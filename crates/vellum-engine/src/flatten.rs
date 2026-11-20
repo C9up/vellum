@@ -17,7 +17,7 @@ use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::fill::widgets_of;
 use crate::form::fields_of;
-use crate::page::{isolate_existing_contents, register_resources};
+use crate::page::{isolate_existing_contents, page_ids, register_resources, Copies};
 
 /// Bit 2 of an annotation's `/F`: the annotation is shown nowhere. Painting it
 /// into the page would make visible what the document hid.
@@ -154,21 +154,28 @@ fn placement(document: &Document, widget: &Dictionary, stream_id: ObjectId) -> O
 }
 
 /// The annotations of a page, whether the list is inline or referenced.
-fn annotations_of(document: &Document, page_id: ObjectId) -> Vec<Object> {
+///
+/// A referenced list may be shared by every page, so the copy is charged.
+fn annotations_of(
+    document: &Document,
+    page_id: ObjectId,
+    copies: &mut Copies,
+) -> Result<Vec<Object>, String> {
     let annots = document
         .get_dictionary(page_id)
         .ok()
-        .and_then(|page| page.get(b"Annots").ok().cloned());
+        .and_then(|page| page.get(b"Annots").ok());
 
-    match annots {
-        Some(Object::Array(items)) => items,
-        Some(Object::Reference(id)) => document
-            .get_object(id)
-            .ok()
-            .and_then(|object| object.as_array().ok())
-            .cloned()
-            .unwrap_or_default(),
-        _ => Vec::new(),
+    let list = match annots {
+        Some(Object::Reference(id)) => document.get_object(*id).ok(),
+        other => other,
+    };
+    match list {
+        Some(list @ Object::Array(items)) => {
+            copies.charge(list)?;
+            Ok(items.clone())
+        }
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -191,16 +198,25 @@ fn flatten_page(
     document: &mut Document,
     page_id: ObjectId,
     answered: &HashMap<ObjectId, String>,
+    copies: &mut Copies,
 ) -> Result<(), String> {
     let mut kept: Vec<Object> = Vec::new();
     let mut painted: Vec<(String, ObjectId, [f32; 6])> = Vec::new();
 
-    for annotation in annotations_of(document, page_id) {
+    for annotation in annotations_of(document, page_id, copies)? {
         let id = annotation.as_reference().ok();
+        // A widget may be listed on every page: copying it is charged.
         let widget = match &annotation {
-            Object::Reference(id) => document.get_dictionary(*id).ok().cloned(),
-            Object::Dictionary(dictionary) => Some(dictionary.clone()),
+            Object::Reference(id) => document.get_dictionary(*id).ok(),
+            Object::Dictionary(dictionary) => Some(dictionary),
             _ => None,
+        };
+        let widget = match widget {
+            Some(widget) => {
+                copies.charge_dictionary(widget)?;
+                Some(widget.clone())
+            }
+            None => None,
         };
         let Some(widget) = widget else {
             kept.push(annotation);
@@ -246,7 +262,7 @@ fn flatten_page(
         return Ok(());
     }
 
-    isolate_existing_contents(document, page_id)?;
+    isolate_existing_contents(document, page_id, copies)?;
 
     let entries: Vec<(&str, ObjectId)> = painted
         .iter()
@@ -254,7 +270,7 @@ fn flatten_page(
         .collect();
     // The names actually given: a page flattened before already holds
     // VellumFlat0, VellumFlat1…
-    let keys = register_resources(document, page_id, "XObject", &entries)?;
+    let keys = register_resources(document, page_id, "XObject", &entries, copies)?;
 
     let mut content: Vec<u8> = Vec::new();
     for (key, (_, _, matrix)) in keys.iter().zip(&painted) {
@@ -302,8 +318,9 @@ pub fn flatten_form(bytes: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
 
-    for page_id in document.get_pages().into_values() {
-        flatten_page(&mut document, page_id, &answered)?;
+    let mut copies = Copies::new();
+    for page_id in page_ids(&document)? {
+        flatten_page(&mut document, page_id, &answered, &mut copies)?;
     }
 
     remove_acroform(&mut document);
@@ -489,7 +506,8 @@ mod tests {
             "Subtype" => "Link",
             "Rect" => vec![10.into(), 10.into(), 60.into(), 30.into()],
         });
-        let mut annots = annotations_of(&document, page_id);
+        let mut annots =
+            annotations_of(&document, page_id, &mut Copies::new()).expect("the annotations");
         annots.push(Object::Reference(link));
         document
             .get_object_mut(page_id)
@@ -507,7 +525,8 @@ mod tests {
             .values()
             .next()
             .expect("the document has a page");
-        let remaining = annotations_of(&flattened, page_id);
+        let remaining =
+            annotations_of(&flattened, page_id, &mut Copies::new()).expect("the annotations");
         assert_eq!(remaining.len(), 1, "only the link should remain");
     }
 

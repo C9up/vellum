@@ -14,7 +14,7 @@ use lopdf::{dictionary, ObjectId};
 
 use crate::edit::flatten_inheritance;
 use crate::font::embed;
-use crate::page::{isolate_existing_contents, page_height, register_resources};
+use crate::page::{isolate_existing_contents, page_height, page_ids, register_resources, Copies};
 
 /// One of the 14 fonts every PDF reader is required to have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,18 +201,27 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
     }
 
     let mut document = crate::parse::parse(pdf)?;
-    flatten_inheritance(&mut document);
+    // Each page object once: one listed ten thousand times in the page tree
+    // is refused, not written on ten thousand times.
+    let pages = page_ids(&document)?;
 
-    let pages = document.get_pages();
     let total = pages.len();
-    if let Some(page) = options.page {
-        if usize::try_from(page).map_or(true, |index| index >= total) {
-            return Err(format!(
-                "page {} does not exist — the document has {total}",
-                page + 1
-            ));
-        }
-    }
+    let targets: Vec<ObjectId> = match options.page {
+        Some(page) => vec![usize::try_from(page)
+            .ok()
+            .and_then(|index| pages.get(index).copied())
+            .ok_or_else(|| {
+                format!(
+                    "page {} does not exist — the document has {total}",
+                    u64::from(page) + 1
+                )
+            })?],
+        None => pages,
+    };
+    // What is copied onto each page — inherited attributes, resources it
+    // shares with others, its content list — is charged to one allowance.
+    let mut copies = Copies::new();
+    flatten_inheritance(&mut document, &targets, &mut copies)?;
 
     // A standard font is named and the text goes in as WinAnsi bytes; a
     // supplied one is embedded and the text goes in as glyph identifiers.
@@ -246,20 +255,21 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
         None
     };
 
-    let targets: Vec<(u32, ObjectId)> = pages
-        .into_iter()
-        .filter(|(number, _)| options.page.is_none_or(|wanted| wanted + 1 == *number))
-        .collect();
-
     let [red, green, blue] = options.color;
-    for (_, page_id) in targets {
+    for page_id in targets {
         // PDF measures y from the BOTTOM; the option measures it from the top.
         let baseline = page_height(&document, page_id) - options.y;
         // Registered first: the names the page hands back are the ones the
         // content below must use — another stamp may already hold the base
         // names on this page.
-        let font_key =
-            register_resources(&mut document, page_id, "Font", &[(FONT_KEY, font_id)])?.remove(0);
+        let font_key = register_resources(
+            &mut document,
+            page_id,
+            "Font",
+            &[(FONT_KEY, font_id)],
+            &mut copies,
+        )?
+        .remove(0);
         let state = match state_id {
             Some(state_id) => {
                 let key = register_resources(
@@ -267,6 +277,7 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
                     page_id,
                     "ExtGState",
                     &[(STATE_KEY, state_id)],
+                    &mut copies,
                 )?
                 .remove(0);
                 format!("/{key} gs\n")
@@ -302,7 +313,7 @@ pub fn stamp_text(pdf: &[u8], text: &str, options: &TextStampOptions) -> Result<
 
         // The page is free to leave the graphics state transformed, so its own
         // content is balanced before ours is appended after it.
-        isolate_existing_contents(&mut document, page_id)?;
+        isolate_existing_contents(&mut document, page_id, &mut copies)?;
         document
             .add_page_contents(page_id, content)
             .map_err(|error| format!("cannot write onto the page: {error}"))?;

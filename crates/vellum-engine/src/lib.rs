@@ -76,9 +76,11 @@ pub struct DocumentInfo {
 /// Parse `bytes` and report its shape.
 pub fn inspect(bytes: &[u8]) -> Result<DocumentInfo, String> {
     let document = parse::parse(bytes)?;
+    let page_count = u32::try_from(page::page_ids(&document)?.len())
+        .map_err(|_| "cannot read PDF: it has more pages than can be counted".to_string())?;
 
     Ok(DocumentInfo {
-        page_count: document.get_pages().len() as u32,
+        page_count,
         version: document.version.clone(),
         // lopdf opens a document whose user password is empty on its own,
         // and drops /Encrypt from the trailer as it does: the file is still
