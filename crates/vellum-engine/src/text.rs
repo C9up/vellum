@@ -195,7 +195,7 @@ pub fn extract_text_with(
             let page = pages.get(index).ok_or_else(|| {
                 format!(
                     "page {} does not exist — the document has {}",
-                    page_index + 1,
+                    u64::from(page_index) + 1,
                     pages.len()
                 )
             })?;

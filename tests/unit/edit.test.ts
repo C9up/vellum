@@ -84,6 +84,38 @@ describe("Vellum — document operations", () => {
 		}
 	});
 
+	it("refuses a page number past 2^32 instead of wrapping it onto another page", async () => {
+		// The engine takes 32-bit page indexes and JavaScript's conversion to
+		// them wraps: 2^32 + 2 used to arrive as 1, page two, and every
+		// page-addressing method acted on a page nobody named.
+		const pdf = createBlank([A4, A5, A4]);
+		const wrapped = 2 ** 32 + 2;
+		const calls: Array<[string, () => Promise<unknown>]> = [
+			["render", () => vellum.render(pdf, { page: wrapped })],
+			["extractText", () => vellum.extractText(pdf, { page: wrapped })],
+			["selectPages", () => vellum.selectPages(pdf, [wrapped])],
+			["rotate", () => vellum.rotate(pdf, 90, { pages: [wrapped] })],
+			["stamp", () => vellum.stamp(pdf, redDot(), { page: wrapped })],
+			["stampText", () => vellum.stampText(pdf, "X", { page: wrapped })],
+		];
+		for (const [name, call] of calls) {
+			try {
+				await call();
+				expect.unreachable(`${name} should refuse page ${wrapped}`);
+			} catch (error) {
+				if (!(error instanceof VellumError)) throw error;
+				expect(error.code, name).toBe("E_VELLUM_INVALID_PAGE");
+				expect(error.message, name).toContain(String(wrapped));
+			}
+		}
+
+		// The largest index the engine takes is still a page that does not
+		// exist, reported in human numbering rather than wrapped to 0.
+		await expect(vellum.selectPages(pdf, [2 ** 32])).rejects.toThrow(
+			/page 4294967296 does not exist/,
+		);
+	});
+
 	it("refuses an empty selection", async () => {
 		await expect(vellum.selectPages(createBlank([A4]), [])).rejects.toThrow(
 			VellumError,

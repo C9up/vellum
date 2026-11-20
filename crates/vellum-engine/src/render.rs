@@ -215,7 +215,7 @@ fn read_page(bytes: &[u8], page_index: u32, options: &RenderOptions) -> Result<V
         // for page 8 should not be told that "page 7" is missing.
         format!(
             "page {} does not exist — the document has {}",
-            page_index + 1,
+            u64::from(page_index) + 1,
             pages.len()
         )
     })?;

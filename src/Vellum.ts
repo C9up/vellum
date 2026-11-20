@@ -920,6 +920,16 @@ export class Vellum {
 				`Page numbers start at 1, got ${page}.`,
 			);
 		}
+		// The engine takes the index as a 32-bit count, and the conversion on
+		// the way there is ECMAScript's ToUint32: it wraps rather than refuses,
+		// so 2^32 + 2 would arrive as 1 and answer page two. Past the largest
+		// index it takes, no document has the page.
+		if (page - 1 > MAX_PAGE_INDEX) {
+			throw new VellumError(
+				"INVALID_PAGE",
+				`Page ${page} does not exist — page numbers stop at ${MAX_PAGE_INDEX + 1}.`,
+			);
+		}
 		return page - 1;
 	}
 
@@ -986,6 +996,9 @@ export class Vellum {
 		};
 	}
 }
+
+/** The largest page index the engine takes: a 32-bit count. */
+const MAX_PAGE_INDEX = 0xffff_ffff;
 
 /** The engine's form of {@link EditOptions}. */
 function edits(options: EditOptions): { discardSignatures?: boolean } {
