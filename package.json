@@ -48,7 +48,7 @@
     "prepublishOnly": "tsc -p tsconfig.build.json"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.12",
+    "@biomejs/biome": "^2.6.8",
     "@c9up/prism": "^0.1.5",
     "@c9up/ream": "^0.2.28",
     "@types/node": "^22.20.1",
