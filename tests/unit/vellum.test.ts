@@ -1,10 +1,11 @@
+import { Exception } from "@c9up/flare";
 import { describe, expect, it } from "vitest";
 import {
 	A4,
 	createBlank,
+	errors,
 	inspect,
 	isNativeAvailable,
-	VellumError,
 } from "../../src/index.js";
 
 describe("vellum", () => {
@@ -35,7 +36,7 @@ describe("vellum", () => {
 	it("rejects bytes that are not a PDF", async () => {
 		await expect(
 			inspect(Buffer.from("this is not a PDF at all")),
-		).rejects.toThrow(VellumError);
+		).rejects.toThrow(errors.E_VELLUM_INVALID_PDF);
 
 		try {
 			await inspect(Buffer.from("this is not a PDF at all"));
@@ -43,13 +44,13 @@ describe("vellum", () => {
 		} catch (error) {
 			// `instanceof` rather than a cast: it narrows the type AND asserts it,
 			// so a non-Vellum error fails here instead of being read as one.
-			if (!(error instanceof VellumError)) throw error;
+			if (!(error instanceof Exception)) throw error;
 			expect(error.code).toBe("E_VELLUM_INVALID_PDF");
 		}
 	});
 
 	it("refuses to author a document with no pages", () => {
-		expect(() => createBlank([])).toThrow(VellumError);
+		expect(() => createBlank([])).toThrow(errors.E_VELLUM_WRITE_FAILED);
 	});
 
 	it("refuses a page without area", () => {

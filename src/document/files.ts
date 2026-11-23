@@ -6,7 +6,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { VellumError } from "../errors.js";
+import { E_VELLUM_FILE_NOT_FOUND } from "../errors.js";
 
 /** A file named by path, or its bytes. */
 export type FileSource = string | URL | Uint8Array | ArrayBuffer;
@@ -63,9 +63,11 @@ export function readSource(source: FileSource): Buffer {
 	try {
 		return readFileSync(path);
 	} catch (error) {
-		throw new VellumError(
-			"FILE_NOT_FOUND",
-			`cannot read ${JSON.stringify(path)}: ${error instanceof Error ? error.message : String(error)}`,
+		throw new E_VELLUM_FILE_NOT_FOUND(
+			[
+				JSON.stringify(path),
+				error instanceof Error ? error.message : String(error),
+			],
 			{ cause: error },
 		);
 	}

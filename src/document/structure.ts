@@ -8,7 +8,7 @@
  * `endMarkedContent()`, as in pdfkit.
  */
 
-import { VellumError } from "../errors.js";
+import { E_VELLUM_INVALID_STRUCTURE } from "../errors.js";
 
 /** Content marked with `markStructureContent()`. */
 export class PdfStructureContent {
@@ -109,10 +109,9 @@ export class PdfStructureElement {
 
 	add(child: StructureChild): this {
 		if (this.#ended) {
-			throw new VellumError(
-				"INVALID_STRUCTURE",
+			throw new E_VELLUM_INVALID_STRUCTURE([
 				"Cannot add child to already-ended structure element",
-			);
+			]);
 		}
 		if (child instanceof PdfStructureElement) {
 			child.#adopt(this);
@@ -135,10 +134,9 @@ export class PdfStructureElement {
 
 	#adopt(parent: PdfStructureElement): void {
 		if (this.#parent !== undefined) {
-			throw new VellumError(
-				"INVALID_STRUCTURE",
+			throw new E_VELLUM_INVALID_STRUCTURE([
 				"Structure element added to more than one parent",
-			);
+			]);
 		}
 		this.#parent = parent;
 	}

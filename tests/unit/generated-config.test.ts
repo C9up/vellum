@@ -139,6 +139,9 @@ describe("vellum > defineConfig", () => {
 	it("names a format it cannot use, at boot, with the value", () => {
 		// Rather than at the first render of a document nobody was watching.
 		expect(() => defineConfig({ format: "tiff" })).toThrow(
+			expect.objectContaining({ code: "E_VELLUM_INVALID_OPTIONS" }),
+		);
+		expect(() => defineConfig({ format: "tiff" })).toThrow(
 			/asks for format "tiff"/,
 		);
 	});

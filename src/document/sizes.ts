@@ -2,7 +2,7 @@
  * Page sizes, side definitions and lengths, in the forms pdfkit takes them.
  */
 
-import { VellumError } from "../errors.js";
+import { E_VELLUM_INVALID_OPTIONS } from "../errors.js";
 
 /** Named page sizes in points, portrait. */
 export const PAGE_SIZES = {
@@ -170,10 +170,7 @@ export function sizeToPoint(
 	}
 	if (typeof size === "number") {
 		if (!Number.isFinite(size)) {
-			throw new VellumError(
-				"INVALID_OPTIONS",
-				`${size} is not a finite length`,
-			);
+			throw new E_VELLUM_INVALID_OPTIONS([`${size} is not a finite length`]);
 		}
 		return size;
 	}
@@ -181,10 +178,9 @@ export function sizeToPoint(
 	const match = LENGTH.exec(size.trim());
 	const value = match?.[1];
 	if (match === null || value === undefined) {
-		throw new VellumError(
-			"INVALID_OPTIONS",
+		throw new E_VELLUM_INVALID_OPTIONS([
 			`Unsupported size ${JSON.stringify(size)}`,
-		);
+		]);
 	}
 	const amount = Number(value);
 	switch (match[2]) {
@@ -234,10 +230,9 @@ export function pageDimensions(
 	if (typeof size === "string" || size === undefined) {
 		const name = (size ?? "letter").toUpperCase();
 		if (!isSizeName(name)) {
-			throw new VellumError(
-				"INVALID_OPTIONS",
+			throw new E_VELLUM_INVALID_OPTIONS([
 				`Unknown page size ${JSON.stringify(size)}`,
-			);
+			]);
 		}
 		dimensions = PAGE_SIZES[name];
 	} else {

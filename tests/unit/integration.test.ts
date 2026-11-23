@@ -126,6 +126,9 @@ describe("services/main", () => {
 	it("throws with actionable guidance when read before boot", () => {
 		expect(() => vellumService.config).toThrow(/VellumProvider.boot/);
 		expect(() => vellumService.config).toThrow(/reamrc.ts/);
+		expect(() => vellumService.config).toThrow(
+			expect.objectContaining({ code: "E_VELLUM_NOT_BOOTED" }),
+		);
 	});
 
 	it("answers `then` and symbols with undefined so importing it never throws", () => {

@@ -6,6 +6,7 @@
  * would render with defaults nobody chose.
  */
 
+import { E_VELLUM_NOT_BOOTED } from "../errors.js";
 import type { Vellum } from "../Vellum.js";
 
 let instance: Vellum | undefined;
@@ -34,10 +35,7 @@ export function clearVellum(): void {
 
 function resolve(): Vellum {
 	if (!instance) {
-		throw new Error(
-			"[vellum] Vellum service accessed before VellumProvider.boot() ran. " +
-				"Check that `@c9up/vellum/provider` is listed in your reamrc.ts providers.",
-		);
+		throw new E_VELLUM_NOT_BOOTED();
 	}
 	return instance;
 }

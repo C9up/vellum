@@ -7,7 +7,42 @@
  * one deployment behave differently from another.
  */
 
-import { VellumError } from "./errors.js";
+import { type ErrorClass, Exception } from "@c9up/flare";
+import {
+	E_VELLUM_DOCUMENT_BROKEN,
+	E_VELLUM_DOCUMENT_ENDED,
+	E_VELLUM_EXTRACT_FAILED,
+	E_VELLUM_FILL_FAILED,
+	E_VELLUM_FLATTEN_FAILED,
+	E_VELLUM_INTERNAL,
+	E_VELLUM_INVALID_FONT,
+	E_VELLUM_INVALID_IMAGE,
+	E_VELLUM_INVALID_LINK,
+	E_VELLUM_INVALID_OPTIONS,
+	E_VELLUM_INVALID_OUTLINE,
+	E_VELLUM_INVALID_PDF,
+	E_VELLUM_INVALID_STRUCTURE,
+	E_VELLUM_INVALID_SVG,
+	E_VELLUM_MERGE_FAILED,
+	E_VELLUM_NAPI_REQUIRED,
+	E_VELLUM_NO_FONT,
+	E_VELLUM_NO_PAGE,
+	E_VELLUM_NOTHING_TO_RESUME,
+	E_VELLUM_PAGE_OUT_OF_RANGE,
+	E_VELLUM_RENDER_FAILED,
+	E_VELLUM_ROTATE_FAILED,
+	E_VELLUM_SELECT_FAILED,
+	E_VELLUM_SIGN_FAILED,
+	E_VELLUM_SIGNED_DOCUMENT,
+	E_VELLUM_SPLIT_FAILED,
+	E_VELLUM_STAMP_FAILED,
+	E_VELLUM_STAMP_TEXT_FAILED,
+	E_VELLUM_TIMESTAMP_FAILED,
+	E_VELLUM_UNBALANCED_RESTORE,
+	E_VELLUM_VALIDATION,
+	E_VELLUM_VERIFY_FAILED,
+	E_VELLUM_WRITE_FAILED,
+} from "./errors.js";
 import type {
 	DocumentInfo,
 	DocumentMetadata,
@@ -109,22 +144,17 @@ function unavailableReason(): string {
 	return vendorUnavailableReason();
 }
 
-/** Raised when an operation needs the Rust engine and it is not there. */
-export class VellumNativeRequiredError extends VellumError {
-	constructor() {
-		super(
-			"NAPI_REQUIRED",
-			`The Rust PDF engine is required but not loaded — ${unavailableReason()}.\n` +
-				"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
-		);
-		this.name = "VellumNativeRequiredError";
-	}
-}
-
 /** The engine, or a refusal explaining how to get one. */
 function engine(): NativeVellum {
-	if (native === undefined) throw new VellumNativeRequiredError();
+	if (native === undefined) {
+		throw new E_VELLUM_NAPI_REQUIRED([unavailableReason()]);
+	}
 	return native;
+}
+
+/** The message of whatever the engine threw. */
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -133,25 +163,24 @@ function engine(): NativeVellum {
  * The engine reports failures as plain reasons. Without this, a caller
  * catching a corrupt upload would get an `Error` it cannot branch on.
  */
-function run<T>(code: string, work: (engine: NativeVellum) => T): T {
+function run<T>(
+	failure: ErrorClass<[string]>,
+	work: (engine: NativeVellum) => T,
+): T {
 	const loaded = engine();
 	try {
 		return work(loaded);
 	} catch (error) {
-		throw new VellumError(
-			code,
-			error instanceof Error ? error.message : String(error),
-			{ cause: error },
-		);
+		throw new failure([messageOf(error)], { cause: error });
 	}
 }
 
 export function inspectNative(pdf: Buffer): Promise<DocumentInfo> {
-	return edit("INVALID_PDF", (loaded) => loaded.inspect(pdf));
+	return edit(E_VELLUM_INVALID_PDF, (loaded) => loaded.inspect(pdf));
 }
 
 export function createBlankNative(pages: ReadonlyArray<PageSize>): Buffer {
-	return run("WRITE_FAILED", (loaded) => loaded.createBlank([...pages]));
+	return run(E_VELLUM_WRITE_FAILED, (loaded) => loaded.createBlank([...pages]));
 }
 
 /**
@@ -169,11 +198,7 @@ export async function renderPageNative(
 	try {
 		return await loaded.renderPage(pdf, pageIndex, options);
 	} catch (error) {
-		throw new VellumError(
-			"RENDER_FAILED",
-			error instanceof Error ? error.message : String(error),
-			{ cause: error },
-		);
+		throw new E_VELLUM_RENDER_FAILED([messageOf(error)], { cause: error });
 	}
 }
 
@@ -186,11 +211,7 @@ export async function renderAllNative(
 	try {
 		return await loaded.renderAll(pdf, options);
 	} catch (error) {
-		throw new VellumError(
-			"RENDER_FAILED",
-			error instanceof Error ? error.message : String(error),
-			{ cause: error },
-		);
+		throw new E_VELLUM_RENDER_FAILED([messageOf(error)], { cause: error });
 	}
 }
 
@@ -198,11 +219,13 @@ export function pageDimensionsNative(
 	pdf: Buffer,
 	limits: ReadLimits,
 ): Promise<PageDimensions[]> {
-	return edit("INVALID_PDF", (loaded) => loaded.pageDimensions(pdf, limits));
+	return edit(E_VELLUM_INVALID_PDF, (loaded) =>
+		loaded.pageDimensions(pdf, limits),
+	);
 }
 
 export function metadataNative(pdf: Buffer): Promise<DocumentMetadata> {
-	return edit("INVALID_PDF", (loaded) => loaded.metadata(pdf));
+	return edit(E_VELLUM_INVALID_PDF, (loaded) => loaded.metadata(pdf));
 }
 
 export async function extractTextNative(
@@ -214,11 +237,7 @@ export async function extractTextNative(
 	try {
 		return await loaded.extractText(pdf, pageIndex, limits);
 	} catch (error) {
-		throw new VellumError(
-			"EXTRACT_FAILED",
-			error instanceof Error ? error.message : String(error),
-			{ cause: error },
-		);
+		throw new E_VELLUM_EXTRACT_FAILED([messageOf(error)], { cause: error });
 	}
 }
 
@@ -230,11 +249,7 @@ export async function extractTextAllNative(
 	try {
 		return await loaded.extractTextAll(pdf, limits);
 	} catch (error) {
-		throw new VellumError(
-			"EXTRACT_FAILED",
-			error instanceof Error ? error.message : String(error),
-			{ cause: error },
-		);
+		throw new E_VELLUM_EXTRACT_FAILED([messageOf(error)], { cause: error });
 	}
 }
 
@@ -242,18 +257,19 @@ export async function extractTextAllNative(
 const NAMED_FAILURE = /^(SIGNED_DOCUMENT): ([\s\S]*)$/;
 
 async function edit<T>(
-	code: string,
+	failure: ErrorClass<[string]>,
 	work: (engine: NativeVellum) => Promise<T>,
 ): Promise<T> {
 	const loaded = engine();
 	try {
 		return await work(loaded);
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		const named = NAMED_FAILURE.exec(message);
-		throw new VellumError(named?.[1] ?? code, named?.[2] ?? message, {
-			cause: error,
-		});
+		const message = messageOf(error);
+		const reason = NAMED_FAILURE.exec(message)?.[2];
+		if (reason !== undefined) {
+			throw new E_VELLUM_SIGNED_DOCUMENT([reason], { cause: error });
+		}
+		throw new failure([message], { cause: error });
 	}
 }
 
@@ -261,7 +277,7 @@ export function mergeNative(
 	documents: ReadonlyArray<Buffer>,
 	options: EditOptions,
 ): Promise<Buffer> {
-	return edit("MERGE_FAILED", (loaded) =>
+	return edit(E_VELLUM_MERGE_FAILED, (loaded) =>
 		loaded.merge([...documents], options),
 	);
 }
@@ -271,7 +287,7 @@ export function selectPagesNative(
 	pageIndexes: ReadonlyArray<number>,
 	options: EditOptions,
 ): Promise<Buffer> {
-	return edit("SELECT_FAILED", (loaded) =>
+	return edit(E_VELLUM_SELECT_FAILED, (loaded) =>
 		loaded.selectPages(pdf, [...pageIndexes], options),
 	);
 }
@@ -280,7 +296,7 @@ export function splitNative(
 	pdf: Buffer,
 	options: EditOptions,
 ): Promise<Buffer[]> {
-	return edit("SPLIT_FAILED", (loaded) => loaded.split(pdf, options));
+	return edit(E_VELLUM_SPLIT_FAILED, (loaded) => loaded.split(pdf, options));
 }
 
 export function rotateNative(
@@ -289,7 +305,7 @@ export function rotateNative(
 	pageIndexes: ReadonlyArray<number> | undefined,
 	options: EditOptions,
 ): Promise<Buffer> {
-	return edit("ROTATE_FAILED", (loaded) =>
+	return edit(E_VELLUM_ROTATE_FAILED, (loaded) =>
 		loaded.rotate(
 			pdf,
 			degrees,
@@ -304,7 +320,9 @@ export function stampNative(
 	image: Buffer,
 	options: NativeStampOptions,
 ): Promise<Buffer> {
-	return edit("STAMP_FAILED", (loaded) => loaded.stamp(pdf, image, options));
+	return edit(E_VELLUM_STAMP_FAILED, (loaded) =>
+		loaded.stamp(pdf, image, options),
+	);
 }
 
 export function stampTextNative(
@@ -312,13 +330,13 @@ export function stampTextNative(
 	text: string,
 	options: NativeTextStampOptions,
 ): Promise<Buffer> {
-	return edit("STAMP_TEXT_FAILED", (loaded) =>
+	return edit(E_VELLUM_STAMP_TEXT_FAILED, (loaded) =>
 		loaded.stampText(pdf, text, options),
 	);
 }
 
 export function formFieldsNative(pdf: Buffer): Promise<FormField[]> {
-	return edit("INVALID_PDF", (loaded) => loaded.formFields(pdf));
+	return edit(E_VELLUM_INVALID_PDF, (loaded) => loaded.formFields(pdf));
 }
 
 export function fillFormNative(
@@ -326,28 +344,34 @@ export function fillFormNative(
 	values: Record<string, string>,
 	options: EditOptions,
 ): Promise<Buffer> {
-	return edit("FILL_FAILED", (loaded) => loaded.fillForm(pdf, values, options));
+	return edit(E_VELLUM_FILL_FAILED, (loaded) =>
+		loaded.fillForm(pdf, values, options),
+	);
 }
 
 export function flattenFormNative(
 	pdf: Buffer,
 	options: EditOptions,
 ): Promise<Buffer> {
-	return edit("FLATTEN_FAILED", (loaded) => loaded.flattenForm(pdf, options));
+	return edit(E_VELLUM_FLATTEN_FAILED, (loaded) =>
+		loaded.flattenForm(pdf, options),
+	);
 }
 
 export function prepareSignatureNative(
 	pdf: Buffer,
 	options: NativeSignatureOptions,
 ): Promise<PreparedSignature> {
-	return edit("SIGN_FAILED", (loaded) => loaded.prepareSignature(pdf, options));
+	return edit(E_VELLUM_SIGN_FAILED, (loaded) =>
+		loaded.prepareSignature(pdf, options),
+	);
 }
 
 export function embedSignatureNative(
 	prepared: Buffer,
 	value: Buffer,
 ): Promise<Buffer> {
-	return edit("SIGN_FAILED", (loaded) =>
+	return edit(E_VELLUM_SIGN_FAILED, (loaded) =>
 		loaded.embedSignature(prepared, value),
 	);
 }
@@ -358,13 +382,13 @@ export function signCmsNative(
 	certificates: ReadonlyArray<Buffer>,
 	signedAt: string,
 ): Promise<Buffer> {
-	return edit("SIGN_FAILED", (loaded) =>
+	return edit(E_VELLUM_SIGN_FAILED, (loaded) =>
 		loaded.signCms(digest, key, [...certificates], signedAt),
 	);
 }
 
 export function timestampQueryNative(cms: Buffer): TimestampQuery {
-	return run("TIMESTAMP_FAILED", (loaded) => loaded.timestampQuery(cms));
+	return run(E_VELLUM_TIMESTAMP_FAILED, (loaded) => loaded.timestampQuery(cms));
 }
 
 export function attachTimestampNative(
@@ -372,7 +396,7 @@ export function attachTimestampNative(
 	response: Buffer,
 	nonce: Buffer,
 ): Buffer {
-	return run("TIMESTAMP_FAILED", (loaded) =>
+	return run(E_VELLUM_TIMESTAMP_FAILED, (loaded) =>
 		loaded.attachTimestamp(cms, response, nonce),
 	);
 }
@@ -381,18 +405,22 @@ export function verifySignaturesNative(
 	pdf: Buffer,
 	trust: NativeTrustOptions,
 ): Promise<SignatureReport[]> {
-	return edit("VERIFY_FAILED", (loaded) => loaded.verifySignatures(pdf, trust));
+	return edit(E_VELLUM_VERIFY_FAILED, (loaded) =>
+		loaded.verifySignatures(pdf, trust),
+	);
 }
 
 export function responderUrlNative(certificate: Buffer): string | null {
-	return run("VERIFY_FAILED", (loaded) => loaded.responderUrl(certificate));
+	return run(E_VELLUM_VERIFY_FAILED, (loaded) =>
+		loaded.responderUrl(certificate),
+	);
 }
 
 export function revocationQueryNative(
 	certificate: Buffer,
 	issuer: Buffer,
 ): Buffer {
-	return run("VERIFY_FAILED", (loaded) =>
+	return run(E_VELLUM_VERIFY_FAILED, (loaded) =>
 		loaded.revocationQuery(certificate, issuer),
 	);
 }
@@ -403,7 +431,7 @@ export function readRevocationNative(
 	issuer: Buffer,
 	at: number | null,
 ): RevocationAnswer {
-	return run("VERIFY_FAILED", (loaded) =>
+	return run(E_VELLUM_VERIFY_FAILED, (loaded) =>
 		loaded.readRevocation(response, certificate, issuer, at ?? undefined),
 	);
 }
@@ -419,15 +447,42 @@ export type {
  * Turn a document failure into a coded error. The engine reports them as
  * `CODE: reason`.
  */
-function composeFailure(error: unknown): VellumError {
-	if (error instanceof VellumError) return error;
-	const message = error instanceof Error ? error.message : String(error);
+function composeFailure(error: unknown): Exception {
+	if (error instanceof Exception) return error;
+	const message = messageOf(error);
 	const match = /^([A-Z][A-Z0-9_]*): ([\s\S]*)$/.exec(message);
 	const code = match?.[1];
 	const reason = match?.[2];
-	return code !== undefined && reason !== undefined
-		? new VellumError(code, reason, { cause: error })
-		: new VellumError("WRITE_FAILED", message, { cause: error });
+	if (code !== undefined && reason !== undefined && isComposeCode(code)) {
+		return new COMPOSE_ERRORS[code]([reason], { cause: error });
+	}
+	// A code this side does not know yet: the whole message keeps it readable.
+	return new E_VELLUM_WRITE_FAILED([message], { cause: error });
+}
+
+/** The error class of each code the engine names a document failure with. */
+const COMPOSE_ERRORS = {
+	INVALID_OPTIONS: E_VELLUM_INVALID_OPTIONS,
+	WRITE_FAILED: E_VELLUM_WRITE_FAILED,
+	NO_PAGE: E_VELLUM_NO_PAGE,
+	DOCUMENT_ENDED: E_VELLUM_DOCUMENT_ENDED,
+	INVALID_IMAGE: E_VELLUM_INVALID_IMAGE,
+	INVALID_SVG: E_VELLUM_INVALID_SVG,
+	INVALID_STRUCTURE: E_VELLUM_INVALID_STRUCTURE,
+	INVALID_LINK: E_VELLUM_INVALID_LINK,
+	INVALID_OUTLINE: E_VELLUM_INVALID_OUTLINE,
+	INVALID_FONT: E_VELLUM_INVALID_FONT,
+	NO_FONT: E_VELLUM_NO_FONT,
+	PAGE_OUT_OF_RANGE: E_VELLUM_PAGE_OUT_OF_RANGE,
+	UNBALANCED_RESTORE: E_VELLUM_UNBALANCED_RESTORE,
+	NOTHING_TO_RESUME: E_VELLUM_NOTHING_TO_RESUME,
+	VALIDATION: E_VELLUM_VALIDATION,
+	DOCUMENT_BROKEN: E_VELLUM_DOCUMENT_BROKEN,
+	INTERNAL: E_VELLUM_INTERNAL,
+} as const satisfies Record<string, ErrorClass<[string]>>;
+
+function isComposeCode(code: string): code is keyof typeof COMPOSE_ERRORS {
+	return Object.hasOwn(COMPOSE_ERRORS, code);
 }
 
 /** Run a call on a document being authored, with its failures coded. */

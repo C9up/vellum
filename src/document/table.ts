@@ -8,7 +8,7 @@
  * repeats the first rows at the top of every page the table runs onto.
  */
 
-import { VellumError } from "../errors.js";
+import { E_VELLUM_INVALID_OPTIONS, E_VELLUM_TABLE_ENDED } from "../errors.js";
 import type { ColourValue } from "./colours.js";
 import type { FontSource, MarkOptions, TextOptions } from "./PdfDocument.js";
 import type { Side, SideDefinition, Sides, Size } from "./sizes.js";
@@ -222,16 +222,14 @@ export const MAX_COLUMNS = 1000;
 function spanOf(name: string, value: number | undefined, max: number): number {
 	if (value === undefined) return 1;
 	if (!Number.isInteger(value)) {
-		throw new VellumError(
-			"INVALID_OPTIONS",
+		throw new E_VELLUM_INVALID_OPTIONS([
 			`A cell's ${name} must be a whole number, got ${value}.`,
-		);
+		]);
 	}
 	if (value > max) {
-		throw new VellumError(
-			"INVALID_OPTIONS",
+		throw new E_VELLUM_INVALID_OPTIONS([
 			`A cell's ${name} is at most ${max}, got ${value}.`,
-		);
+		]);
 	}
 	return Math.max(1, value);
 }
@@ -590,7 +588,7 @@ export class PdfTable<Document> {
 	/** Draw a row. The table answers, or the document once `lastRow` ends it. */
 	row(cells: Iterable<TableCell>, lastRow = false): this {
 		if (this.#ended) {
-			throw new Error(`Table was marked as ended on row ${this.#rowIndex}`);
+			throw new E_VELLUM_TABLE_ENDED([this.#rowIndex]);
 		}
 		const rowIndex = this.#rowIndex;
 		let colIndex = 0;
@@ -650,10 +648,9 @@ export class PdfTable<Document> {
 	#ensure(row: ResolvedCell[]): void {
 		const columns = row.reduce((sum, cell) => sum + cell.colSpan, 0);
 		if (columns > MAX_COLUMNS) {
-			throw new VellumError(
-				"INVALID_OPTIONS",
+			throw new E_VELLUM_INVALID_OPTIONS([
 				`A table has at most ${MAX_COLUMNS} columns, this one ${columns}.`,
-			);
+			]);
 		}
 		const stars: Array<ResolvedColumn | undefined> = [];
 		let starMinimum = 0;

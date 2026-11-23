@@ -18,7 +18,15 @@
  */
 
 import { Readable } from "node:stream";
-import { VellumError } from "../errors.js";
+import {
+	E_VELLUM_DOCUMENT_ENDED,
+	E_VELLUM_INVALID_COLOR,
+	E_VELLUM_INVALID_IMAGE,
+	E_VELLUM_INVALID_OPTIONS,
+	E_VELLUM_INVALID_SVG,
+	E_VELLUM_NO_FORM,
+	E_VELLUM_NO_PAGE,
+} from "../errors.js";
 import {
 	compose,
 	createDocumentNative,
@@ -716,10 +724,9 @@ export class PdfDocument extends Readable {
 	readonly outline: PdfOutline = new PdfOutline(() => {
 		const index = this.#native.currentPage();
 		if (index === null) {
-			throw new VellumError(
-				"NO_PAGE",
+			throw new E_VELLUM_NO_PAGE([
 				"there is no current page: call addPage() first",
-			);
+			]);
 		}
 		return index;
 	});
@@ -802,10 +809,9 @@ export class PdfDocument extends Readable {
 		const index = this.#native.currentPage();
 		const page = index === null ? undefined : this.#pages[index];
 		if (page === undefined) {
-			throw new VellumError(
-				"NO_PAGE",
+			throw new E_VELLUM_NO_PAGE([
 				"there is no current page: call addPage() first",
-			);
+			]);
 		}
 		return page;
 	}
@@ -1756,10 +1762,9 @@ export class PdfDocument extends Readable {
 		const source = describeSource(src);
 		const name = options.name ?? source.name;
 		if (name === undefined) {
-			throw new VellumError(
-				"INVALID_OPTIONS",
+			throw new E_VELLUM_INVALID_OPTIONS([
 				"a file given as bytes needs a name",
-			);
+			]);
 		}
 		const handle = compose(() =>
 			this.#native.attachFile({
@@ -1855,10 +1860,7 @@ export class PdfDocument extends Readable {
 		rect?: { x: number; y: number; width: number; height: number },
 	): PdfFormField {
 		if (!this.#formReady) {
-			throw new VellumError(
-				"NO_FORM",
-				"call initForm() before adding form fields",
-			);
+			throw new E_VELLUM_NO_FORM();
 		}
 		let flags = options.Ff ?? 0;
 		for (const [key, bit] of Object.entries(FIELD_FLAGS)) {
@@ -1869,16 +1871,15 @@ export class PdfDocument extends Readable {
 				? undefined
 				: this.#fieldHandles.get(options.parent);
 		if (options.parent !== undefined && parent === undefined) {
-			throw new VellumError(
-				"INVALID_OPTIONS",
+			throw new E_VELLUM_INVALID_OPTIONS([
 				"the field's parent belongs to another document",
-			);
+			]);
 		}
 		const colour = (value: ColourValue | undefined) => {
 			if (value === undefined) return undefined;
 			const plain = plainColour(value);
 			if (plain.kind !== "rgb")
-				throw new VellumError("INVALID_COLOR", "a field's colour is RGB");
+				throw new E_VELLUM_INVALID_COLOR(["a field's colour is RGB"]);
 			return plain.values;
 		};
 		const format = options.format;
@@ -2035,7 +2036,7 @@ export class PdfDocument extends Readable {
 		const colour = options.color ?? fallback;
 		const rgb = colour === undefined ? undefined : plainColour(colour);
 		if (rgb !== undefined && rgb.kind !== "rgb") {
-			throw new VellumError("INVALID_COLOR", "an annotation's colour is RGB");
+			throw new E_VELLUM_INVALID_COLOR(["an annotation's colour is RGB"]);
 		}
 		compose(() =>
 			this.#native.annotate({
@@ -2210,10 +2211,9 @@ export class PdfDocument extends Readable {
 			FreeText: "text",
 		} as const;
 		if (!Object.hasOwn(kinds, options.Subtype)) {
-			throw new VellumError(
-				"INVALID_OPTIONS",
+			throw new E_VELLUM_INVALID_OPTIONS([
 				`Unknown annotation subtype ${JSON.stringify(options.Subtype)}`,
-			);
+			]);
 		}
 		const kind = kinds[options.Subtype];
 		return this.#annotation(
@@ -2302,10 +2302,9 @@ export class PdfDocument extends Readable {
 		}
 		if (isOpenedImage(src)) {
 			if (!this.#imageHandles.has(src)) {
-				throw new VellumError(
-					"INVALID_IMAGE",
+				throw new E_VELLUM_INVALID_IMAGE([
 					"this image was opened by another document",
-				);
+				]);
 			}
 			return src;
 		}
@@ -2341,10 +2340,9 @@ export class PdfDocument extends Readable {
 		const image = this.openImage(src);
 		const handle = this.#imageHandles.get(image);
 		if (handle === undefined) {
-			throw new VellumError(
-				"INVALID_IMAGE",
+			throw new E_VELLUM_INVALID_IMAGE([
 				"this image was not opened by this document",
-			);
+			]);
 		}
 		let { width, height } = image;
 		if (!ignoreOrientation && image.orientation > 4)
@@ -2421,10 +2419,9 @@ export class PdfDocument extends Readable {
 
 	#open(): void {
 		if (this.#ended) {
-			throw new VellumError(
-				"DOCUMENT_ENDED",
+			throw new E_VELLUM_DOCUMENT_ENDED([
 				"the document has ended; nothing more can be added to it",
-			);
+			]);
 		}
 	}
 
@@ -2521,8 +2518,7 @@ function svgString(src: string): Buffer {
 		return Buffer.from(src);
 	}
 	if (isDataUrl(src)) return readSource(src);
-	throw new VellumError(
-		"INVALID_SVG",
+	throw new E_VELLUM_INVALID_SVG([
 		"a string given to svg() is SVG markup or a data: URL; pass a file as a URL or as its bytes",
-	);
+	]);
 }

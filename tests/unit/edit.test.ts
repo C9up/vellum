@@ -1,5 +1,6 @@
+import { Exception } from "@c9up/flare";
 import { beforeAll, describe, expect, it } from "vitest";
-import { A4, createBlank, Vellum, VellumError } from "../../src/index.js";
+import { A4, createBlank, errors, Vellum } from "../../src/index.js";
 
 const A5 = { width: 419.53, height: 595.28 };
 
@@ -42,7 +43,7 @@ describe("Vellum — document operations", () => {
 			await vellum.merge([]);
 			expect.unreachable("merging nothing should be refused");
 		} catch (error) {
-			if (!(error instanceof VellumError)) throw error;
+			if (!(error instanceof Exception)) throw error;
 			expect(error.code).toBe("E_VELLUM_EMPTY_MERGE");
 		}
 	});
@@ -79,7 +80,7 @@ describe("Vellum — document operations", () => {
 			await vellum.selectPages(createBlank([A4]), [0]);
 			expect.unreachable("page 0 should be refused");
 		} catch (error) {
-			if (!(error instanceof VellumError)) throw error;
+			if (!(error instanceof Exception)) throw error;
 			expect(error.code).toBe("E_VELLUM_INVALID_PAGE");
 		}
 	});
@@ -103,7 +104,7 @@ describe("Vellum — document operations", () => {
 				await call();
 				expect.unreachable(`${name} should refuse page ${wrapped}`);
 			} catch (error) {
-				if (!(error instanceof VellumError)) throw error;
+				if (!(error instanceof Exception)) throw error;
 				expect(error.code, name).toBe("E_VELLUM_INVALID_PAGE");
 				expect(error.message, name).toContain(String(wrapped));
 			}
@@ -118,7 +119,7 @@ describe("Vellum — document operations", () => {
 
 	it("refuses an empty selection", async () => {
 		await expect(vellum.selectPages(createBlank([A4]), [])).rejects.toThrow(
-			VellumError,
+			errors.E_VELLUM_EMPTY_SELECTION,
 		);
 	});
 
@@ -154,7 +155,7 @@ describe("Vellum — document operations", () => {
 				await vellum.rotate(createBlank([A4]), degrees);
 				expect.unreachable(`${degrees} should be refused`);
 			} catch (error) {
-				if (!(error instanceof VellumError)) throw error;
+				if (!(error instanceof Exception)) throw error;
 				expect(error.code).toBe("E_VELLUM_INVALID_ROTATION");
 			}
 		}
@@ -238,7 +239,7 @@ describe("Vellum — document operations", () => {
 
 	it("refuses bytes that are not a PDF when reading a form", async () => {
 		await expect(vellum.formFields(Buffer.from("not a PDF"))).rejects.toThrow(
-			VellumError,
+			errors.E_VELLUM_INVALID_PDF,
 		);
 	});
 
@@ -260,15 +261,21 @@ describe("Vellum — document operations", () => {
 
 	it("refuses bytes that are not a PDF when flattening", async () => {
 		await expect(vellum.flattenForm(Buffer.from("not a PDF"))).rejects.toThrow(
-			VellumError,
+			errors.E_VELLUM_FLATTEN_FAILED,
 		);
 	});
 
 	it("refuses bytes that are not a PDF", async () => {
 		const notAPdf = Buffer.from("not a PDF");
 
-		await expect(vellum.split(notAPdf)).rejects.toThrow(VellumError);
-		await expect(vellum.rotate(notAPdf, 90)).rejects.toThrow(VellumError);
-		await expect(vellum.merge([notAPdf])).rejects.toThrow(VellumError);
+		await expect(vellum.split(notAPdf)).rejects.toThrow(
+			errors.E_VELLUM_SPLIT_FAILED,
+		);
+		await expect(vellum.rotate(notAPdf, 90)).rejects.toThrow(
+			errors.E_VELLUM_ROTATE_FAILED,
+		);
+		await expect(vellum.merge([notAPdf])).rejects.toThrow(
+			errors.E_VELLUM_MERGE_FAILED,
+		);
 	});
 });

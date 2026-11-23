@@ -4,7 +4,8 @@
  * spot colour the document defined.
  */
 
-import { VellumError } from "../errors.js";
+import type { Exception } from "@c9up/flare";
+import { E_VELLUM_INVALID_COLOR } from "../errors.js";
 import type { PaintInput } from "../native/generated.js";
 import { namedColour } from "./namedColours.js";
 
@@ -19,11 +20,10 @@ export interface PlainColour {
 	values: number[];
 }
 
-function invalid(colour: unknown): VellumError {
-	return new VellumError(
-		"INVALID_COLOR",
+function invalid(colour: unknown): Exception {
+	return new E_VELLUM_INVALID_COLOR([
 		`${JSON.stringify(colour)} is not a colour: use #rgb, #rrggbb, a CSS name, [r, g, b] (0-255), [c, m, y, k] (0-100) or a spot colour's name`,
-	);
+	]);
 }
 
 /**

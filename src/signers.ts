@@ -6,7 +6,11 @@
  * ships the contract and the one implementation that has no vendor behind it.
  */
 
-import { VellumError } from "./errors.js";
+import {
+	E_VELLUM_SIGNER_INVALID,
+	E_VELLUM_TIMESTAMP_REFUSED,
+	E_VELLUM_TIMESTAMP_UNREACHABLE,
+} from "./errors.js";
 import {
 	attachTimestampNative,
 	signCmsNative,
@@ -54,10 +58,10 @@ export interface Pkcs8SignerOptions {
  */
 export function pkcs8Signer(options: Pkcs8SignerOptions): Signer {
 	if (options.key.length === 0) {
-		throw new VellumError("SIGNER_INVALID", "The signing key is empty.");
+		throw new E_VELLUM_SIGNER_INVALID(["signing key"]);
 	}
 	if (options.certificate.length === 0) {
-		throw new VellumError("SIGNER_INVALID", "The certificate is empty.");
+		throw new E_VELLUM_SIGNER_INVALID(["certificate"]);
 	}
 
 	const certificates = [options.certificate, ...(options.chain ?? [])];
@@ -125,18 +129,13 @@ export function timestamped(inner: Signer, options: TimestampOptions): Signer {
 					signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
 				});
 			} catch (error) {
-				throw new VellumError(
-					"TIMESTAMP_UNREACHABLE",
-					`The timestamp authority at ${options.url} could not be reached.`,
-					{ cause: error },
-				);
+				throw new E_VELLUM_TIMESTAMP_UNREACHABLE([options.url], {
+					cause: error,
+				});
 			}
 
 			if (!answer.ok) {
-				throw new VellumError(
-					"TIMESTAMP_REFUSED",
-					`The timestamp authority at ${options.url} answered ${answer.status}.`,
-				);
+				throw new E_VELLUM_TIMESTAMP_REFUSED([options.url, answer.status]);
 			}
 
 			return attachTimestampNative(

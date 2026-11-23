@@ -2,12 +2,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-	PdfDocument,
-	registerFile,
-	toBytes,
-	VellumError,
-} from "../../src/index.js";
+import { errors, PdfDocument, registerFile, toBytes } from "../../src/index.js";
 
 async function bytesOf(doc: PdfDocument): Promise<Buffer> {
 	const done = toBytes(doc);
@@ -82,7 +77,7 @@ describe("PdfDocument — embedded files", () => {
 
 		const refused = new PdfDocument({ subset: "PDF/A-2b" });
 		refused.file(XML, { name: "x.xml", type: "text/xml", description: "x" });
-		expect(() => refused.end()).toThrow(VellumError);
+		expect(() => refused.end()).toThrow(errors.E_VELLUM_VALIDATION);
 	});
 });
 
@@ -136,7 +131,7 @@ describe("PdfDocument — annotations and destinations", () => {
 		);
 		expect(() =>
 			new PdfDocument().highlight(0, 0, 10, 10, { color: [0, 0, 0, 100] }),
-		).toThrow(VellumError);
+		).toThrow(errors.E_VELLUM_INVALID_COLOR);
 	});
 
 	it("opens destinations with every view", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PdfDocument, toBytes, Vellum, VellumError } from "../../src/index.js";
+import { errors, PdfDocument, toBytes, Vellum } from "../../src/index.js";
 import { decodePng, encodePng, type Pixels } from "./png.js";
 
 const vellum = new Vellum();
@@ -87,7 +87,7 @@ describe("PdfDocument — images", () => {
 		doc.image(url, 100, 0, { link: "https://c9up.dev" });
 		const image = await pixels(doc);
 		expect(near(image.at(110, 10), RED)).toBe(true);
-		expect(() => page().image(opened)).toThrow(VellumError);
+		expect(() => page().image(opened)).toThrow(errors.E_VELLUM_INVALID_IMAGE);
 	});
 
 	it("refuses what is not an image, or an image too large", () => {
@@ -96,6 +96,6 @@ describe("PdfDocument — images", () => {
 			expect.objectContaining({ code: "E_VELLUM_INVALID_IMAGE" }),
 		);
 		const truncated = HALVES.subarray(0, HALVES.length - 20);
-		expect(() => doc.image(truncated)).toThrow(VellumError);
+		expect(() => doc.image(truncated)).toThrow(errors.E_VELLUM_INVALID_IMAGE);
 	});
 });

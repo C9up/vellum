@@ -2,8 +2,9 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Exception } from "@c9up/flare";
 import { describe, expect, it } from "vitest";
-import { PdfDocument, toBytes, Vellum, VellumError } from "../../src/index.js";
+import { errors, PdfDocument, toBytes, Vellum } from "../../src/index.js";
 import { decodePng, type Pixels } from "./png.js";
 
 const vellum = new Vellum();
@@ -91,7 +92,7 @@ describe("PdfDocument — shapes", () => {
 		const image = await pixels(doc);
 		expect(near(image.at(10, 100), [0, 0, 0])).toBe(true);
 		expect(near(image.at(30, 100), WHITE)).toBe(true);
-		expect(() => page().dash(0)).toThrow(VellumError);
+		expect(() => page().dash(0)).toThrow(errors.E_VELLUM_INVALID_OPTIONS);
 	});
 });
 
@@ -205,14 +206,16 @@ describe("PdfDocument — colours, opacity and gradients", () => {
 		expect(() => doc.fillColor("redd")).toThrow(
 			expect.objectContaining({ code: "E_VELLUM_INVALID_COLOR" }),
 		);
-		expect(() => doc.fillColor([300, 0, 0])).toThrow(VellumError);
+		expect(() => doc.fillColor([300, 0, 0])).toThrow(
+			errors.E_VELLUM_INVALID_COLOR,
+		);
 		expect(() =>
 			doc
 				.linearGradient(0, 0, 1, 0)
 				.stop(0, "red")
 				.stop(1, [0, 0, 0, 100])
 				.handle(),
-		).toThrow(VellumError);
+		).toThrow(errors.E_VELLUM_INVALID_OPTIONS);
 	});
 });
 
@@ -350,7 +353,9 @@ describe("PdfDocument — text decorations, transforms and links", () => {
 			expect(() => doc.link(0, 0, 10, 10, target)).toThrow(
 				expect.objectContaining({ code: "E_VELLUM_INVALID_LINK" }),
 			);
-			expect(() => doc.text("x", { link: target })).toThrow(VellumError);
+			expect(() => doc.text("x", { link: target })).toThrow(
+				errors.E_VELLUM_INVALID_LINK,
+			);
 		}
 	});
 
@@ -362,7 +367,7 @@ describe("PdfDocument — text decorations, transforms and links", () => {
 		);
 		const other = page();
 		other.goTo(0, 0, 10, 10, "nowhere");
-		expect(() => other.end()).toThrow(VellumError);
+		expect(() => other.end()).toThrow(errors.E_VELLUM_INVALID_LINK);
 	});
 });
 
@@ -413,8 +418,8 @@ describe("PdfDocument — SVG and raw path content", () => {
 				refused = error;
 			}
 			// The same refusal whether the file exists or not, naming no path.
-			expect(refused).toBeInstanceOf(VellumError);
-			if (!(refused instanceof VellumError)) continue;
+			expect(refused).toBeInstanceOf(errors.E_VELLUM_INVALID_SVG);
+			if (!(refused instanceof Exception)) continue;
 			expect(refused.code).toBe("E_VELLUM_INVALID_SVG");
 			expect(refused.message).not.toContain(given.trim());
 		}

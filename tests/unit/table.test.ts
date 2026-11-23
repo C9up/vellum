@@ -135,6 +135,9 @@ describe("PdfDocument — tables", () => {
 		// end() draws the rows the span still holds back.
 		expect(table.end()).toBe(doc);
 		expect(() => table.row(["trop tard"])).toThrow(/ended/);
+		expect(() => table.row(["trop tard"])).toThrow(
+			expect.objectContaining({ code: "E_VELLUM_TABLE_ENDED" }),
+		);
 	});
 
 	it("keeps each side's border colour, and tells of a row too tall", async () => {

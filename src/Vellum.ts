@@ -10,7 +10,14 @@
 import { readFile } from "node:fs/promises";
 
 import { checkCeilings } from "./config.js";
-import { VellumError } from "./errors.js";
+import {
+	E_VELLUM_EMPTY_MERGE,
+	E_VELLUM_EMPTY_SELECTION,
+	E_VELLUM_FONT_UNREADABLE,
+	E_VELLUM_INVALID_PAGE,
+	E_VELLUM_INVALID_ROTATION,
+	E_VELLUM_UNKNOWN_SIGNER,
+} from "./errors.js";
 import type {
 	DocumentInfo,
 	DocumentMetadata,
@@ -395,11 +402,7 @@ export class Vellum {
 			this.#fonts.set(path, data);
 			return data;
 		} catch (error) {
-			throw new VellumError(
-				"FONT_UNREADABLE",
-				`The font ${name} is configured as ${path}, which cannot be read.`,
-				{ cause: error },
-			);
+			throw new E_VELLUM_FONT_UNREADABLE([name, path], { cause: error });
 		}
 	}
 
@@ -493,10 +496,7 @@ export class Vellum {
 		options: EditOptions = {},
 	): Promise<Buffer> {
 		if (pdfs.length === 0) {
-			throw new VellumError(
-				"EMPTY_MERGE",
-				"Merging needs at least one document.",
-			);
+			throw new E_VELLUM_EMPTY_MERGE();
 		}
 		return mergeNative(pdfs, edits(options));
 	}
@@ -514,10 +514,7 @@ export class Vellum {
 		options: EditOptions = {},
 	): Promise<Buffer> {
 		if (pages.length === 0) {
-			throw new VellumError(
-				"EMPTY_SELECTION",
-				"Selecting needs at least one page.",
-			);
+			throw new E_VELLUM_EMPTY_SELECTION();
 		}
 		return selectPagesNative(pdf, this.#pageIndexes(pages), edits(options));
 	}
@@ -543,10 +540,7 @@ export class Vellum {
 		options: { pages?: ReadonlyArray<number> } & EditOptions = {},
 	): Promise<Buffer> {
 		if (!Number.isInteger(degrees) || degrees % 90 !== 0) {
-			throw new VellumError(
-				"INVALID_ROTATION",
-				`Rotation must be a whole multiple of 90, got ${degrees}.`,
-			);
+			throw new E_VELLUM_INVALID_ROTATION([degrees]);
 		}
 		return rotateNative(
 			pdf,
@@ -733,13 +727,12 @@ export class Vellum {
 		const signer = own(this.#config.signers, options.signer);
 		if (signer === undefined) {
 			const known = Object.keys(this.#config.signers ?? {});
-			throw new VellumError(
-				"UNKNOWN_SIGNER",
+			throw new E_VELLUM_UNKNOWN_SIGNER([
 				`No signer named ${options.signer} is configured — ` +
 					(known.length === 0
 						? "config/vellum.ts declares none."
 						: `config/vellum.ts declares ${known.join(", ")}.`),
-			);
+			]);
 		}
 
 		const prepared = await prepareSignatureNative(pdf, {
@@ -915,20 +908,18 @@ export class Vellum {
 	#pageIndex(options: PageOptions): number {
 		const page = options.page ?? 1;
 		if (!Number.isInteger(page) || page < 1) {
-			throw new VellumError(
-				"INVALID_PAGE",
+			throw new E_VELLUM_INVALID_PAGE([
 				`Page numbers start at 1, got ${page}.`,
-			);
+			]);
 		}
 		// The engine takes the index as a 32-bit count, and the conversion on
 		// the way there is ECMAScript's ToUint32: it wraps rather than refuses,
 		// so 2^32 + 2 would arrive as 1 and answer page two. Past the largest
 		// index it takes, no document has the page.
 		if (page - 1 > MAX_PAGE_INDEX) {
-			throw new VellumError(
-				"INVALID_PAGE",
+			throw new E_VELLUM_INVALID_PAGE([
 				`Page ${page} does not exist — page numbers stop at ${MAX_PAGE_INDEX + 1}.`,
-			);
+			]);
 		}
 		return page - 1;
 	}

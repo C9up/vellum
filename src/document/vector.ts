@@ -3,7 +3,10 @@
  * engine paints them.
  */
 
-import { VellumError } from "../errors.js";
+import {
+	E_VELLUM_INVALID_OPTIONS,
+	E_VELLUM_UNSUPPORTED_CONTENT,
+} from "../errors.js";
 
 /** 4·(√2 − 1)/3: how far a cubic's handles reach to draw a quarter circle. */
 const KAPPA = (4 * (Math.SQRT2 - 1)) / 3;
@@ -30,10 +33,9 @@ export class PathRecorder {
 
 	#add(verb: string): void {
 		if (this.verbs.length >= MAX_PATH_SEGMENTS) {
-			throw new VellumError(
-				"INVALID_OPTIONS",
+			throw new E_VELLUM_INVALID_OPTIONS([
 				`A path holds at most ${MAX_PATH_SEGMENTS} segments.`,
-			);
+			]);
 		}
 		this.verbs += verb;
 	}
@@ -289,19 +291,17 @@ export function pdfPath(path: PathRecorder, content: string): void {
 				!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(token) ||
 				!Number.isFinite(value)
 			) {
-				throw new VellumError(
-					"UNSUPPORTED_CONTENT",
+				throw new E_VELLUM_UNSUPPORTED_CONTENT([
 					`${JSON.stringify(token)} is not a path operator: only m, l, c, v, y, h and re are taken`,
-				);
+				]);
 			}
 			operands.push(value);
 			continue;
 		}
 		if (operands.length !== count) {
-			throw new VellumError(
-				"UNSUPPORTED_CONTENT",
+			throw new E_VELLUM_UNSUPPORTED_CONTENT([
 				`${token} takes ${count} numbers, got ${operands.length}`,
-			);
+			]);
 		}
 		const [a = 0, b = 0, c = 0, d = 0, e = 0, f = 0] = operands.splice(0);
 		const [x0, y0] = path.point;
@@ -331,10 +331,9 @@ export function pdfPath(path: PathRecorder, content: string): void {
 		}
 	}
 	if (operands.length > 0) {
-		throw new VellumError(
-			"UNSUPPORTED_CONTENT",
+		throw new E_VELLUM_UNSUPPORTED_CONTENT([
 			"numbers left without an operator",
-		);
+		]);
 	}
 }
 

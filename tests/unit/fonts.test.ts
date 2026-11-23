@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { A4, createBlank, Vellum, VellumError } from "../../src/index.js";
+import { A4, createBlank, errors, Vellum } from "../../src/index.js";
 
 /**
  * The font the engine's own tests use. It is a fixture, not something the
@@ -21,7 +21,7 @@ describe("fonts declared in the configuration", () => {
 		// The standard fonts have no byte for these letters at all.
 		await expect(
 			vellum.stampText(createBlank([A4]), beyond, { y: 100 }),
-		).rejects.toThrow(VellumError);
+		).rejects.toThrow(errors.E_VELLUM_STAMP_TEXT_FAILED);
 
 		const stamped = await vellum.stampText(createBlank([A4]), beyond, {
 			y: 100,

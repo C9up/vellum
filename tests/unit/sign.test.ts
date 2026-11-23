@@ -5,11 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	A4,
 	createBlank,
+	errors,
 	pkcs8Signer,
 	type Signer,
 	timestamped,
 	Vellum,
-	VellumError,
 } from "../../src/index.js";
 import { fakeResponder } from "../fakeResponder.js";
 import { encodePng } from "./png.js";
@@ -105,7 +105,7 @@ describe("signing", () => {
 
 		await expect(
 			vellum.sign(createBlank([A4]), { signer: "internal" }),
-		).rejects.toThrow(VellumError);
+		).rejects.toThrow(errors.E_VELLUM_UNKNOWN_SIGNER);
 	});
 
 	it("refuses a signature larger than the space reserved", async () => {
@@ -133,10 +133,10 @@ describe("signing with a key the application holds", () => {
 	it("refuses an empty key or certificate before anything else happens", () => {
 		expect(() =>
 			pkcs8Signer({ key: Buffer.alloc(0), certificate: Buffer.from([1]) }),
-		).toThrow(VellumError);
+		).toThrow(errors.E_VELLUM_SIGNER_INVALID);
 		expect(() =>
 			pkcs8Signer({ key: Buffer.from([1]), certificate: Buffer.alloc(0) }),
-		).toThrow(VellumError);
+		).toThrow(errors.E_VELLUM_SIGNER_INVALID);
 	});
 
 	it("says what it could not read rather than producing a broken document", async () => {
@@ -189,7 +189,9 @@ describe("timestamping", () => {
 
 		const signer = timestamped(stubSigner(), { url: "https://tsa.test/tsr" });
 		// The answer is nonsense, so attaching fails — after the request.
-		await expect(signer.sign(Buffer.alloc(32))).rejects.toThrow(VellumError);
+		await expect(signer.sign(Buffer.alloc(32))).rejects.toThrow(
+			errors.E_VELLUM_TIMESTAMP_FAILED,
+		);
 
 		expect(seen?.url).toBe("https://tsa.test/tsr");
 		expect(seen?.type).toBe("application/timestamp-query");
@@ -316,7 +318,7 @@ describe("checking the signatures on a document", () => {
 		const vellum = new Vellum();
 		await expect(
 			vellum.verifySignatures(Buffer.from("not a PDF")),
-		).rejects.toThrow(VellumError);
+		).rejects.toThrow(errors.E_VELLUM_VERIFY_FAILED);
 	});
 });
 

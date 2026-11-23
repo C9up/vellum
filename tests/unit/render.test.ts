@@ -1,5 +1,6 @@
+import { Exception } from "@c9up/flare";
 import { beforeAll, describe, expect, it } from "vitest";
-import { A4, createBlank, Vellum, VellumError } from "../../src/index.js";
+import { A4, createBlank, errors, Vellum } from "../../src/index.js";
 
 /** Width and height out of a PNG's IHDR chunk, which starts at byte 16. */
 function pngSize(bytes: Buffer): { width: number; height: number } {
@@ -46,7 +47,7 @@ describe("Vellum — rendering", () => {
 			await vellum.render(pdf, { page: 0 });
 			expect.unreachable("page 0 should be refused");
 		} catch (error) {
-			if (!(error instanceof VellumError)) throw error;
+			if (!(error instanceof Exception)) throw error;
 			expect(error.code).toBe("E_VELLUM_INVALID_PAGE");
 			expect(error.message).toMatch(/start at 1/);
 		}
@@ -136,7 +137,7 @@ describe("Vellum — text extraction", () => {
 				await call();
 				expect.unreachable("page 0 should be refused");
 			} catch (error) {
-				if (!(error instanceof VellumError)) throw error;
+				if (!(error instanceof Exception)) throw error;
 				expect(error.code).toBe("E_VELLUM_INVALID_PAGE");
 			}
 		}
@@ -151,7 +152,7 @@ describe("Vellum — text extraction", () => {
 	it("refuses bytes that are not a PDF", async () => {
 		await expect(
 			new Vellum().extractText(Buffer.from("not a PDF")),
-		).rejects.toThrow(VellumError);
+		).rejects.toThrow(errors.E_VELLUM_EXTRACT_FAILED);
 	});
 });
 
@@ -171,7 +172,7 @@ describe("Vellum — metadata", () => {
 	it("refuses bytes that are not a PDF", async () => {
 		await expect(
 			new Vellum().metadata(Buffer.from("not a PDF")),
-		).rejects.toThrow(VellumError);
+		).rejects.toThrow(errors.E_VELLUM_INVALID_PDF);
 	});
 });
 
@@ -206,13 +207,13 @@ describe("the whole-document operations refuse bad input too", () => {
 	// surfaced as an unhelpful raw error rather than a coded one.
 	it("refuses bytes that are not a PDF when rendering every page", async () => {
 		await expect(service.renderAll(Buffer.from("not a PDF"))).rejects.toThrow(
-			VellumError,
+			errors.E_VELLUM_RENDER_FAILED,
 		);
 	});
 
 	it("refuses bytes that are not a PDF when extracting every page", async () => {
 		await expect(
 			service.extractTextAll(Buffer.from("not a PDF")),
-		).rejects.toThrow(VellumError);
+		).rejects.toThrow(errors.E_VELLUM_EXTRACT_FAILED);
 	});
 });

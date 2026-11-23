@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PdfDocument, toBytes, Vellum, VellumError } from "../../src/index.js";
+import { errors, PdfDocument, toBytes, Vellum } from "../../src/index.js";
 
 const vellum = new Vellum();
 
@@ -87,8 +87,10 @@ describe("PdfDocument — forms", () => {
 			doc.formText("date", 0, 0, 10, 10, {
 				format: { type: "date", param: 'dd"); app.alert(1); ("' },
 			}),
-		).toThrow(VellumError);
-		expect(() => doc.formText("a.b", 0, 0, 10, 10)).toThrow(VellumError);
+		).toThrow(errors.E_VELLUM_INVALID_OPTIONS);
+		expect(() => doc.formText("a.b", 0, 0, 10, 10)).toThrow(
+			errors.E_VELLUM_INVALID_OPTIONS,
+		);
 	});
 });
 

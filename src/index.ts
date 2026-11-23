@@ -69,7 +69,7 @@ export type {
 	TableOptions,
 } from "./document/table.js";
 export { PdfTable } from "./document/table.js";
-export { VellumError } from "./errors.js";
+export * as errors from "./errors.js";
 export type {
 	DocumentInfo,
 	DocumentMetadata,
@@ -79,7 +79,7 @@ export type {
 	RevocationAnswer,
 	SignatureReport,
 } from "./native.js";
-export { isNativeAvailable, VellumNativeRequiredError } from "./native.js";
+export { isNativeAvailable } from "./native.js";
 export type { ResponderClient, ResponderPolicy } from "./responder.js";
 export type { Pkcs8SignerOptions, TimestampOptions } from "./signers.js";
 export { pkcs8Signer, timestamped } from "./signers.js";

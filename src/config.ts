@@ -1,4 +1,4 @@
-import { VellumError } from "./errors.js";
+import { E_VELLUM_INVALID_OPTIONS } from "./errors.js";
 import type { VellumConfig } from "./Vellum.js";
 
 /**
@@ -38,10 +38,10 @@ export function defineConfig(config: VellumConfigInput): VellumConfig {
 	if (format !== "png" && format !== "jpeg") {
 		// Named at boot, with the value, rather than at the first render of a
 		// document nobody was looking at.
-		throw new Error(
+		throw new E_VELLUM_INVALID_OPTIONS([
 			`[vellum] config/vellum.ts asks for format ${JSON.stringify(format)}; ` +
 				'it is "png" or "jpeg".',
-		);
+		]);
 	}
 	return { ...rest, format };
 }
@@ -76,10 +76,9 @@ export function checkCeilings(ceilings: Ceilings): void {
 		const value = ceilings[name];
 		if (value === undefined) continue;
 		if (!Number.isInteger(value) || value < 1 || value > 0xffff_ffff) {
-			throw new VellumError(
-				"INVALID_OPTIONS",
+			throw new E_VELLUM_INVALID_OPTIONS([
 				`${name} must be a whole number from 1 to 4294967295, got ${value}.`,
-			);
+			]);
 		}
 	}
 }

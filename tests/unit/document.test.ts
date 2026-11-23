@@ -1,12 +1,12 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+	errors,
 	PdfDocument,
 	type PdfDocumentOptions,
 	registerFile,
 	toBytes,
 	Vellum,
-	VellumError,
 } from "../../src/index.js";
 
 const vellum = new Vellum();
@@ -82,8 +82,12 @@ describe("PdfDocument — pages and cursor", () => {
 	});
 
 	it("refuses a length it cannot read, where pdfkit would read 0", () => {
-		expect(() => new PdfDocument({ margin: "wide" })).toThrow(VellumError);
-		expect(() => new PdfDocument({ size: "A99" })).toThrow(VellumError);
+		expect(() => new PdfDocument({ margin: "wide" })).toThrow(
+			errors.E_VELLUM_INVALID_OPTIONS,
+		);
+		expect(() => new PdfDocument({ size: "A99" })).toThrow(
+			errors.E_VELLUM_INVALID_OPTIONS,
+		);
 	});
 
 	it("writes page X of Y on buffered pages after the fact", async () => {
@@ -227,7 +231,7 @@ describe("PdfDocument — output", () => {
 		expect(() => doc.text("late")).toThrow(
 			expect.objectContaining({ code: "E_VELLUM_DOCUMENT_ENDED" }),
 		);
-		expect(() => doc.end()).toThrow(VellumError);
+		expect(() => doc.end()).toThrow(errors.E_VELLUM_DOCUMENT_ENDED);
 	});
 });
 
@@ -334,9 +338,11 @@ describe("PdfDocument — lengths, sides and sources", () => {
 		expect(doc.sizeToPoint(true)).toBe(1);
 		expect(doc.sizeToPoint(undefined, "1in")).toBe(72);
 		expect(() => doc.sizeToPoint(Number.POSITIVE_INFINITY)).toThrow(
-			VellumError,
+			errors.E_VELLUM_INVALID_OPTIONS,
 		);
-		expect(() => doc.sizeToPoint("12 parsecs")).toThrow(VellumError);
+		expect(() => doc.sizeToPoint("12 parsecs")).toThrow(
+			errors.E_VELLUM_INVALID_OPTIONS,
+		);
 	});
 
 	it("reads margins in every side form", () => {

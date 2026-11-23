@@ -1,3 +1,4 @@
+import { Exception } from "@c9up/flare";
 /**
  * Documents built to take the process down.
  *
@@ -6,7 +7,6 @@
  * Each document below once did; it must now come back as an answer.
  */
 import { describe, expect, it } from "vitest";
-import { VellumError } from "../../src/errors.js";
 import { Vellum } from "../../src/Vellum.js";
 import { buildPdf, HELVETICA, onePage, stream } from "./rawPdf.js";
 
@@ -17,7 +17,7 @@ const OBJECTS =
 
 /**
  * Every way of reading the part that nests too deep refuses it with a
- * VellumError, rather than answering a page that silently lacks it. Measuring
+ * coded error, rather than answering a page that silently lacks it. Measuring
  * a page reads no content, so it only refuses nesting in the page structure.
  */
 async function expectRefusedAsTooDeep(
@@ -42,7 +42,8 @@ async function expectRefusedAsTooDeep(
 			() => undefined,
 			(caught: unknown) => caught,
 		);
-		expect(error).toBeInstanceOf(VellumError);
+		expect(error).toBeInstanceOf(Exception);
+		expect(error).toHaveProperty("code", expect.stringMatching(/^E_VELLUM_/));
 		expect(error).toHaveProperty("message", reason);
 	}
 }
