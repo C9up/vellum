@@ -33,6 +33,7 @@ mod text;
 mod timestamp;
 mod trust;
 mod verify;
+mod write;
 
 pub use cms::sign_cms;
 pub use edit::{merge, rotate, select_pages, split};

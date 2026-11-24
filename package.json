@@ -2,16 +2,17 @@
   "name": "@c9up/vellum",
   "version": "0.1.10",
   "description": "PDF toolkit — convert PDF pages to images, author and inspect documents",
+  "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "files": [
     "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
     "README.md",
     "dist",
     "fonts",
     "stubs",
-    "index.*.node",
     "src"
   ],
   "exports": {
@@ -40,6 +41,8 @@
     "build": "tsc -p tsconfig.build.json",
     "build:napi": "cargo build --release --locked -p vellum-engine-napi && pnpm build:napi-types && node scripts/copy-napi.mjs",
     "build:napi-types": "node scripts/build-napi-types.mjs",
+    "platforms:sync": "node scripts/platform-packages.mjs",
+    "platforms:check": "node scripts/platform-packages.mjs --check",
     "test": "vitest run",
     "test:rust": "cargo test --locked",
     "lint": "biome check src/ tests/",
@@ -49,6 +52,13 @@
   },
   "dependencies": {
     "@c9up/flare": "^0.1.0"
+  },
+  "optionalDependencies": {
+    "@c9up/vellum-linux-x64-gnu": "0.1.10",
+    "@c9up/vellum-linux-arm64-gnu": "0.1.10",
+    "@c9up/vellum-darwin-x64": "0.1.10",
+    "@c9up/vellum-darwin-arm64": "0.1.10",
+    "@c9up/vellum-win32-x64-msvc": "0.1.10"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",

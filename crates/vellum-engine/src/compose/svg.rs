@@ -7,19 +7,99 @@
 //! image is bounded by its header as a page image is. Text in the SVG uses
 //! the fonts the document loaded.
 
+use std::io::Read;
 use std::sync::Arc;
 
 use krilla::geom::Size;
-use usvg::{ImageHrefResolver, ImageKind, Options, Tree};
+use usvg::{Group, ImageHrefResolver, ImageKind, Node, Options, Paint, Tree};
 
+use super::graphics::MAX_SEGMENTS;
 use super::images::MAX_IMAGE_PIXELS;
 use super::ops::Op;
 use super::{ComposeError, Composer};
 
-/// Larger than any drawing a document has a use for.
+/// Larger than any drawing a document has a use for: the markup given, and
+/// the markup a gzip SVG inflates to.
 pub const MAX_SVG_BYTES: usize = 16 * 1024 * 1024;
 /// Drawings in one document.
 pub const MAX_SVGS: usize = 10_000;
+
+/// The markup of `bytes`: as given, or inflated if it is gzip, never past
+/// [`MAX_SVG_BYTES`].
+///
+/// usvg inflates a gzip SVG whole, so the byte limit bounded what was given
+/// and not what it held: 33 MiB of markup came out of 32 KB.
+fn markup(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, ComposeError> {
+    if !bytes.starts_with(&[0x1f, 0x8b]) {
+        return Ok(std::borrow::Cow::Borrowed(bytes));
+    }
+    let mut inflated = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .take(MAX_SVG_BYTES as u64 + 1)
+        .read_to_end(&mut inflated)
+        .map_err(|_| invalid("the SVG is gzip that cannot be inflated"))?;
+    if inflated.len() > MAX_SVG_BYTES {
+        return Err(invalid(format!(
+            "the gzip SVG inflates past the limit of {MAX_SVG_BYTES} bytes"
+        )));
+    }
+    Ok(std::borrow::Cow::Owned(inflated))
+}
+
+/// What drawing `group` costs: one per element and one per path segment,
+/// counted where they are drawn. A `<use>` is expanded into a copy of what it
+/// names, and a clip path, a mask or a pattern is drawn wherever it is
+/// referenced, so one long path named a thousand times is a thousand paths.
+/// Stops as soon as the count passes `left`.
+fn drawing_cost(group: &Group, left: &mut usize) -> Result<(), ()> {
+    spend(left, 1)?;
+    if let Some(clip) = group.clip_path() {
+        let mut clip = Some(clip);
+        while let Some(current) = clip {
+            drawing_cost(current.root(), left)?;
+            clip = current.clip_path();
+        }
+    }
+    if let Some(mask) = group.mask() {
+        let mut mask = Some(mask);
+        while let Some(current) = mask {
+            drawing_cost(current.root(), left)?;
+            mask = current.mask();
+        }
+    }
+    for node in group.children() {
+        match node {
+            Node::Group(group) => drawing_cost(group, left)?,
+            Node::Path(path) => {
+                spend(left, 1 + path.data().verbs().len())?;
+                for paint in [
+                    path.fill().map(usvg::Fill::paint),
+                    path.stroke().map(usvg::Stroke::paint),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Paint::Pattern(pattern) = paint {
+                        drawing_cost(pattern.root(), left)?;
+                    }
+                }
+            }
+            Node::Image(image) => {
+                spend(left, 1)?;
+                if let ImageKind::SVG(tree) = image.kind() {
+                    drawing_cost(tree.root(), left)?;
+                }
+            }
+            Node::Text(text) => drawing_cost(text.flattened(), left)?,
+        }
+    }
+    Ok(())
+}
+
+fn spend(left: &mut usize, cost: usize) -> Result<(), ()> {
+    *left = left.checked_sub(cost).ok_or(())?;
+    Ok(())
+}
 
 fn invalid(message: impl Into<String>) -> ComposeError {
     ComposeError::new("INVALID_SVG", message)
@@ -78,7 +158,11 @@ impl Composer {
         if let Some(family) = family {
             options.font_family = family;
         }
-        let tree = Tree::from_data(bytes, &options)
+        // Read as text: given gzip, `from_data` would inflate it again, whole.
+        let markup = markup(bytes)?;
+        let text = std::str::from_utf8(&markup)
+            .map_err(|_| invalid("the SVG cannot be read: it is not UTF-8 text"))?;
+        let tree = Tree::from_str(text, &options)
             .map_err(|error| invalid(format!("the SVG cannot be read: {error}")))?;
         // A filter is drawn as pixels, four to a point and up to 5000 a side,
         // and some cost every pixel times their reach: one feMorphology of
@@ -90,6 +174,16 @@ impl Composer {
                 "the SVG uses filters, which are drawn as pixels at a cost the markup sets: \
                  remove them, or draw the result as an image",
             ));
+        }
+        // A path drawn with `path()` holds at most MAX_SEGMENTS; an SVG
+        // holds no more once what it references is expanded, checked before
+        // anything is drawn or written.
+        let mut left = MAX_SEGMENTS;
+        if drawing_cost(tree.root(), &mut left).is_err() {
+            return Err(invalid(format!(
+                "the SVG draws more than {MAX_SEGMENTS} elements and path segments once its \
+                 <use> elements, clip paths, masks and patterns are expanded"
+            )));
         }
         let (width, height) = (tree.size().width(), tree.size().height());
         if !(width > 0.0 && height > 0.0 && width.is_finite() && height.is_finite()) {
@@ -169,6 +263,74 @@ mod tests {
             assert_eq!(error.code, "INVALID_SVG");
             assert!(error.message.contains("filters"), "{}", error.message);
         }
+    }
+
+    /// One path referenced by `uses` `<use>` elements.
+    fn reused(segments: usize, uses: usize) -> Vec<u8> {
+        let mut path = String::from("M0 0");
+        for index in 0..segments {
+            path.push_str(&format!("L{} {}", index % 10, index * 7 % 10));
+        }
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><path id="p" d="{path}"/></defs>{}</svg>"##,
+            r##"<use href="#p"/>"##.repeat(uses)
+        )
+        .into_bytes()
+    }
+
+    /// The bound `path()` has holds once `<use>` is expanded: a short SVG
+    /// naming one long path many times is refused before it is drawn.
+    #[test]
+    fn an_svg_is_bounded_by_what_its_uses_expand_to() {
+        let error = document().load_svg(&reused(1000, 1001)).unwrap_err();
+        assert_eq!(error.code, "INVALID_SVG");
+        assert!(error.message.contains("<use>"), "{}", error.message);
+        assert!(document().load_svg(&reused(1000, 900)).is_ok());
+    }
+
+    /// A clip path is drawn wherever it is referenced, so it counts every
+    /// time.
+    #[test]
+    fn a_clip_path_counts_wherever_it_is_used() {
+        let mut path = String::from("M0 0");
+        for index in 0..1000 {
+            path.push_str(&format!("L{} {}", index % 10, index * 7 % 10));
+        }
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><clipPath id="c"><path d="{path}"/></clipPath>{}</svg>"##,
+            r##"<rect width="10" height="10" clip-path="url(#c)"/>"##.repeat(1001)
+        );
+        let error = document().load_svg(svg.as_bytes()).unwrap_err();
+        assert!(error.message.contains("<use>"), "{}", error.message);
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// A gzip SVG is read, inflated under the same limit as the markup
+    /// given, and inflated once.
+    #[test]
+    fn a_gzip_svg_is_inflated_under_the_byte_limit() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#;
+        let (_, width, _) = document().load_svg(&gzip(svg)).unwrap();
+        assert_eq!(width, 10.0);
+
+        let mut padded =
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><!--"#.to_vec();
+        padded.resize(MAX_SVG_BYTES, b' ');
+        padded.extend_from_slice(br#"--><rect width="10" height="10"/></svg>"#);
+        let error = document().load_svg(&gzip(&padded)).unwrap_err();
+        assert_eq!(error.code, "INVALID_SVG");
+        assert!(error.message.contains("inflates past"), "{}", error.message);
+
+        // Gzip inside gzip is not inflated a second time.
+        let error = document().load_svg(&gzip(&gzip(svg))).unwrap_err();
+        assert_eq!(error.code, "INVALID_SVG");
+        assert!(error.message.contains("not UTF-8"), "{}", error.message);
     }
 
     #[test]

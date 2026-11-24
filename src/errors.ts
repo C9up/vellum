@@ -280,10 +280,12 @@ export const E_VELLUM_TABLE_ENDED = createError<[number]>(
 	"E_VELLUM_TABLE_ENDED",
 );
 
-/** The Rust PDF engine is not loaded. */
-export const E_VELLUM_NAPI_REQUIRED = createError<[string]>(
-	"The Rust PDF engine is required but not loaded — %s.\n" +
-		"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
+/**
+ * The Rust PDF engine is not loaded. The message names the platform package
+ * to install; the load error is its `cause`.
+ */
+export const E_VELLUM_NAPI_REQUIRED = createError<[fix: string]>(
+	"The Rust PDF engine is required but not loaded.\n  Fix: %s",
 	"E_VELLUM_NAPI_REQUIRED",
 );
 

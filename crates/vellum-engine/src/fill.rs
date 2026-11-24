@@ -602,11 +602,7 @@ pub fn fill_form(bytes: &[u8], values: &[FieldValue]) -> Result<Vec<u8>, String>
     // support is uneven — but it costs nothing.
     set_need_appearances(&mut document);
 
-    let mut out = Vec::new();
-    document
-        .save_to(&mut out)
-        .map_err(|error| format!("cannot write PDF: {error}"))?;
-    Ok(out)
+    crate::write::save(&mut document)
 }
 
 fn set_need_appearances(document: &mut Document) {

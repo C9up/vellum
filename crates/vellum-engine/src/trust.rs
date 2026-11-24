@@ -486,14 +486,29 @@ pub fn evaluate(
         }
 
         // Anything that issues certificates has to say that it does, and
-        // how many authorities it allows below it (RFC 5280 §4.2.1.9).
+        // how many authorities it allows below it (RFC 5280 §4.2.1.9,
+        // §6.1.4 (k)). Whatever its name: a certificate issuing one under
+        // its own subject is still issuing, and an ordinary certificate
+        // doing so would hand its holder a fresh key, a fresh responder and
+        // the key usage of their choice under the name an authority
+        // certified. The self-issued exception of §6.1.4 (l) is for the path
+        // length count only, below.
         let constraints = extension::<BasicConstraints>(&issuer);
-        let issues = depth > 0 || issuer.tbs_certificate.subject != current.tbs_certificate.subject;
-        if issues && !constraints.as_ref().is_some_and(|basic| basic.ca) {
+        if !constraints.as_ref().is_some_and(|basic| basic.ca) {
             report.problems.push(format!(
                 "{} signed a certificate without being an authority",
                 issuer.tbs_certificate.subject
             ));
+        }
+        // And when its key usage is restricted, issuing has to be part of it
+        // (§6.1.4 (n)).
+        if let Some(usage) = extension::<KeyUsage>(&issuer) {
+            if !usage.0.contains(KeyUsages::KeyCertSign) {
+                report.problems.push(format!(
+                    "{} signed a certificate though its key usage does not allow it",
+                    issuer.tbs_certificate.subject
+                ));
+            }
         }
         // The authorities below this one, a self-issued one (a key rollover)
         // not counting.

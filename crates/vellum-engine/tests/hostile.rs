@@ -803,3 +803,83 @@ fn signatures_past_the_hundredth_are_reported_unchecked() {
         reports[100].problems
     );
 }
+
+/// A 200 x 200 point page drawing `content`, with `resources` inside its
+/// /Resources and `extra` numbered from 5 on.
+fn small_page(content: &str, resources: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << {resources} >> >>"
+        )
+        .into_bytes(),
+        stream("", content.as_bytes()),
+    ];
+    objects.extend(extra);
+    build_pdf(&objects)
+}
+
+/// `count` distinct soft masks, each set once: drawing keeps one page-sized
+/// mask per mask, a byte per pixel (40 000 bytes here).
+fn soft_masks(count: usize) -> Vec<u8> {
+    let mut groups = Vec::new();
+    let mut states = String::new();
+    let mut content = String::new();
+    for index in 0..count {
+        groups.push(stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 200] /Group << /S /Transparency /CS /DeviceGray >>",
+            format!("0.{} g 0 0 {} 10 re f", index % 9 + 1, 10 + index).as_bytes(),
+        ));
+        states.push_str(&format!(
+            "/G{index} << /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G {} 0 R >> >> ",
+            5 + index
+        ));
+        content.push_str(&format!("/G{index} gs 0 0 20 20 re f\n"));
+    }
+    small_page(&content, &format!("/ExtGState << {states} >>"), groups)
+}
+
+/// One page-sized 1-bit stencil drawn `count` times: it decodes to 5 000
+/// bytes, and every draw keeps an RGBA copy of 160 000.
+fn stencil_draws(count: usize) -> Vec<u8> {
+    let mask = stream(
+        "/Type /XObject /Subtype /Image /ImageMask true /Width 200 /Height 200 /BitsPerComponent 1",
+        &vec![0u8; 25 * 200],
+    );
+    let content: String = (0..count)
+        .map(|index| {
+            format!(
+                "0.{} 0 0 rg q {} 0 0 200 0 0 cm /Im1 Do Q\n",
+                index % 9 + 1,
+                200 - index
+            )
+        })
+        .collect();
+    small_page(&content, "/XObject << /Im1 5 0 R >>", vec![mask])
+}
+
+/// What drawing keeps until the page is done is charged to the decoded-bytes
+/// budget at its size in memory: the number of soft masks is the document's
+/// to choose, and each is as large as the page.
+#[test]
+fn the_masks_a_page_keeps_are_charged_to_the_budget() {
+    assert!(render_page(&soft_masks(10), 0, &render_with(one_mib())).is_ok());
+    let error = render_page(&soft_masks(40), 0, &render_with(one_mib())).expect_err("refused");
+    assert!(error.contains("raise maxDecodedBytes"), "got {error}");
+    // A budget sized for them draws the same page.
+    let roomy = ReadLimits {
+        max_decoded_bytes: 4 * MIB as u64,
+        ..ReadLimits::default()
+    };
+    assert!(render_page(&soft_masks(40), 0, &render_with(roomy)).is_ok());
+}
+
+/// A stencil is charged at the RGBA copy every draw keeps, not at the
+/// eighth of a byte per pixel it decodes to.
+#[test]
+fn every_draw_of_a_stencil_is_charged_at_its_rgba_size() {
+    assert!(render_page(&stencil_draws(4), 0, &render_with(one_mib())).is_ok());
+    let error = render_page(&stencil_draws(8), 0, &render_with(one_mib())).expect_err("refused");
+    assert!(error.contains("raise maxDecodedBytes"), "got {error}");
+}

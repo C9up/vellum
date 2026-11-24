@@ -32,11 +32,7 @@ fn load(bytes: &[u8]) -> Result<Document, String> {
 }
 
 fn save(mut document: Document) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    document
-        .save_to(&mut out)
-        .map_err(|error| format!("cannot write PDF: {error}"))?;
-    Ok(out)
+    crate::write::save(&mut document)
 }
 
 /// The page at zero-based `index`, or the error that names it in human

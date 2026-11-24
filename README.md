@@ -14,6 +14,39 @@ ream configure @c9up/vellum
 
 That registers the provider and writes `config/vellum.ts`.
 
+The PDF engine is a Rust binary of about 16 MB. Each platform's engine is its
+own npm package, which `@c9up/vellum` lists as an optional dependency at its
+exact version:
+
+| Platform | Package |
+|---|---|
+| Linux x64 (glibc) | `@c9up/vellum-linux-x64-gnu` |
+| Linux arm64 (glibc) | `@c9up/vellum-linux-arm64-gnu` |
+| macOS x64 | `@c9up/vellum-darwin-x64` |
+| macOS arm64 | `@c9up/vellum-darwin-arm64` |
+| Windows x64 | `@c9up/vellum-win32-x64-msvc` |
+
+Your package manager installs only the one that matches the machine (`os`,
+`cpu` and `libc` fields), so an install downloads one binary and needs no Rust
+toolchain. An install run with optional dependencies omitted
+(`--no-optional`, `--omit=optional`) skips it. The bundled fonts (`fonts/`)
+stay in `@c9up/vellum` itself: they are the same on every platform.
+
+There is no JavaScript fallback. If the engine is missing, the first call throws
+`E_VELLUM_NAPI_REQUIRED`, naming the package to install:
+
+```text
+Fix: install @c9up/vellum-linux-x64-gnu at the exact version of @c9up/vellum: ...
+```
+
+The load error itself is the exception's `cause`, not part of its message.
+
+In a checkout of this repository, `pnpm build:napi` builds
+`index.<platform>.node` at the package root, and vellum loads that file before
+looking for the platform package. `node scripts/platform-packages.mjs` rewrites
+the platform packages' manifests (`npm/<platform>/package.json`) and the
+optional dependencies after a version bump; CI fails when they are stale.
+
 ## Usage
 
 ```ts
@@ -87,8 +120,10 @@ AES-256 encryption and SVG.
 What one call may lay out is bounded, since text and drawings are often a
 user's: one `text()`, `heightOfString` or `boundsOfString` call takes at most
 1 MiB of text, a path at most 1 000 000 segments, a table cell spans at most
-1000 rows and 64 columns of a table of at most 1000, and an SVG that uses filters
-is refused — a filter is drawn as pixels, at a cost its markup sets. A
+1000 rows and 64 columns of a table of at most 1000, an SVG draws at most
+1 000 000 elements and path segments once its `<use>` elements are expanded,
+and an SVG that uses filters is refused — a filter is drawn as pixels, at a
+cost its markup sets. A
 transform whose product with the current one overflows is refused, and a shape
 that would land past finite numbers is left out of the page.
 
@@ -511,9 +546,11 @@ write any date there. `moment` says which case applied — `"timestamp"`, or
 `"claimed"` / `"unknown"`, both judged now.
 
 Every link is checked: each certificate's signature verifies with the key of
-the one above it, each issuer says it is an authority, the path length and the
-name constraints an authority was given are honoured, and the signing
-certificate is allowed to sign at all. An anchor is matched by the whole
+the one above it, each issuer says it is an authority (`cA` in its basic
+constraints) and, when its key usage is restricted, that it may sign
+certificates, the path length and the name constraints an authority was given
+are honoured, and the signing certificate is allowed to sign at all. An
+ordinary certificate issuing one under its own name is no exception. An anchor is matched by the whole
 certificate or by its name and key — never by a name and serial number, which
 anyone can copy. A certificate that signed itself and is not an anchor ends the
 path, and a path longer than eight is treated as a loop.
@@ -530,7 +567,9 @@ const signatures = await vellum.verifySignatures(mandate, { checkRevocation: tru
 ```
 
 That is a network call per signing certificate, to the responder it names, so
-it is off unless asked for. Signatures sharing a certificate share one
+it is off unless asked for. Only a `trusted` signature is asked about: off a
+trusted path its "issuer" could be anybody, so the answer is `unknown`.
+Signatures sharing a certificate share one
 question; at most four are asked at once, and no more than sixteen
 certificates per call — the rest answer `unknown` without anything being
 asked, since the document chooses the responders.

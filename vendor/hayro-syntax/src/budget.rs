@@ -87,6 +87,16 @@ pub fn charge_operation() -> bool {
     imp::charge_operation()
 }
 
+/// vellum: charge `bytes` of a buffer the renderer builds and keeps while
+/// it draws the page (a soft mask, an image's pixels, a pattern tile) to
+/// the decoded-bytes budget; `false` once the budget is exceeded. What the
+/// document makes the renderer hold is bounded like what it decodes: its
+/// count is the document's choice, and its size the page's.
+#[doc(hidden)]
+pub fn charge_rendered(bytes: u64) -> bool {
+    imp::charge_rendered(bytes)
+}
+
 #[cfg(feature = "std")]
 mod imp {
     use std::cell::Cell;
@@ -190,6 +200,10 @@ mod imp {
     pub(super) fn charge_operation() -> bool {
         OPERATIONS.with(|meter| charge(meter, 1))
     }
+
+    pub(super) fn charge_rendered(bytes: u64) -> bool {
+        DECODED.with(|meter| charge(meter, bytes))
+    }
 }
 
 #[cfg(not(feature = "std"))]
@@ -219,6 +233,9 @@ mod imp {
         true
     }
     pub(super) fn charge_operation() -> bool {
+        true
+    }
+    pub(super) fn charge_rendered(_: u64) -> bool {
         true
     }
 }

@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Result, Write};
 use std::path::Path;
 use std::vec;
 
 use super::Object::*;
-use super::{Dictionary, Document, Object, Stream, StringFormat};
+use super::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 use crate::encryption;
 use crate::{IncrementalDocument, xref::*};
 
@@ -278,6 +279,17 @@ impl IncrementalDocument {
     /// Save PDF to arbitrary target
     #[inline]
     pub fn save_to<W: Write>(&mut self, target: &mut W) -> Result<()> {
+        self.save_internal(target).map(|_| ())
+    }
+
+    /// vellum: save, and say where each appended object was written.
+    ///
+    /// A caller that has to find one of its own objects in the bytes again
+    /// (a signature dictionary, to write its byte range and value into) reads
+    /// the offset here instead of searching the revision for `id 0 obj`: the
+    /// revision also re-writes objects of the previous document, whose strings
+    /// are anybody's and may spell that header.
+    pub fn save_to_with_offsets<W: Write>(&mut self, target: &mut W) -> Result<BTreeMap<ObjectId, usize>> {
         self.save_internal(target)
     }
 
@@ -308,8 +320,10 @@ impl IncrementalDocument {
         Ok(())
     }
 
-    fn save_internal<W: Write>(&mut self, target: &mut W) -> Result<()> {
+    fn save_internal<W: Write>(&mut self, target: &mut W) -> Result<BTreeMap<ObjectId, usize>> {
         self.check_incremental_save_supported()?;
+        // vellum: where each appended object starts, see `save_to_with_offsets`.
+        let mut offsets = BTreeMap::new();
 
         // If the previous revision was encrypted (and successfully decrypted),
         // we need to re-encrypt every appended object with the same encryption
@@ -356,6 +370,7 @@ impl IncrementalDocument {
                 .ok()
                 != Some(true)
             {
+                offsets.insert((id, generation), target.bytes_written);
                 if let Some(state) = encryption_state.as_ref() {
                     let mut encrypted = object.clone();
                     encryption::encrypt_object(state, (id, generation), &mut encrypted)
@@ -409,7 +424,7 @@ impl IncrementalDocument {
             self.new_document.trailer = saved;
         }
 
-        write_result
+        write_result.map(|()| offsets)
     }
 }
 
@@ -444,34 +459,35 @@ impl Writer {
         // Add first (0) entry
         xref_section.add_unusable_free_entry();
 
-        for obj_id in 1..xref.size {
-            // If section is empty change number of starting id.
-            if xref_section.is_empty() {
-                xref_section = XrefSection::new(obj_id);
-            }
-            if let Some(entry) = xref.get(obj_id) {
-                match *entry {
-                    XrefEntry::Normal { offset, generation } => {
-                        // Add entry
-                        xref_section.add_entry(XrefEntry::Normal { offset, generation });
-                    }
-                    XrefEntry::Compressed { container: _, index: _ } => {
-                        xref_section.add_unusable_free_entry();
-                    }
-                    XrefEntry::Free => {
-                        xref_section.add_entry(XrefEntry::Free);
-                    }
-                    XrefEntry::UnusableFree => {
-                        xref_section.add_unusable_free_entry();
-                    }
-                }
-            } else {
-                // Skip over `obj_id`, but finish section if not empty.
+        // vellum: walk the entries there are, not every number below the
+        // largest. A document names its own object numbers, and one object
+        // numbered four billion made writing it four billion lookups. The
+        // sections come out the same: a run of consecutive numbers each.
+        let mut next = 1;
+        for (&obj_id, entry) in xref.entries.range(1..xref.size.max(1)) {
+            if obj_id != next {
+                // A gap ends the section.
                 if !xref_section.is_empty() {
                     xref_section.write_xref_section(file)?;
-                    xref_section = XrefSection::new(obj_id);
+                }
+                xref_section = XrefSection::new(obj_id);
+            }
+            match *entry {
+                XrefEntry::Normal { offset, generation } => {
+                    // Add entry
+                    xref_section.add_entry(XrefEntry::Normal { offset, generation });
+                }
+                XrefEntry::Compressed { container: _, index: _ } => {
+                    xref_section.add_unusable_free_entry();
+                }
+                XrefEntry::Free => {
+                    xref_section.add_entry(XrefEntry::Free);
+                }
+                XrefEntry::UnusableFree => {
+                    xref_section.add_unusable_free_entry();
                 }
             }
+            next = obj_id + 1;
         }
         // Print last section
         if !xref_section.is_empty() {
@@ -485,20 +501,18 @@ impl Writer {
         let mut xref_sections = Vec::new();
         let mut xref_section = XrefSection::new(0);
 
-        for obj_id in 1..xref.size {
-            // If section is empty change number of starting id.
-            if xref_section.is_empty() {
-                xref_section = XrefSection::new(obj_id);
-            }
-            if let Some(entry) = xref.get(obj_id) {
-                xref_section.add_entry(entry.clone());
-            } else {
-                // Skip over but finish section if not empty
+        // vellum: the entries there are, as in `write_xref`.
+        let mut next = 1;
+        for (&obj_id, entry) in xref.entries.range(1..xref.size.max(1)) {
+            if obj_id != next || xref_section.is_empty() {
+                // A gap ends the section.
                 if !xref_section.is_empty() {
                     xref_sections.push(xref_section);
-                    xref_section = XrefSection::new(obj_id);
                 }
+                xref_section = XrefSection::new(obj_id);
             }
+            xref_section.add_entry(entry.clone());
+            next = obj_id + 1;
         }
         // Print last section
         if !xref_section.is_empty() {
@@ -623,34 +637,46 @@ impl Writer {
             // If an end-of-line marker appears within a literal string without a preceding backslash, the result is
             // equivalent to \n. So \r also need be escaped.
             StringFormat::Literal => {
-                let mut escape_indice = Vec::new();
-                let mut parentheses = Vec::new();
+                // vellum: one pass decides which bytes to escape, one writes.
+                // Upstream kept their indices in a list and asked it
+                // `contains` for every byte: n x k comparisons, so a string
+                // of backslashes cost its length squared to write, and every
+                // edit re-writes the strings of the document it reads.
+                let mut escaped = vec![false; text.len()];
+                let mut any = false;
+                let mut open = Vec::new();
                 for (index, &byte) in text.iter().enumerate() {
                     match byte {
-                        b'(' => parentheses.push(index),
+                        b'(' => open.push(index),
                         b')' => {
-                            if !parentheses.is_empty() {
-                                parentheses.pop();
-                            } else {
-                                escape_indice.push(index);
+                            if open.pop().is_none() {
+                                escaped[index] = true;
+                                any = true;
                             }
                         }
-                        b'\\' | b'\r' => escape_indice.push(index),
+                        b'\\' | b'\r' => {
+                            escaped[index] = true;
+                            any = true;
+                        }
                         _ => continue,
                     }
                 }
-                escape_indice.append(&mut parentheses);
+                for index in open {
+                    escaped[index] = true;
+                    any = true;
+                }
 
                 file.write_all(b"(")?;
-                if !escape_indice.is_empty() {
+                if any {
+                    let mut start = 0;
                     for (index, &byte) in text.iter().enumerate() {
-                        if escape_indice.contains(&index) {
-                            file.write_all(b"\\")?;
-                            file.write_all(&[if byte == b'\r' { b'r' } else { byte }])?;
-                        } else {
-                            file.write_all(&[byte])?;
+                        if escaped[index] {
+                            file.write_all(&text[start..index])?;
+                            file.write_all(&[b'\\', if byte == b'\r' { b'r' } else { byte }])?;
+                            start = index + 1;
                         }
                     }
+                    file.write_all(&text[start..])?;
                 } else {
                     file.write_all(text)?;
                 }

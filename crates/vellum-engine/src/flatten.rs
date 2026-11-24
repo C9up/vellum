@@ -325,11 +325,7 @@ pub fn flatten_form(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
     remove_acroform(&mut document);
 
-    let mut out = Vec::new();
-    document
-        .save_to(&mut out)
-        .map_err(|error| format!("cannot write PDF: {error}"))?;
-    Ok(out)
+    crate::write::save(&mut document)
 }
 
 #[cfg(test)]

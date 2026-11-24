@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 import { Exception } from "@c9up/flare";
 import { describe, expect, it } from "vitest";
 import { errors, PdfDocument, toBytes, Vellum } from "../../src/index.js";
@@ -398,6 +399,31 @@ describe("PdfDocument — SVG and raw path content", () => {
 		expect(() => page().svg("<html></html>")).toThrow(
 			expect.objectContaining({ code: "E_VELLUM_INVALID_SVG" }),
 		);
+	});
+
+	it("refuses an SVG whose <use> elements expand past what a path may hold", () => {
+		let d = "M0 0";
+		for (let index = 0; index < 1000; index++) {
+			d += `L${index % 10} ${(index * 7) % 10}`;
+		}
+		const svg = (uses: number) =>
+			`<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><path id="p" d="${d}"/></defs>${'<use href="#p"/>'.repeat(uses)}</svg>`;
+		// 42 KB naming one path of a thousand segments 1001 times.
+		expect(() => page().svg(svg(1001))).toThrow(
+			expect.objectContaining({ code: "E_VELLUM_INVALID_SVG" }),
+		);
+		expect(() => page().svg(svg(900))).not.toThrow();
+	});
+
+	it("inflates a gzip SVG no further than the markup it would take", () => {
+		const padding = " ".repeat(16 * 1024 * 1024);
+		const bomb = gzipSync(
+			`<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><!--${padding}--><rect width="10" height="10"/></svg>`,
+			{ level: 1 },
+		);
+		expect(() => page().svg(bomb)).toThrow(/inflates past/);
+		const small = gzipSync(SQUARE);
+		expect(() => page().svg(small)).not.toThrow();
 	});
 
 	it("never reads a string as a file, so markup from a user cannot name one", async () => {

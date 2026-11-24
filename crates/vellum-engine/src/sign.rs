@@ -18,6 +18,8 @@
 //! any signature already on it, and destroy the very history a signature
 //! exists to establish.
 
+use std::collections::BTreeMap;
+
 use lopdf::{dictionary, Dictionary, IncrementalDocument, Object, ObjectId};
 use sha2::{Digest, Sha256};
 
@@ -276,23 +278,30 @@ fn add_signature_field(
     Ok(signature_id)
 }
 
-/// Where the body of the indirect object `id` starts, searching from `from`
-/// on: just after its `id generation obj` header.
-fn object_body(document: &[u8], from: usize, id: ObjectId) -> Option<usize> {
+/// The bytes of the indirect object `id`, header excluded, from where the
+/// writer says it put it to where the next object it wrote starts.
+///
+/// Never found by searching for `id 0 obj`: the revision also re-writes the
+/// page and the form of the document being signed, and their strings are the
+/// document author's, free to spell that header, a byte range and a run of
+/// zeros.
+fn object_span(
+    document: &[u8],
+    offsets: &BTreeMap<ObjectId, usize>,
+    id: ObjectId,
+) -> Option<(usize, usize)> {
+    let start = *offsets.get(&id)?;
     let header = format!("{} {} obj", id.0, id.1);
-    let mut at = from;
-    loop {
-        let found = at
-            + document
-                .get(at..)?
-                .windows(header.len())
-                .position(|window| window == header.as_bytes())?;
-        // `12 0 obj` is not the end of `112 0 obj`.
-        if found == 0 || document[found - 1].is_ascii_whitespace() {
-            return Some(found + header.len());
-        }
-        at = found + 1;
+    if !document.get(start..)?.starts_with(header.as_bytes()) {
+        return None;
     }
+    let end = offsets
+        .values()
+        .copied()
+        .filter(|&offset| offset > start)
+        .min()
+        .unwrap_or(document.len());
+    Some((start + header.len(), end))
 }
 
 /// Find the span the signature value was reserved in, brackets included.
@@ -389,21 +398,21 @@ pub fn prepare(pdf: &[u8], options: &SignatureOptions) -> Result<Prepared, Strin
 
     let signature_id = add_signature_field(&mut incremental, options, capacity, &name)?;
 
-    let mut document = Vec::new();
-    incremental
-        .save_to(&mut document)
-        .map_err(|error| format!("cannot write PDF: {error}"))?;
+    let (mut document, offsets) = crate::write::save_incremental(&mut incremental)?;
 
-    // Both are looked for in the signature dictionary just written, past
-    // the original bytes: the first `/ByteRange` of a signed document is its
-    // previous signature's. The dictionary writes them before any string the
-    // caller supplied, so text in a /Reason cannot be taken for them either.
-    let body = object_body(&document, pdf.len(), signature_id)
+    // Both are looked for in the signature dictionary just written, at the
+    // offset the writer put it: the first `/ByteRange` of a signed document
+    // is its previous signature's, and the page re-written beside the
+    // dictionary may hold strings spelling one. The dictionary writes them
+    // before any string the caller supplied, so text in a /Reason cannot be
+    // taken for them either.
+    let (body, body_end) = object_span(&document, &offsets, signature_id)
         .ok_or_else(|| "the signature dictionary was not written as expected".to_string())?;
-    let (hole_start, hole_end) = reserved_span(&document[body..], capacity)
+    let dictionary = &document[body..body_end];
+    let (hole_start, hole_end) = reserved_span(dictionary, capacity)
         .map(|(start, end)| (body + start, body + end))
         .ok_or_else(|| "the reserved signature space was not written as expected".to_string())?;
-    let (range_start, range_end) = byte_range_span(&document[body..])
+    let (range_start, range_end) = byte_range_span(dictionary)
         .map(|(start, end)| (body + start, body + end))
         .ok_or_else(|| "the byte range was not written as expected".to_string())?;
     if range_end > hole_start {
@@ -742,15 +751,9 @@ mod tests {
 
     /// A document already holding a long run of zeros in brackets: the value
     /// goes into the space this signature reserved, not into that one.
-    #[test]
-    fn a_run_of_zeros_already_in_the_document_is_not_taken_for_the_reservation() {
-        let decoy = format!("<< /Junk <{}> >>", "0".repeat(4096));
-        let bodies = [
-            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_string(),
-            decoy,
-        ];
+    /// A document of the given object bodies, numbered from 1, with a
+    /// classic cross-reference table.
+    fn raw_pdf(bodies: &[String]) -> Vec<u8> {
         let mut pdf = b"%PDF-1.7\n".to_vec();
         let mut offsets = Vec::new();
         for (index, body) in bodies.iter().enumerate() {
@@ -758,13 +761,27 @@ mod tests {
             pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
         }
         let xref_at = pdf.len();
-        pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+        let size = bodies.len() + 1;
+        pdf.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
         for offset in offsets {
             pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
         }
         pdf.extend_from_slice(
-            format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n").as_bytes(),
+            format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n")
+                .as_bytes(),
         );
+        pdf
+    }
+
+    #[test]
+    fn a_run_of_zeros_already_in_the_document_is_not_taken_for_the_reservation() {
+        let decoy = format!("<< /Junk <{}> >>", "0".repeat(4096));
+        let pdf = raw_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_string(),
+            decoy,
+        ]);
 
         let document = signed(&pdf);
         let reports =
@@ -780,6 +797,41 @@ mod tests {
                 .windows(4098)
                 .any(|window| window == format!("<{}>", "0".repeat(4096)).as_bytes()),
             "the decoy is untouched"
+        );
+    }
+
+    /// The revision re-writes the page to add the widget, and the page's
+    /// strings are the document author's. One spelling the header of the
+    /// dictionary about to be written, a byte range and a reservation must
+    /// not receive the signature: the dictionary is found where the writer
+    /// put it, not by its header.
+    #[test]
+    fn a_page_string_spelling_the_signature_dictionary_does_not_take_the_signature() {
+        // Objects 1-3 exist, so the signature dictionary will be object 4.
+        let planted = format!(
+            "\n4 0 obj\n<< /ByteRange [0 9999999999 9999999999 9999999999] /Contents <{}> >>",
+            "0".repeat(DEFAULT_CAPACITY * 2)
+        );
+        let pdf = raw_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Note ({planted}) >>"),
+        ]);
+
+        let document = signed(&pdf);
+        let reports =
+            crate::verify_signatures(&document, &crate::TrustOptions::default()).expect("it reads");
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert!(
+            report.covers_whole_document && report.digest_matches && report.signature_verifies,
+            "{:?}",
+            report.problems
+        );
+        let text = String::from_utf8_lossy(&document);
+        assert!(
+            text.contains("[0 9999999999 9999999999 9999999999]"),
+            "the page's string is left as its author wrote it"
         );
     }
 }

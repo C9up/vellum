@@ -24,6 +24,11 @@ exclude = ["vendor"]
 #   turn a 2 KB file into hours of work.
 # - hayro-syntax also reports what a page's budget has left, so a call
 #   reading every page can carry one total across them.
+# - hayro: what drawing a page builds and keeps until the page is done (a
+#   page-sized mask per distinct soft mask, an RGBA copy of an image per
+#   draw, a pattern tile, a shading texture, a cached glyph) is charged to
+#   the decoded-bytes budget at its size in memory, so a few kilobytes of
+#   soft masks or stencil draws no longer ask for gigabytes.
 # - lopdf: `budget` holds a per-thread limit on what loading one document
 #   may build. Its own `max_decompressed_size` bounds one stream; the budget
 #   bounds the inflated bytes of every object and cross-reference stream
@@ -32,6 +37,7 @@ exclude = ["vendor"]
 #
 # Drop a patch once upstream carries the same bound.
 [patch.crates-io]
+hayro = { path = "vendor/hayro" }
 hayro-syntax = { path = "vendor/hayro-syntax" }
 hayro-interpret = { path = "vendor/hayro-interpret" }
 lopdf = { path = "vendor/lopdf" }

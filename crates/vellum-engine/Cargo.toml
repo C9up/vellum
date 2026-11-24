@@ -2,6 +2,9 @@
 name = "vellum-engine"
 version = "0.1.0"
 edition = "2021"
+# Declared, or cargo-about reads one off the font licences in tests/fixtures,
+# which are test data and never compiled into the binary.
+license = "MIT"
 
 [dependencies]
 # Low-level object-tree surgery on existing documents: merge, split, rotate,
@@ -49,6 +52,9 @@ usvg = "0.47"
 # pixels would ask for 30 GB; the size is checked before krilla sees them.
 # Already in the tree through krilla.
 imagesize = "0.14"
+# Inflating a gzip SVG under a ceiling, where usvg would inflate it whole.
+# Already in the tree through krilla and hayro.
+flate2 = "1"
 # The signature value itself: a CMS SignedData, its certificates, the RSA
 # signature and the ASN.1 they are all written in. These sit on the older
 # RustCrypto generation, which costs a second copy of `digest` next to the one
@@ -63,9 +69,6 @@ getrandom = "0.2"
 sha1 = "0.10"
 
 [dev-dependencies]
-# Compressing the hostile streams the tests feed the reader. Already in the
-# tree through krilla and hayro.
-flate2 = "1"
 # Building a throwaway certificate for the signature tests, so that no private
 # key is ever checked into the repository.
 x509-cert = { version = "0.2", features = ["builder"] }

@@ -68,6 +68,45 @@ describe("signing", () => {
 		expect(digest).toEqual(signer.seen[0]);
 	});
 
+	it("puts the signature in its own dictionary, not in a page string spelling one", async () => {
+		// The revision re-writes the page to add the widget. A page string
+		// spelling the header of the dictionary about to be written (object 4
+		// here), a byte range and a reservation must not receive the signature.
+		const planted = `\n4 0 obj\n<< /ByteRange [0 9999999999 9999999999 9999999999] /Contents <${"0".repeat(32768)}> >>`;
+		const source = buildPdf([
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+			`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Note (${planted}) >>`,
+		]);
+		const signer = recordingSigner();
+		const vellum = new Vellum({ signers: { internal: signer } });
+
+		const signed = await vellum.sign(source, { signer: "internal" });
+		const text = signed.toString("latin1");
+
+		// The page's string is written back as its author wrote it...
+		expect(text).toContain(planted);
+		// ...and the last /ByteRange, the dictionary sign() wrote, is filled in.
+		const ranges = [...text.matchAll(/\/ByteRange\s*\[([^\]]*)\]/g)];
+		const numbers = (ranges.at(-1)?.[1] ?? "").trim().split(/\s+/).map(Number);
+		const [start = 0, first = 0, second = 0, length = 0] = numbers;
+		expect(second + length).toBe(signed.length);
+		const digest = createHash("sha256")
+			.update(signed.subarray(start, start + first))
+			.update(signed.subarray(second, second + length))
+			.digest();
+		expect(digest).toEqual(signer.seen[0]);
+		// The value sits in the gap the byte range leaves out.
+		const value = signer.value.toString("hex").toUpperCase();
+		expect(
+			signed.subarray(first + 1, first + 1 + value.length).toString("latin1"),
+		).toBe(value);
+
+		const [report] = await vellum.verifySignatures(signed);
+		expect(report?.coversWholeDocument).toBe(true);
+		expect(report?.problems.join(" ")).not.toMatch(/byte range does not fit/);
+	});
+
 	it("appends to the document rather than rewriting it", async () => {
 		const vellum = new Vellum({ signers: { internal: recordingSigner() } });
 		const source = createBlank([A4]);

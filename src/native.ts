@@ -7,6 +7,7 @@
  * one deployment behave differently from another.
  */
 
+import { arch, platform } from "node:process";
 import { type ErrorClass, Exception } from "@c9up/flare";
 import {
 	E_VELLUM_DOCUMENT_BROKEN,
@@ -66,7 +67,8 @@ import type {
 import {
 	hasFunctions,
 	loadNativeBinary,
-	unavailableReason as vendorUnavailableReason,
+	muslHint,
+	supportedTargets,
 } from "./vendor/nativeBinary.js";
 
 /**
@@ -128,28 +130,51 @@ export type {
 	SignatureReport,
 } from "./native/generated.js";
 
-const attempt = loadNativeBinary(isNativeVellum, NATIVE_CALLS);
-const native = attempt.loaded ? attempt.binary : undefined;
-const loadError = attempt.loaded ? undefined : attempt.cause;
+/**
+ * The npm name the platform packages derive from: `@c9up/vellum-<suffix>`,
+ * one per target, each an optional dependency pinned to this version.
+ */
+const PACKAGE_NAME = "@c9up/vellum";
+
+const attempt = loadNativeBinary(isNativeVellum, NATIVE_CALLS, {
+	packageName: PACKAGE_NAME,
+});
 
 export function isNativeAvailable(): boolean {
-	return native !== undefined;
+	return attempt.loaded;
 }
 
-/** Why the engine could not be loaded, phrased for whoever has to fix it. */
-function unavailableReason(): string {
-	if (loadError !== undefined) {
-		return `failed to load (${loadError instanceof Error ? loadError.message : String(loadError)})`;
+/**
+ * What to do about a missing engine, phrased for whoever has to fix it.
+ *
+ * An application installs the platform package; a checkout of vellum builds
+ * the local binary. The load error itself is not in here: it names paths on
+ * the host, so it travels as the refusal's `cause` instead of its message.
+ */
+function remedy(
+	suffix: string | undefined,
+	platformPackage: string | undefined,
+): string {
+	if (suffix === undefined) {
+		return `no prebuilt binary for ${platform}-${arch}; vellum ships one for ${supportedTargets().join(", ")}.`;
 	}
-	return vendorUnavailableReason();
+	if (platformPackage === undefined) {
+		return `index.${suffix}.node failed to load. Rebuild it: cd packages/vellum && pnpm build:napi`;
+	}
+	return (
+		`install ${platformPackage} at the exact version of ${PACKAGE_NAME}: it is the optional dependency that carries the ${suffix} binary, ` +
+		"and an install that omits optional dependencies skips it. " +
+		`In a checkout of vellum, build it instead: pnpm build:napi.${muslHint()}`
+	);
 }
 
-/** The engine, or a refusal explaining how to get one. */
+/** The engine, or a refusal naming the fix, with the load error as its cause. */
 function engine(): NativeVellum {
-	if (native === undefined) {
-		throw new E_VELLUM_NAPI_REQUIRED([unavailableReason()]);
-	}
-	return native;
+	if (attempt.loaded) return attempt.binary;
+	throw new E_VELLUM_NAPI_REQUIRED(
+		[remedy(attempt.suffix, attempt.platformPackage)],
+		{ cause: attempt.cause },
+	);
 }
 
 /** The message of whatever the engine threw. */

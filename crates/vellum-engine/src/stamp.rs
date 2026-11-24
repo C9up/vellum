@@ -372,11 +372,7 @@ pub fn stamp_image(pdf: &[u8], image: &[u8], options: &StampOptions) -> Result<V
             .map_err(|error| format!("cannot write onto the page: {error}"))?;
     }
 
-    let mut out = Vec::new();
-    document
-        .save_to(&mut out)
-        .map_err(|error| format!("cannot write PDF: {error}"))?;
-    Ok(out)
+    crate::write::save(&mut document)
 }
 
 #[cfg(test)]

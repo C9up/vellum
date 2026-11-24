@@ -386,3 +386,105 @@ describe("vellum > reading a large document", () => {
 		expect(await vellum.formFields(pdf)).toEqual([]);
 	});
 });
+
+/** A 200 x 200 point page drawing `content`, with `extra` numbered from 5. */
+function smallPage(
+	content: string,
+	resources: string,
+	extra: Buffer[],
+): Buffer {
+	return buildPdf([
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << ${resources} >> >>`,
+		stream("", content),
+		...extra,
+	]);
+}
+
+/** `count` distinct soft masks: drawing keeps a page-sized mask for each. */
+function softMasks(count: number): Buffer {
+	const groups: Buffer[] = [];
+	let states = "";
+	let content = "";
+	for (let index = 0; index < count; index++) {
+		groups.push(
+			stream(
+				"/Type /XObject /Subtype /Form /BBox [0 0 200 200] /Group << /S /Transparency /CS /DeviceGray >>",
+				`0.${(index % 9) + 1} g 0 0 ${10 + index} 10 re f`,
+			),
+		);
+		states += `/G${index} << /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G ${5 + index} 0 R >> >> `;
+		content += `/G${index} gs 0 0 20 20 re f\n`;
+	}
+	return smallPage(content, `/ExtGState << ${states} >>`, groups);
+}
+
+/** One page-sized 1-bit stencil drawn `count` times. */
+function stencilDraws(count: number): Buffer {
+	const mask = stream(
+		"/Type /XObject /Subtype /Image /ImageMask true /Width 200 /Height 200 /BitsPerComponent 1",
+		Buffer.alloc(25 * 200),
+		true,
+	);
+	let content = "";
+	for (let index = 0; index < count; index++) {
+		content += `0.${(index % 9) + 1} 0 0 rg q ${200 - index} 0 0 200 0 0 cm /Im1 Do Q\n`;
+	}
+	return smallPage(content, "/XObject << /Im1 5 0 R >>", [mask]);
+}
+
+describe("vellum > what drawing a page keeps", () => {
+	const vellum = new Vellum({ maxDecodedBytes: MIB });
+
+	it("charges a page-sized mask per soft mask to the decoding budget", async () => {
+		await expect(vellum.render(softMasks(10))).resolves.toBeInstanceOf(Buffer);
+		await expect(vellum.render(softMasks(40))).rejects.toThrow(
+			/raise maxDecodedBytes/,
+		);
+		await expect(
+			vellum.render(softMasks(40), { maxDecodedBytes: 4 * MIB }),
+		).resolves.toBeInstanceOf(Buffer);
+	});
+
+	it("charges every draw of a stencil at the RGBA copy it keeps", async () => {
+		await expect(vellum.render(stencilDraws(4))).resolves.toBeInstanceOf(
+			Buffer,
+		);
+		await expect(vellum.render(stencilDraws(8))).rejects.toThrow(
+			/raise maxDecodedBytes/,
+		);
+	});
+});
+
+/** A page whose dictionary holds a string of `count` backslashes. */
+function backslashes(count: number): Buffer {
+	return buildPdf([
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /X (${"\\\\".repeat(count)}) >>`,
+	]);
+}
+
+describe("vellum > writing a document's strings back", () => {
+	it("costs time in proportion to them, every one escaped", async () => {
+		const vellum = new Vellum({
+			signers: {
+				seal: {
+					async sign() {
+						return Buffer.alloc(200, 0xab);
+					},
+				},
+			},
+		});
+		// A mebibyte of backslashes: the square of it was an hour of work.
+		const pdf = backslashes(1024 * 1024);
+		const started = performance.now();
+		const rotated = await vellum.rotate(pdf, 90);
+		const signed = await vellum.sign(pdf, { signer: "seal" });
+		expect(performance.now() - started).toBeLessThan(5_000);
+		for (const written of [rotated, signed]) {
+			expect(written.includes(`(${"\\\\".repeat(1024 * 1024)})`)).toBe(true);
+		}
+	});
+});

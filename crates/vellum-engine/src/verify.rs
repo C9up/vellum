@@ -1751,6 +1751,157 @@ mod tests {
         );
     }
 
+    /// `certificate` with its key usage replaced by `usage`, signed again by
+    /// `issuer_key`: what an issuer that chose those bits would have issued.
+    fn with_key_usage(
+        certificate: &[u8],
+        issuer_key: &[u8],
+        usage: x509_cert::ext::pkix::KeyUsages,
+    ) -> Vec<u8> {
+        use const_oid::AssociatedOid;
+        use rsa::pkcs8::DecodePrivateKey;
+        use rsa::signature::{SignatureEncoding, Signer};
+        use x509_cert::ext::pkix::KeyUsage;
+
+        let mut certificate = Certificate::from_der(certificate).expect("a certificate");
+        let encoded = KeyUsage(usage.into()).to_der().expect("the usage encodes");
+        for extension in certificate
+            .tbs_certificate
+            .extensions
+            .iter_mut()
+            .flatten()
+            .filter(|extension| extension.extn_id == KeyUsage::OID)
+        {
+            extension.extn_value = der::asn1::OctetString::new(encoded.clone()).expect("bytes");
+        }
+        let signing = rsa::pkcs1v15::SigningKey::<Sha256>::new(
+            rsa::RsaPrivateKey::from_pkcs8_der(issuer_key).expect("a key"),
+        );
+        let signed = signing.sign(&certificate.tbs_certificate.to_der().expect("it encodes"));
+        certificate.signature =
+            der::asn1::BitString::from_bytes(&signed.to_vec()).expect("a signature");
+        certificate.to_der().expect("the certificate encodes")
+    }
+
+    fn problems_mention(report: &SignatureReport, needle: &str) -> bool {
+        report
+            .problems
+            .iter()
+            .any(|problem| problem.contains(needle))
+    }
+
+    /// The holder of an ordinary certificate issues a child under its own
+    /// name, with a fresh key: still an issuer, and not an authority. The
+    /// child would otherwise escape the revocation of its parent and pick
+    /// its own key usage.
+    #[test]
+    fn an_ordinary_certificate_cannot_issue_under_its_own_name() {
+        let holder_name = "CN=Mallory Signing,O=Vellum";
+        let holder_key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let holder = crate::cms::tests::issued(
+            holder_name,
+            40,
+            crate::cms::tests::spki_of(&holder_key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            None,
+            |_| {},
+        );
+        let child = leaf_under(&holder_key, holder_name, holder_name, 41, |_| {});
+
+        let report = &verify_signatures(&signed_with_certificates(&[child, holder]), &anchored())
+            .expect("it reads")[0];
+        assert!(!report.trusted, "{:?}", report.chain);
+        assert!(
+            problems_mention(
+                report,
+                "Mallory Signing,O=Vellum signed a certificate without being an authority"
+            ),
+            "got {:?}",
+            report.problems
+        );
+
+        // An encryption certificate's child, allowed to sign by its own
+        // key usage, is refused the same way.
+        let cipher_key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let cipher = with_key_usage(
+            &crate::cms::tests::issued(
+                "CN=Mallory Encryption,O=Vellum",
+                42,
+                crate::cms::tests::spki_of(&cipher_key),
+                crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+                None,
+                |_| {},
+            ),
+            &crate::cms::tests::authority_key(),
+            x509_cert::ext::pkix::KeyUsages::KeyEncipherment,
+        );
+        let child = leaf_under(
+            &cipher_key,
+            "CN=Mallory Encryption,O=Vellum",
+            "CN=Mallory Encryption,O=Vellum",
+            43,
+            |_| {},
+        );
+        let report = &verify_signatures(&signed_with_certificates(&[child, cipher]), &anchored())
+            .expect("it reads")[0];
+        assert!(!report.trusted, "{:?}", report.chain);
+        assert!(
+            problems_mention(report, "without being an authority"),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// An authority whose key usage leaves out certificate signing does not
+    /// issue, CA flag or not (RFC 5280 §6.1.4 (n)).
+    #[test]
+    fn an_authority_whose_key_usage_excludes_issuing_cannot_issue() {
+        let name = "CN=Authority Without keyCertSign,O=Vellum";
+        let (key, authority) = sub_authority(name, 44, None, |_| {});
+        let authority = with_key_usage(
+            &authority,
+            &crate::cms::tests::authority_key(),
+            x509_cert::ext::pkix::KeyUsages::DigitalSignature,
+        );
+        let leaf = leaf_under(&key, name, "CN=Bob,O=Vellum", 45, |_| {});
+
+        let report = &verify_signatures(&signed_with_certificates(&[leaf, authority]), &anchored())
+            .expect("it reads")[0];
+        assert!(!report.trusted, "{:?}", report.chain);
+        assert!(
+            problems_mention(report, "its key usage does not allow it"),
+            "got {:?}",
+            report.problems
+        );
+    }
+
+    /// A key rollover: an authority re-certifies itself under the same name
+    /// with a new key, and that certificate is an authority too. It issues,
+    /// and it does not count against a path length.
+    #[test]
+    fn a_self_issued_authority_still_issues() {
+        let name = "CN=Vellum Rolled,O=Vellum";
+        let (old_key, old) = sub_authority(name, 46, Some(0), |_| {});
+        let new_key = crate::cms::tests::pkcs8(&crate::cms::tests::fresh_key());
+        let rolled = crate::cms::tests::issued_by(
+            &old_key,
+            name,
+            name,
+            47,
+            crate::cms::tests::spki_of(&new_key),
+            crate::cms::tests::window(1_577_836_800, 2_051_222_400),
+            Some(Some(0)),
+            |_| {},
+        );
+        let leaf = leaf_under(&new_key, name, "CN=Carol,O=Vellum", 48, |_| {});
+
+        let report =
+            &verify_signatures(&signed_with_certificates(&[leaf, rolled, old]), &anchored())
+                .expect("it reads")[0];
+        assert!(report.trusted, "{:?}", report.problems);
+        assert_eq!(report.chain.len(), 4, "{:?}", report.chain);
+    }
+
     /// An authority delegated to certify `O=Acme` certifies `O=Acme` only.
     #[test]
     fn a_permitted_name_constraint_is_enforced() {

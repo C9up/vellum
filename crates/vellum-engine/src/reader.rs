@@ -43,6 +43,9 @@ pub const DEFAULT_MAX_TOTAL_OPERATIONS: u64 = 10_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadLimits {
     /// Bytes of decoded stream data: content, images, fonts, object streams.
+    /// Rendering charges it too with what drawing the page keeps until it
+    /// is done: a page-sized mask per soft mask, an RGBA copy per image
+    /// draw, pattern tiles and cached glyphs.
     pub max_decoded_bytes: u64,
     /// Content operators and glyphs interpreted, nested forms included.
     pub max_operations: u64,
@@ -137,7 +140,7 @@ impl Totals {
                 ));
             }
             return Err(format!(
-                "the document decodes to more than {} MiB for one page — raise maxDecodedBytes if you meant it",
+                "the page decodes to, or keeps drawing buffers of, more than {} MiB — raise maxDecodedBytes if you meant it",
                 self.limits.max_decoded_bytes / (1024 * 1024)
             ));
         }

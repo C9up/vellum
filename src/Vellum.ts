@@ -99,6 +99,11 @@ export interface VellumConfig {
 	 * A document's size says nothing about this: a 1 MiB compressed stream
 	 * inflates to 1 GiB, once per reference to it. A page over the budget is
 	 * refused rather than drawn without the part that did not fit.
+	 *
+	 * Rendering charges it too with the buffers drawing keeps until the page
+	 * is done: one page-sized mask (a byte per pixel) per soft mask, an RGBA
+	 * copy (four bytes per pixel) per image draw, pattern tiles and cached
+	 * glyphs.
 	 */
 	maxDecodedBytes?: number;
 	/**
@@ -858,6 +863,17 @@ export class Vellum {
 				status: "unknown",
 				detail:
 					"the issuer of this certificate is not known, so nobody can be asked",
+			};
+		}
+		// The issuer answers for its certificates, and its key signs the
+		// answer. Off a trusted path that "issuer" is anybody's, and so would
+		// be the answer: an ordinary certificate issuing under its own name
+		// would vouch for its child itself.
+		if (!report.trusted) {
+			return {
+				status: "unknown",
+				detail:
+					"the certificate has no trusted path to an anchor, so its issuer's answer could not be believed",
 			};
 		}
 
